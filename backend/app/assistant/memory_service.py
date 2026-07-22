@@ -35,6 +35,10 @@ class AssistantMemoryService:
         return str(row.summary_text or "").strip()
 
     def upsert_l1_summary(self, conversation_id: UUID, summary_text: str) -> None:
+        # Plan 09 Task 4: hard tripwire when Eval scope reaches production L1 writer.
+        from app.assistant.evaluation.isolation import tripwire_production_writer
+
+        tripwire_production_writer("L1MemoryWriter")
         normalized = str(summary_text or "").strip()
         row = (
             self.db.query(AssistantConversationL1Memory)
@@ -140,6 +144,10 @@ class AssistantMemoryService:
         return self.normalize_l2_facts(row.facts, max_items=10000)
 
     def upsert_l2_facts(self, conversation_id: UUID, skill_name: str, facts: list[str]) -> None:
+        # Plan 09 Task 4: hard tripwire when Eval scope reaches production L2 writer.
+        from app.assistant.evaluation.isolation import tripwire_production_writer
+
+        tripwire_production_writer("L2MemoryWriter")
         normalized_skill_name = str(skill_name or "").strip()
         normalized_facts = self.normalize_l2_facts(facts, max_items=10000)
         if not normalized_skill_name:

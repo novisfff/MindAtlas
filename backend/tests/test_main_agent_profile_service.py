@@ -15,6 +15,13 @@ bootstrap_backend_imports()
 reset_caches()
 
 
+def _current_profile_rev(db, profile_id) -> int:
+    from app.assistant.skills.models import AssistantMainAgentProfile
+    row = db.get(AssistantMainAgentProfile, profile_id)
+    return int(getattr(row, "aggregate_revision", 0) or 0) if row is not None else 0
+
+
+
 def _valid_snapshot_dict(**overrides: Any) -> dict[str, Any]:
     from app.assistant.skills.schemas import default_main_agent_profile_snapshot
 
@@ -363,6 +370,31 @@ class MainAgentProfileSnapshotValidationTests(unittest.TestCase):
             )
 
 
+def _profile_draft_command(
+    *,
+    base_prompt: str = "admin draft prompt",
+    request_id: str | None = None,
+    expected_aggregate_revision: int = 0,
+    origin: str = "api",
+    version_name: str | None = None,
+):
+    from app.assistant.skills.schemas import (
+        MainAgentProfileSnapshotV1,
+        SaveMainAgentProfileDraftCommand,
+    )
+
+    snap = MainAgentProfileSnapshotV1.model_validate(
+        _valid_snapshot_dict(basePrompt=base_prompt)
+    )
+    return SaveMainAgentProfileDraftCommand(
+        snapshot=snap,
+        version_name=version_name,
+        origin=origin,  # type: ignore[arg-type]
+        expected_aggregate_revision=expected_aggregate_revision,
+        request_id=request_id or f"profile-draft-{uuid.uuid4().hex[:10]}",
+    )
+
+
 class MainAgentProfileServiceLifecycleTests(unittest.TestCase):
     def setUp(self) -> None:
         reset_caches()
@@ -374,6 +406,58 @@ class MainAgentProfileServiceLifecycleTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.db.close()
+
+    def test_profile_draft_save_does_not_disable_runtime(self) -> None:
+        """Draft save must preserve runtime_enabled and published pointer."""
+        from app.assistant.skills.models import AssistantMainAgentProfile
+        from app.assistant.skills.schemas import PublishMainAgentProfileCommand
+
+        profile = self.svc.ensure_default()
+        draft = self.svc.save_draft(
+            profile.id,
+            _profile_draft_command(
+                base_prompt="publishable draft before enable",
+                expected_aggregate_revision=0,
+            ),
+        )
+        published = self.svc.publish(
+            profile.id,
+            PublishMainAgentProfileCommand(
+                draft_version_id=draft.id,
+                request_id=f"pub-{uuid.uuid4().hex[:8]}",
+                expected_aggregate_revision=_current_profile_rev(self.db, profile.id),
+            ),
+        )
+        row = self.db.get(AssistantMainAgentProfile, profile.id)
+        assert row is not None
+        row.runtime_enabled = True
+        self.db.commit()
+
+        enabled = self.svc.get_default()
+        self.assertTrue(enabled.runtime_enabled)
+        self.assertEqual(enabled.published_version.id, published.id)  # type: ignore[union-attr]
+
+        rev = int(getattr(enabled, "aggregate_revision", 0) or 0)
+        # Prefer model field if summary exposes it later; fall back to ORM.
+        orm = self.db.get(AssistantMainAgentProfile, profile.id)
+        assert orm is not None
+        rev = int(orm.aggregate_revision or 0)
+
+        self.svc.save_draft(
+            enabled.id,
+            _profile_draft_command(
+                base_prompt="draft while runtime stays live",
+                expected_aggregate_revision=rev,
+            ),
+        )
+        after = self.svc.get_default()
+        self.assertTrue(after.runtime_enabled is True)
+        self.assertEqual(
+            after.published_version_id
+            if hasattr(after, "published_version_id")
+            else after.published_version.id,  # type: ignore[union-attr]
+            enabled.published_version.id,  # type: ignore[union-attr]
+        )
 
     def test_ensure_default_creates_once_and_is_idempotent(self) -> None:
         from app.assistant.skills.models import (
@@ -426,9 +510,7 @@ class MainAgentProfileServiceLifecycleTests(unittest.TestCase):
         )
         v2 = self.svc.save_draft(
             profile.id,
-            SaveMainAgentProfileDraftCommand(
-                snapshot=changed, version_name="admin-1", origin="api"
-            ),
+            SaveMainAgentProfileDraftCommand(snapshot=changed, version_name="admin-1", origin="api", expected_aggregate_revision=_current_profile_rev(self.db, profile.id), request_id="profile-draft-1"),
         )
         self.assertEqual(v2.sequence_no, 2)
         self.assertEqual(v2.version_source, "save")
@@ -439,9 +521,7 @@ class MainAgentProfileServiceLifecycleTests(unittest.TestCase):
         # Identical save reuses the existing draft and re-points pointer.
         again = self.svc.save_draft(
             profile.id,
-            SaveMainAgentProfileDraftCommand(
-                snapshot=changed, version_name="admin-1-again", origin="api"
-            ),
+            SaveMainAgentProfileDraftCommand(snapshot=changed, version_name="admin-1-again", origin="api", expected_aggregate_revision=_current_profile_rev(self.db, profile.id), request_id="profile-draft-2"),
         )
         self.assertEqual(again.id, v2.id)
         self.assertEqual(
@@ -455,7 +535,7 @@ class MainAgentProfileServiceLifecycleTests(unittest.TestCase):
         # moves the draft pointer back (never infer from "latest sequence").
         reused_bootstrap = self.svc.save_draft(
             profile.id,
-            SaveMainAgentProfileDraftCommand(snapshot=snap, origin="api"),
+            SaveMainAgentProfileDraftCommand(snapshot=snap, origin="api", expected_aggregate_revision=_current_profile_rev(self.db, profile.id), request_id="profile-draft-3"),
         )
         self.assertEqual(reused_bootstrap.id, bootstrap_draft_id)
         refreshed2 = self.svc.get_default()
@@ -478,12 +558,10 @@ class MainAgentProfileServiceLifecycleTests(unittest.TestCase):
         )
         draft = self.svc.save_draft(
             profile.id,
-            SaveMainAgentProfileDraftCommand(
-                snapshot=legacy_snap,
+            SaveMainAgentProfileDraftCommand(snapshot=legacy_snap,
                 version_name="legacy-general-chat",
                 origin="legacy",
-                source_ref={"legacySkillName": "general_chat"},
-            ),
+                source_ref={"legacySkillName": "general_chat"}, expected_aggregate_revision=_current_profile_rev(self.db, profile.id), request_id="profile-draft-4"),
         )
         self.assertEqual(draft.origin, "legacy")
         refreshed = self.svc.get_default()
@@ -497,8 +575,7 @@ class MainAgentProfileServiceLifecycleTests(unittest.TestCase):
                 snapshot=MainAgentProfileSnapshotV1.model_validate(
                     _valid_snapshot_dict(basePrompt="legacy bridge prompt v2")
                 ),
-                origin="legacy",
-            ),
+                origin="legacy", expected_aggregate_revision=_current_profile_rev(self.db, profile.id), request_id="profile-draft-108"),
         )
         refreshed2 = self.svc.get_default()
         self.assertEqual(refreshed2.migration_state, "shadow")
@@ -511,8 +588,7 @@ class MainAgentProfileServiceLifecycleTests(unittest.TestCase):
                 snapshot=MainAgentProfileSnapshotV1.model_validate(
                     _valid_snapshot_dict(basePrompt="admin takes over")
                 ),
-                origin="api",
-            ),
+                origin="api", expected_aggregate_revision=_current_profile_rev(self.db, profile.id), request_id="profile-draft-107"),
         )
         refreshed3 = self.svc.get_default()
         self.assertEqual(refreshed3.migration_state, "native")
@@ -531,8 +607,7 @@ class MainAgentProfileServiceLifecycleTests(unittest.TestCase):
                 snapshot=MainAgentProfileSnapshotV1.model_validate(
                     _valid_snapshot_dict(basePrompt="prompt-a")
                 ),
-                origin="api",
-            ),
+                origin="api", expected_aggregate_revision=_current_profile_rev(self.db, profile.id), request_id="profile-draft-106"),
         )
         b = self.svc.save_draft(
             profile.id,
@@ -540,8 +615,7 @@ class MainAgentProfileServiceLifecycleTests(unittest.TestCase):
                 snapshot=MainAgentProfileSnapshotV1.model_validate(
                     _valid_snapshot_dict(basePrompt="prompt-b")
                 ),
-                origin="api",
-            ),
+                origin="api", expected_aggregate_revision=_current_profile_rev(self.db, profile.id), request_id="profile-draft-105"),
         )
         self.assertNotEqual(a.id, b.id)
         self.assertEqual(a.sequence_no + 1, b.sequence_no)
@@ -564,12 +638,11 @@ class MainAgentProfileServiceLifecycleTests(unittest.TestCase):
                 snapshot=MainAgentProfileSnapshotV1.model_validate(
                     _valid_snapshot_dict(basePrompt="ready to publish")
                 ),
-                origin="api",
-            ),
+                origin="api", expected_aggregate_revision=_current_profile_rev(self.db, profile.id), request_id="profile-draft-104"),
         )
         published = self.svc.publish(
             profile.id,
-            PublishMainAgentProfileCommand(draft_version_id=draft.id),
+            PublishMainAgentProfileCommand(draft_version_id=draft.id, request_id="profile-pub-5", expected_aggregate_revision=_current_profile_rev(self.db, profile.id)),
         )
         self.assertEqual(published.version_source, "publish")
         self.assertEqual(published.source_draft_version_id, draft.id)
@@ -590,7 +663,7 @@ class MainAgentProfileServiceLifecycleTests(unittest.TestCase):
         # Publishing the same draft again still creates a distinct publish row.
         published2 = self.svc.publish(
             profile.id,
-            PublishMainAgentProfileCommand(draft_version_id=draft.id),
+            PublishMainAgentProfileCommand(draft_version_id=draft.id, request_id="profile-pub-6", expected_aggregate_revision=_current_profile_rev(self.db, profile.id)),
         )
         self.assertNotEqual(published2.id, published.id)
         self.assertEqual(published2.source_draft_version_id, draft.id)
@@ -633,7 +706,7 @@ class MainAgentProfileServiceLifecycleTests(unittest.TestCase):
         with self.assertRaises(ApiException) as ctx:
             self.svc.publish(
                 profile.id,
-                PublishMainAgentProfileCommand(draft_version_id=foreign_draft.id),
+                PublishMainAgentProfileCommand(draft_version_id=foreign_draft.id, request_id="profile-pub-7", expected_aggregate_revision=_current_profile_rev(self.db, profile.id)),
             )
         self.assertEqual(ctx.exception.code, 40493)
 
@@ -655,8 +728,7 @@ class MainAgentProfileServiceLifecycleTests(unittest.TestCase):
                         controlCapabilityKeys=["skill.inject"],
                     )
                 ),
-                origin="api",
-            ),
+                origin="api", expected_aggregate_revision=_current_profile_rev(self.db, profile.id), request_id="profile-draft-103"),
         )
         # Draft save is allowed for editing.
         self.assertEqual(draft.version_source, "save")
@@ -664,7 +736,7 @@ class MainAgentProfileServiceLifecycleTests(unittest.TestCase):
         with self.assertRaises(ApiException) as ctx:
             self.svc.publish(
                 profile.id,
-                PublishMainAgentProfileCommand(draft_version_id=draft.id),
+                PublishMainAgentProfileCommand(draft_version_id=draft.id, request_id="profile-pub-8", expected_aggregate_revision=_current_profile_rev(self.db, profile.id)),
             )
         self.assertEqual(ctx.exception.code, 42294)
 
@@ -686,12 +758,11 @@ class MainAgentProfileServiceLifecycleTests(unittest.TestCase):
                         controlCapabilityKeys=list(MAIN_AGENT_CONTROL_KEYS),
                     )
                 ),
-                origin="api",
-            ),
+                origin="api", expected_aggregate_revision=_current_profile_rev(self.db, profile.id), request_id="profile-draft-102"),
         )
         published = self.svc.publish(
             profile.id,
-            PublishMainAgentProfileCommand(draft_version_id=draft.id),
+            PublishMainAgentProfileCommand(draft_version_id=draft.id, request_id="profile-pub-9", expected_aggregate_revision=_current_profile_rev(self.db, profile.id)),
         )
         self.assertEqual(published.version_source, "publish")
         detail = self.svc.get_version(profile.id, published.id)
@@ -809,11 +880,10 @@ class MainAgentProfileServiceLifecycleTests(unittest.TestCase):
                 snapshot=MainAgentProfileSnapshotV1.model_validate(
                     _valid_snapshot_dict(basePrompt="still disabled runtime")
                 ),
-                origin="api",
-            ),
+                origin="api", expected_aggregate_revision=_current_profile_rev(self.db, profile.id), request_id="profile-draft-101"),
         )
         self.svc.publish(
-            profile.id, PublishMainAgentProfileCommand(draft_version_id=draft.id)
+            profile.id, PublishMainAgentProfileCommand(draft_version_id=draft.id, request_id="profile-pub-10", expected_aggregate_revision=_current_profile_rev(self.db, profile.id))
         )
 
         # Legacy row untouched.
@@ -835,6 +905,262 @@ class MainAgentProfileServiceLifecycleTests(unittest.TestCase):
 
         packages = self.db.query(AssistantSkillPackage).all()
         self.assertEqual(packages, [])
+
+
+class ProfileBindingDigestUnificationTests(unittest.TestCase):
+    """A1: eval admission and gate builder share profile_binding_digest."""
+
+    def setUp(self) -> None:
+        reset_caches()
+        from tests._db import make_session
+        from app.assistant.skills.service import MainAgentProfileService
+        from app.assistant.evaluation.repository import EvaluationRepository
+
+        self.db = make_session()
+        self.svc = MainAgentProfileService(self.db)
+        self.repo = EvaluationRepository(self.db)
+
+    def tearDown(self) -> None:
+        self.db.close()
+
+    def _passing_metrics(self) -> dict:
+        return {
+            "all_cases": 100,
+            "recall_at_8": 0.95,
+            "false_injection_rate": 0.01,
+            "direct_answer_accuracy": 0.95,
+            "capability_path_accuracy": 0.90,
+            "completion_success": 0.95,
+            "legacy_completion_success": 0.95,
+            "completion_success_delta_vs_legacy": 0.0,
+            "unauthorized_broader_side_effect_count": 0,
+            "positive_cases": 50,
+            "direct_answer_cases": 20,
+            "real_side_effect_in_test": 0,
+            "budget_policy_bypass": 0,
+            "false_completion_pending_obligation": 0,
+            "unresolved_obligation_falsely_completed": 0,
+            "schema_escape": 0,
+            "secret_exposure": 0,
+            "duplicate_write": 0,
+        }
+
+    def _seed_profile_run(
+        self,
+        *,
+        subject_kind: str,
+        profile_id,
+        version_id,
+        content_digest: str,
+        binding_digest: str,
+    ):
+        from app.assistant.evaluation.assertions import THRESHOLD_POLICY_VERSION
+        from app.assistant.evaluation.gates import current_build_revision
+
+        dataset = self.repo.create_dataset(
+            stable_key=f"ds-profile-{uuid.uuid4().hex[:8]}",
+            display_name="Profile Binding DS",
+            ownership="custom",
+        )
+        snapshot = [
+            {
+                "case_key": "c1",
+                "ordinal": 0,
+                "locale": "en",
+                "input_messages": [{"role": "user", "content": "hi"}],
+                "expected_mode": "golden_skill",
+                "case_digest": "e" * 64,
+            }
+        ]
+        self.repo.get_or_create_draft(dataset_id=dataset.id, cases_snapshot=snapshot)
+        published = self.repo.publish_dataset_version(
+            dataset_id=dataset.id,
+            expected_aggregate_revision=0,
+            expected_draft_revision=0,
+            version_name="v1",
+            actor="tester",
+        )
+        self.db.commit()
+        run = self.repo.create_run(
+            subject_kind=subject_kind,
+            subject_aggregate_id=profile_id,
+            subject_version_id=version_id,
+            subject_content_digest=content_digest,
+            subject_binding_digest=binding_digest,
+            dataset_version_ids=[published.version_id],
+            threshold_policy_version=THRESHOLD_POLICY_VERSION,
+            mode="dataset_scripted",
+            isolation_namespace_id=uuid.uuid4(),
+            runtime_contract_version=1,
+            required_build_revision=current_build_revision(),
+            isolation_digest="c" * 64,
+            actor_principal="tester",
+            evidence_provenance="real_orchestration",
+            provider_fixture_revision="test-provider-v1",
+            provider_fixture_digest="d" * 64,
+        )
+        self.repo.transition_run(run_id=run.id, expected_revision=0, to_status="running")
+        self.repo.transition_run(
+            run_id=run.id,
+            expected_revision=1,
+            to_status="completed",
+            gate_eligible=True,
+            aggregate_metrics=self._passing_metrics(),
+        )
+        self.db.commit()
+        return run
+
+    def test_profile_binding_digest_helper_is_stable(self) -> None:
+        from app.assistant.domain.digests import (
+            profile_binding_digest,
+            sha256_canonical_json,
+        )
+
+        profile_id = uuid.uuid4()
+        version_id = uuid.uuid4()
+        content = "a" * 64
+        expected = sha256_canonical_json(
+            {
+                "kind": "main_agent_profile",
+                "profile_id": str(profile_id),
+                "version_id": str(version_id),
+                "content_digest": content,
+            }
+        )
+        self.assertEqual(
+            profile_binding_digest(
+                profile_id=profile_id,
+                version_id=version_id,
+                content_digest=content,
+            ),
+            expected,
+        )
+        self.assertNotEqual(expected, "0" * 64)
+
+    def test_profile_publish_gate_matches_eval_binding_digest(self) -> None:
+        """Draft eval run + authoritative gate create share binding digest."""
+        from app.assistant.domain.digests import profile_binding_digest
+        from app.assistant.evaluation.gates import (
+            PublishGateService,
+            make_create_gate_request,
+        )
+        from app.assistant.evaluation.router import _resolve_subject_digests
+        from app.assistant.skills.models import AssistantMainAgentProfileVersion
+
+        profile = self.svc.ensure_default()
+        draft = self.svc.save_draft(
+            profile.id,
+            _profile_draft_command(
+                base_prompt="profile binding publish draft",
+                expected_aggregate_revision=_current_profile_rev(self.db, profile.id),
+            ),
+        )
+        draft_row = self.db.get(AssistantMainAgentProfileVersion, draft.id)
+        assert draft_row is not None
+        content = str(draft_row.content_digest)
+        binding = profile_binding_digest(
+            profile_id=profile.id,
+            version_id=draft.id,
+            content_digest=content,
+        )
+
+        # Eval admission path must yield the same binding pin.
+        adm_content, adm_binding = _resolve_subject_digests(
+            self.db,
+            subject_kind="main_agent_profile_draft",
+            subject_aggregate_id=profile.id,
+            subject_version_id=draft.id,
+        )
+        self.assertEqual(adm_content, content)
+        self.assertEqual(adm_binding, binding)
+
+        run = self._seed_profile_run(
+            subject_kind="main_agent_profile_draft",
+            profile_id=profile.id,
+            version_id=draft.id,
+            content_digest=content,
+            binding_digest=binding,
+        )
+        svc = PublishGateService(self.db)
+        result = svc.create_gate(
+            make_create_gate_request(
+                action="profile_publish",
+                subject_aggregate_id=profile.id,
+                subject_version_id=draft.id,
+                qualifying_eval_run_ids=(run.id,),
+            ),
+            actor_principal="tester",
+        )
+        self.assertEqual(result.gate.subject_binding_digest, binding)
+        self.assertEqual(result.gate.subject_content_digest, content)
+        self.assertEqual(result.decision, "passed")
+        self.assertNotEqual(result.gate.subject_binding_digest, "0" * 64)
+
+    def test_profile_runtime_enable_gate_matches_eval_binding_digest(self) -> None:
+        """Published version eval run creates profile_runtime_enable without drift."""
+        from app.assistant.domain.digests import profile_binding_digest
+        from app.assistant.evaluation.gates import (
+            PublishGateService,
+            make_create_gate_request,
+        )
+        from app.assistant.evaluation.router import _resolve_subject_digests
+        from app.assistant.skills.models import AssistantMainAgentProfileVersion
+        from app.assistant.skills.schemas import PublishMainAgentProfileCommand
+
+        profile = self.svc.ensure_default()
+        draft = self.svc.save_draft(
+            profile.id,
+            _profile_draft_command(
+                base_prompt="profile binding enable draft",
+                expected_aggregate_revision=_current_profile_rev(self.db, profile.id),
+            ),
+        )
+        published = self.svc.publish(
+            profile.id,
+            PublishMainAgentProfileCommand(
+                draft_version_id=draft.id,
+                request_id=f"pub-bind-{uuid.uuid4().hex[:8]}",
+                expected_aggregate_revision=_current_profile_rev(self.db, profile.id),
+            ),
+        )
+        pub_row = self.db.get(AssistantMainAgentProfileVersion, published.id)
+        assert pub_row is not None
+        content = str(pub_row.content_digest)
+        binding = profile_binding_digest(
+            profile_id=profile.id,
+            version_id=published.id,
+            content_digest=content,
+        )
+        adm_content, adm_binding = _resolve_subject_digests(
+            self.db,
+            subject_kind="main_agent_profile_version",
+            subject_aggregate_id=profile.id,
+            subject_version_id=published.id,
+        )
+        self.assertEqual(adm_content, content)
+        self.assertEqual(adm_binding, binding)
+
+        run = self._seed_profile_run(
+            subject_kind="main_agent_profile_version",
+            profile_id=profile.id,
+            version_id=published.id,
+            content_digest=content,
+            binding_digest=binding,
+        )
+        svc = PublishGateService(self.db)
+        result = svc.create_gate(
+            make_create_gate_request(
+                action="profile_runtime_enable",
+                subject_aggregate_id=profile.id,
+                subject_version_id=published.id,
+                qualifying_eval_run_ids=(run.id,),
+            ),
+            actor_principal="tester",
+        )
+        self.assertEqual(result.gate.subject_binding_digest, binding)
+        self.assertEqual(result.gate.subject_content_digest, content)
+        self.assertEqual(result.decision, "passed")
+        self.assertNotEqual(result.gate.subject_binding_digest, "0" * 64)
 
 
 if __name__ == "__main__":

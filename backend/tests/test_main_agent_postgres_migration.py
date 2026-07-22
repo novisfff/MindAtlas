@@ -29,6 +29,9 @@ PLAN07_HEAD = "7a3dac0ac2a8"
 PLAN08_LEDGER_REVISION = "984c07876856"
 PLAN08_LIFECYCLE_REVISION = "f2c3a4b5d6e7"
 PLAN08_HEAD = "d7e8f9a0b1c3"
+PLAN09_LIFECYCLE_REVISION = "403414a62e55"
+PLAN09_EVAL_REVISION = "027869a00a47"
+PLAN09_HEAD = "027869a00a47"
 DOWNGRADE_BLOCKED_TOKEN = "MINDATLAS_PLAN04_DOWNGRADE_BLOCKED_ENABLED_AGGREGATES"
 
 CATALOG_CHECK = "ck_assistant_skill_package_catalog_disabled"
@@ -157,6 +160,72 @@ def _check_names(conn, table: str) -> set[str]:
     return {str(r[0]) for r in rows}
 
 
+
+def _table_exists(conn, table: str) -> bool:
+    row = conn.execute(
+        text(
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema = 'public' AND table_name = :t"
+        ),
+        {"t": table},
+    ).first()
+    return row is not None
+
+def _prepare_plan09_downgrade(conn) -> None:
+    """Prepare DB for Plan 09 guarded downgrades without touching immutable rows.
+
+    - Complete/cancel active eval runs (downgrade refuses queued/running).
+    - Clear package archive/catalog/alias evidence (blocks 09A lifecycle downgrade).
+    Immutable eval tables are dropped by the migration itself once ACK is set.
+    """
+    if _table_exists(conn, "assistant_skill_eval_run"):
+        # Terminalize active runs so eval downgrade active-run guard passes.
+        conn.execute(
+            text(
+                "UPDATE assistant_skill_eval_run "
+                "SET status = 'cancelled', "
+                "    ended_at = COALESCE(ended_at, NOW()), "
+                "    state_revision = state_revision + 1 "
+                "WHERE status IN ('queued', 'running', 'cancelling')"
+            )
+        )
+    # gate_use pins block eval downgrade even with ACK — must remove uses.
+    # gate_use is IMMUTABLE (no DELETE). Drop the reject-delete trigger temporarily.
+    if _table_exists(conn, "assistant_skill_publish_gate_use"):
+        conn.execute(
+            text(
+                "DROP TRIGGER IF EXISTS trg_assistant_skill_publish_gate_use_reject_delete "
+                "ON assistant_skill_publish_gate_use"
+            )
+        )
+        conn.execute(text("DELETE FROM assistant_skill_publish_gate_use"))
+    if _table_exists(conn, "assistant_skill_package"):
+        conn.execute(
+            text(
+                "UPDATE assistant_skill_package SET "
+                "archived_at = NULL, archived_by = NULL, "
+                "catalog_enabled_at = NULL, catalog_enabled_by = NULL, "
+                "catalog_enabled = false"
+            )
+        )
+    if _table_exists(conn, "assistant_skill_package_alias"):
+        conn.execute(
+            text(
+                "UPDATE assistant_skill_package_alias SET "
+                "disabled_at = NULL, disabled_by = NULL "
+                "WHERE disabled_at IS NOT NULL"
+            )
+        )
+    if _table_exists(conn, "assistant_main_agent_profile"):
+        conn.execute(
+            text(
+                "UPDATE assistant_main_agent_profile SET runtime_enabled = false"
+            )
+        )
+
+
+
+
 def _clear_enabled_flags(conn) -> None:
     conn.execute(text("UPDATE assistant_skill_package SET catalog_enabled = false"))
     conn.execute(text("UPDATE assistant_main_agent_profile SET runtime_enabled = false"))
@@ -190,18 +259,25 @@ def _reset_to_plan03_parent() -> None:
                         PLAN08_LEDGER_REVISION,
                         PLAN08_LIFECYCLE_REVISION,
                         PLAN08_HEAD,
+                        PLAN09_LIFECYCLE_REVISION,
+                        PLAN09_EVAL_REVISION,
+                        PLAN09_HEAD,
                     }:
                         from tests.test_durable_interrupt_repository_postgres import (
                             _purge_interrupt_and_active,
                         )
 
                         _purge_interrupt_and_active(conn)
-            # Plan 06 downgrade refuses durable data; empty disposable DBs pass.
+            # Plan 06/08/09 downgrade guards: purge durable + Plan 09 evidence.
             prior_ack = os.environ.get(
                 "MINDATLAS_PLAN08_DOWNGRADE_ACK_PURGE_LEDGER_DATA"
             )
+            prior_eval_ack = os.environ.get("MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK")
             os.environ["MINDATLAS_PLAN08_DOWNGRADE_ACK_PURGE_LEDGER_DATA"] = "1"
+            os.environ["MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK"] = "1"
             try:
+                with engine.begin() as conn:
+                    _prepare_plan09_downgrade(conn)
                 _run_alembic("downgrade", PLAN03_HEAD)
             finally:
                 if prior_ack is None:
@@ -212,6 +288,10 @@ def _reset_to_plan03_parent() -> None:
                     os.environ[
                         "MINDATLAS_PLAN08_DOWNGRADE_ACK_PURGE_LEDGER_DATA"
                     ] = prior_ack
+                if prior_eval_ack is None:
+                    os.environ.pop("MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK", None)
+                else:
+                    os.environ["MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK"] = prior_eval_ack
         elif current != PLAN03_HEAD:
             # Mid/unknown state: ensure schema reaches parent via upgrade path.
             _run_alembic("upgrade", PLAN03_HEAD)
@@ -316,11 +396,11 @@ def test_upgrade_drops_only_disabled_checks_and_preserves_defaults() -> None:
 
     _run_alembic("upgrade", "head")
     with _engine() as engine:
-        assert _current_revision(engine) == PLAN08_HEAD
+        assert _current_revision(engine) == PLAN09_HEAD
         from alembic.script import ScriptDirectory
 
         heads = ScriptDirectory.from_config(_alembic_config()).get_heads()
-        assert heads == [PLAN08_HEAD]
+        assert heads == [PLAN09_HEAD]
 
         with engine.begin() as conn:
             pkg_checks = _check_names(conn, "assistant_skill_package")
@@ -482,7 +562,8 @@ def test_downgrade_blocked_when_any_flag_true() -> None:
     assert DOWNGRADE_BLOCKED_TOKEN in _err_text(exc_info.value)
 
     with _engine() as engine:
-        assert _current_revision(engine) == PLAN08_HEAD
+        # Failed downgrade must leave DB at current Plan 09 head.
+        assert _current_revision(engine) == PLAN09_HEAD
         with engine.begin() as conn:
             # Still true; no data deletion on blocked downgrade.
             assert (
@@ -513,7 +594,7 @@ def test_downgrade_blocked_when_any_flag_true() -> None:
     assert DOWNGRADE_BLOCKED_TOKEN in _err_text(exc_info.value)
 
     with _engine() as engine:
-        assert _current_revision(engine) == PLAN08_HEAD
+        assert _current_revision(engine) == PLAN09_HEAD
         with engine.begin() as conn:
             assert (
                 conn.execute(
@@ -537,7 +618,7 @@ def test_parent_head_parent_head_cycle_and_sole_head() -> None:
 
     _run_alembic("upgrade", "head")
     with _engine() as engine:
-        assert _current_revision(engine) == PLAN08_HEAD
+        assert _current_revision(engine) == PLAN09_HEAD
         with engine.connect() as conn:
             assert CATALOG_CHECK not in _check_names(conn, "assistant_skill_package")
             assert RUNTIME_CHECK not in _check_names(
@@ -592,11 +673,11 @@ def test_parent_head_parent_head_cycle_and_sole_head() -> None:
 
     _run_alembic("upgrade", "head")
     with _engine() as engine:
-        assert _current_revision(engine) == PLAN08_HEAD
+        assert _current_revision(engine) == PLAN09_HEAD
         from alembic.script import ScriptDirectory
 
         heads = ScriptDirectory.from_config(_alembic_config()).get_heads()
-        assert heads == [PLAN08_HEAD]
+        assert heads == [PLAN09_HEAD]
         with engine.connect() as conn:
             assert CATALOG_CHECK not in _check_names(conn, "assistant_skill_package")
             assert RUNTIME_CHECK not in _check_names(

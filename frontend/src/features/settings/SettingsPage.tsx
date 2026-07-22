@@ -1,5 +1,5 @@
 import { useNavigate } from 'react-router-dom'
-import { FileType, Tags, ChevronRight, Bot, Wrench, BrainCircuit, Network, Sparkles, Settings2, Clock3, PlugZap } from 'lucide-react'
+import { FileType, Tags, ChevronRight, Bot, Wrench, BrainCircuit, Network, Sparkles, Settings2, Clock3, PlugZap, Package } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { uiChrome, uiRadius } from '@/components/ui/styles'
 import {
@@ -9,10 +9,13 @@ import {
   SettingsSectionHeader,
 } from '@/features/settings/components/SettingsShell'
 import { cn } from '@/lib/utils'
+import { useSkillAdminSurfaceQuery } from '@/features/assistant-config/queries'
 
 export function SettingsPage() {
   const { t } = useTranslation()
   const navigate = useNavigate()
+  const surface = useSkillAdminSurfaceQuery()
+  const universalAvailable = Boolean(surface.data?.available)
 
   const contentCategories = [
     {
@@ -55,6 +58,24 @@ export function SettingsPage() {
       bgColor: 'bg-blue-500/10'
     },
     {
+      id: 'universal-skills',
+      titleKey: 'pages.settings.universalSkills',
+      descKey: 'pages.settings.universalSkillsDesc',
+      icon: Package,
+      path: '/settings/universal-skills',
+      color: 'text-indigo-500',
+      bgColor: 'bg-indigo-500/10'
+    },
+    {
+      id: 'main-agent-profile',
+      titleKey: 'pages.settings.mainAgentProfile',
+      descKey: 'pages.settings.mainAgentProfileDesc',
+      icon: Bot,
+      path: '/settings/main-agent-profile',
+      color: 'text-violet-500',
+      bgColor: 'bg-violet-500/10'
+    },
+    {
       id: 'assistant-skills',
       titleKey: 'pages.settings.assistantSkills',
       descKey: 'pages.settings.assistantSkillsDesc',
@@ -91,6 +112,13 @@ export function SettingsPage() {
       bgColor: 'bg-amber-500/10'
     }
   ]
+
+  const visibleAiCategories = aiCategories.filter((category) => {
+    if (category.id === 'universal-skills' || category.id === 'main-agent-profile') {
+      return universalAvailable
+    }
+    return true
+  })
 
   const runtimeCategories = [
     {
@@ -144,7 +172,7 @@ export function SettingsPage() {
       titleKey: 'pages.settings.aiSection',
       descKey: 'pages.settings.aiSectionDesc',
       gridClassName: 'grid-cols-1 md:grid-cols-2 xl:grid-cols-3',
-      categories: aiCategories
+      categories: visibleAiCategories
     },
     {
       id: 'runtime',

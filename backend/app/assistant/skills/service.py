@@ -6,6 +6,8 @@ in ordinary list/detail serialization.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from typing import Any, Sequence
 from uuid import UUID
@@ -27,7 +29,7 @@ from app.assistant.skills.contracts import (
     normalize_skill_lookup_name,
     validate_canonical_skill_name,
 )
-from app.assistant.skills.package_io import export_skill_package
+from app.assistant.skills.package_io import export_skill_package, parse_skill_directory_files
 from app.assistant.skills.models import (
     AssistantMainAgentProfile,
     AssistantMainAgentProfileVersion,
@@ -39,11 +41,13 @@ from app.assistant.skills.models import (
     AssistantSkillVersion,
     AssistantSkillVersionResource,
 )
+from app.assistant.skills.candidate_closure import (
+    CandidateClosureError,
+    resolve_skill_candidate_closure,
+    resolved_bindings_from_closure,
+)
 from app.assistant.skills.resolution import (
-    CapabilityReferenceResolver,
-    binding_set_digest_from_bindings,
     reconstruct_binding_snapshot,
-    version_digest_from_parts,
 )
 from app.assistant.skills.schemas import (
     CreateSkillPackageCommand,
@@ -68,6 +72,9 @@ from app.assistant.skills.schemas import (
 from app.common.exceptions import ApiException
 
 logger = logging.getLogger(__name__)
+
+_CODE_CONFLICT_REVISION = 40994
+_CODE_CONFLICT_REQUEST = 40997
 
 # Aggregate-locked distinct referenced blob budget (in addition to per-version 25 MiB).
 MAX_PACKAGE_DISTINCT_BLOB_BYTES = 256 * 1024 * 1024
@@ -184,6 +191,9 @@ class AgentSkillService:
         *,
         actor_id: UUID | None,
         origin: str,
+        admin_request_id: str | None = None,
+        admin_request_digest: str | None = None,
+        commit: bool = True,
     ) -> SkillPackageDetail:
         """Create-only import of a parsed package as a disabled native draft.
 
@@ -191,6 +201,15 @@ class AgentSkillService:
         canonical names or aliases return ``40995``. ``actor_id`` is accepted
         for audit callers but is never mixed into content digests (no column
         yet; origin alone records the import channel on the draft version).
+
+        Optional ``admin_request_id`` / ``admin_request_digest`` are stamped on
+        the aggregate in the same transaction as package insert so Plan 09
+        create/fork apply retries remain idempotent after durable success.
+
+        When ``commit=False``, the package mutation is only flushed so a caller
+        (ImportPreviewService.apply) can stamp preview consume fields in the
+        same unit of work. On failure with ``commit=False`` this method does
+        not roll back — the outer unit of work owns abort.
         """
         if origin != "import":
             raise ApiException(
@@ -201,6 +220,21 @@ class AgentSkillService:
         # actor_id is intentionally unused in Plan 01 persistence; keep the
         # parameter so API layers can pass it without inventing digest fields.
         _ = actor_id
+        if (admin_request_id is None) ^ (admin_request_digest is None):
+            raise ApiException(
+                status_code=422,
+                code=42290,
+                message=(
+                    "admin_request_id and admin_request_digest must both be "
+                    "provided or both omitted"
+                ),
+            )
+        if admin_request_digest is not None and len(admin_request_digest) != 64:
+            raise ApiException(
+                status_code=422,
+                code=42290,
+                message="admin_request_digest must be a 64-char hex digest",
+            )
 
         try:
             canonical = validate_canonical_skill_name(parsed.canonical_name)
@@ -256,12 +290,26 @@ class AgentSkillService:
             # Never auto-publish or enable catalog on import.
             package.published_version_id = None
             package.catalog_enabled = False
-            self.db.commit()
+            # Stamp admin request CAS fields before the single commit so a
+            # crash cannot leave a package without durable requestId evidence.
+            if admin_request_id is not None and admin_request_digest is not None:
+                package.last_admin_request_id = admin_request_id
+                package.last_admin_request_digest = admin_request_digest
+            if commit:
+                self.db.commit()
+            else:
+                self.db.flush()
         except ApiException as exc:
-            self.db.rollback()
+            if commit:
+                self.db.rollback()
             raise self._as_import_conflict(exc) from exc
         except IntegrityError as exc:
-            self.db.rollback()
+            if commit:
+                self.db.rollback()
+            # Preserve IntegrityError for flush-only callers so they can map
+            # global requestId unique conflicts after outer rollback.
+            if not commit:
+                raise
             raise self._as_import_conflict(self._translate_integrity_error(exc)) from exc
 
         return self.get_package(package.id)
@@ -307,17 +355,127 @@ class AgentSkillService:
         )
 
     def save_draft(self, command: SaveSkillDraftCommand) -> SkillVersionSummary:
-        parsed = command.parsed
-        try:
-            canonical = validate_canonical_skill_name(parsed.canonical_name)
-        except ValueError as exc:
-            raise ApiException(status_code=422, code=42290, message=str(exc)) from exc
+        """Append or re-point a draft with required aggregate revision CAS.
 
+        When ``preserve_previous_resources`` is True, skill.md/yaml from the
+        command are merged with bytes copied from the current draft version so
+        a content-only edit cannot wipe package resources.
+
+        Sequence: lock package → compare request ID/digest → compare expected
+        revision → apply mutation → increment revision → stamp request evidence.
+        """
         version_name = command.version_name or "draft"
         origin = command.origin
 
         try:
             package = self._lock_package(command.package_id)
+
+            request_id = (command.request_id or "").strip()
+            if not request_id:
+                raise ApiException(
+                    status_code=422,
+                    code=42291,
+                    message="requestId is required",
+                )
+            cas_payload = {
+                "package_id": str(command.package_id),
+                "version_name": version_name,
+                "origin": origin,
+                "content_digest": command.parsed.content_digest,
+                "preserve_previous_resources": bool(
+                    command.preserve_previous_resources
+                ),
+                "expected_aggregate_revision": int(
+                    command.expected_aggregate_revision
+                ),
+            }
+            body = json.dumps(
+                {"operation": "save_draft", "payload": cas_payload},
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+            digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+            last_id = getattr(package, "last_admin_request_id", None)
+            last_digest = getattr(package, "last_admin_request_digest", None)
+            # Identical retry must short-circuit before revision CAS: the first
+            # successful call already advanced aggregate_revision.
+            if last_id == request_id:
+                if last_digest == digest and package.draft_version_id is not None:
+                    draft = (
+                        self.db.query(AssistantSkillVersion)
+                        .filter(
+                            AssistantSkillVersion.id == package.draft_version_id
+                        )
+                        .one_or_none()
+                    )
+                    if draft is not None:
+                        return self._version_summary(draft)
+                raise ApiException(
+                    status_code=409,
+                    code=_CODE_CONFLICT_REQUEST,
+                    message="requestId was reused with a different payload",
+                    details={"requestId": request_id},
+                )
+
+            current_rev = int(package.aggregate_revision or 0)
+            if current_rev != int(command.expected_aggregate_revision):
+                raise ApiException(
+                    status_code=409,
+                    code=_CODE_CONFLICT_REVISION,
+                    message=(
+                        f"aggregate revision conflict: expected "
+                        f"{command.expected_aggregate_revision}, current {current_rev}"
+                    ),
+                    details={
+                        "expectedAggregateRevision": int(
+                            command.expected_aggregate_revision
+                        ),
+                        "currentAggregateRevision": current_rev,
+                        "packageId": str(package.id),
+                    },
+                )
+
+            parsed = command.parsed
+            if command.preserve_previous_resources and package.draft_version_id is not None:
+                prev = (
+                    self.db.query(AssistantSkillVersion)
+                    .filter(
+                        AssistantSkillVersion.id == package.draft_version_id,
+                        AssistantSkillVersion.skill_package_id == package.id,
+                    )
+                    .one_or_none()
+                )
+                if prev is not None:
+                    files: dict[str, bytes] = {
+                        "SKILL.md": parsed.skill_md_bytes
+                        if parsed.skill_md_bytes
+                        else (prev.skill_md or "").encode("utf-8"),
+                    }
+                    yaml_bytes = parsed.mindatlas_yaml_bytes
+                    if yaml_bytes is None and prev.mindatlas_yaml:
+                        yaml_bytes = prev.mindatlas_yaml.encode("utf-8")
+                    if yaml_bytes is not None:
+                        files["mindatlas.yaml"] = yaml_bytes
+                    for resource in self._load_stored_resources(version_id=prev.id):
+                        # Client-supplied parsed resources (if any) win by path.
+                        if resource.path not in {
+                            r.path for r in (parsed.resources or ())
+                        }:
+                            files[resource.path] = resource.content
+                    for resource in parsed.resources or ():
+                        files[resource.path] = resource.content
+                    parsed = parse_skill_directory_files(
+                        files,
+                        expected_root_name=package.canonical_name,
+                    )
+
+            try:
+                canonical = validate_canonical_skill_name(parsed.canonical_name)
+            except ValueError as exc:
+                raise ApiException(
+                    status_code=422, code=42290, message=str(exc)
+                ) from exc
 
             if package.canonical_name != canonical:
                 raise ApiException(
@@ -333,7 +491,6 @@ class AgentSkillService:
             if package.migration_state == "shadow" and origin == "api":
                 package.migration_state = "native"
 
-            # Append any new legacy aliases (append-only; never rewrite).
             if parsed.manifest and parsed.manifest.legacy_aliases:
                 self._append_legacy_aliases(
                     package_id=package.id,
@@ -353,6 +510,9 @@ class AgentSkillService:
                 package.draft_version_id = existing.id
                 package.display_name = _display_name_for(parsed)
                 package.description = parsed.frontmatter.description
+                package.aggregate_revision = current_rev + 1
+                package.last_admin_request_id = request_id
+                package.last_admin_request_digest = digest
                 self.db.commit()
                 return self._version_summary(existing)
 
@@ -367,6 +527,9 @@ class AgentSkillService:
             package.draft_version_id = version.id
             package.display_name = _display_name_for(parsed)
             package.description = parsed.frontmatter.description
+            package.aggregate_revision = current_rev + 1
+            package.last_admin_request_id = request_id
+            package.last_admin_request_digest = digest
             self.db.commit()
             return self._version_summary(version)
         except ApiException:
@@ -386,19 +549,108 @@ class AgentSkillService:
         command: PublishSkillVersionCommand,
         *,
         durable_capability_keys: Sequence[str] | None = None,
+        actor_principal: str | None = None,
     ) -> SkillVersionSummary:
         """Create an immutable publish version from an owned draft.
 
         Always inserts a new ``version_source=publish`` row. The draft is never
-        mutated. ``catalog_enabled`` remains false throughout Plan 01.
+        mutated. Publish never auto-enables catalog.
 
-        Optional ``durable_capability_keys`` (Plan 07 new-publish only) freezes a
-        validated durable execution plan extension onto matching workflow/agent
-        bindings before digests are sealed. Absent keys leave bindings
-        byte-identical to the pre-Plan-07 path.
+        Sequence: lock package → compare request ID/digest (idempotent replay) →
+        compare expected revision → apply mutation → always increment revision →
+        stamp ``last_admin_request_*`` → commit. Gate consumption remains required
+        where the live matrix already required it; CAS is additional integrity.
+
+        Plan 09 gate matrix (server-enforced):
+        - already ``catalog_enabled``: matching gate required in observe and enforce;
+        - live-disabled: ungated bootstrap only in observe; enforce requires gateId;
+        - gate-use is appended in the same transaction as the pointer advance.
         """
+        from app.assistant.evaluation.gates import (
+            PublishGateError,
+            PublishGateService,
+            build_publish_gate_subject,
+            current_build_revision,
+            current_gate_environment_pins,
+            publish_gate_mode,
+            skill_catalog_pin_digest,
+        )
+
         try:
             package = self._lock_package(package_id)
+            if getattr(package, "archived_at", None) is not None:
+                raise ApiException(
+                    status_code=409,
+                    code=40996,
+                    message="cannot publish an archived skill package; unarchive first",
+                )
+
+            request_id = (command.request_id or "").strip()
+            if not request_id:
+                raise ApiException(
+                    status_code=422,
+                    code=42291,
+                    message="requestId is required",
+                )
+            gate_id = getattr(command, "gate_id", None)
+            cas_payload = {
+                "package_id": str(package_id),
+                "draft_version_id": str(command.draft_version_id),
+                "gate_id": str(gate_id) if gate_id is not None else None,
+                "expected_aggregate_revision": int(
+                    command.expected_aggregate_revision
+                ),
+            }
+            body = json.dumps(
+                {"operation": "skill_publish", "payload": cas_payload},
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+            request_digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+            last_id = getattr(package, "last_admin_request_id", None)
+            last_digest = getattr(package, "last_admin_request_digest", None)
+            if last_id == request_id:
+                if (
+                    last_digest == request_digest
+                    and package.published_version_id is not None
+                ):
+                    published = (
+                        self.db.query(AssistantSkillVersion)
+                        .filter(
+                            AssistantSkillVersion.id == package.published_version_id
+                        )
+                        .one_or_none()
+                    )
+                    if published is not None:
+                        return self._version_summary(published)
+                raise ApiException(
+                    status_code=409,
+                    code=_CODE_CONFLICT_REQUEST,
+                    message="requestId was reused with a different payload",
+                    details={"requestId": request_id},
+                )
+
+            current_rev = int(getattr(package, "aggregate_revision", 0) or 0)
+            if current_rev != int(command.expected_aggregate_revision):
+                raise ApiException(
+                    status_code=409,
+                    code=_CODE_CONFLICT_REVISION,
+                    message=(
+                        f"aggregate revision conflict: expected "
+                        f"{command.expected_aggregate_revision}, current {current_rev}"
+                    ),
+                    details={
+                        "expectedAggregateRevision": int(
+                            command.expected_aggregate_revision
+                        ),
+                        "currentAggregateRevision": current_rev,
+                        "packageId": str(package.id),
+                    },
+                )
+
+            # Live flag is decided before any write (Plan 09 matrix).
+            live_enabled = bool(getattr(package, "catalog_enabled", False))
             draft = (
                 self.db.query(AssistantSkillVersion)
                 .filter(
@@ -417,14 +669,33 @@ class AgentSkillService:
                     ),
                 )
 
-            # Reconstruct declarations from the immutable draft payload.
-            from app.assistant.skills.package_io import parse_skill_directory_files
+            # Shared pure resolver — same closure evaluation admits against.
+            # Flushes/commits nothing; durable keys freeze plan extensions when set.
+            try:
+                closure = resolve_skill_candidate_closure(
+                    self.db,
+                    package_id=package.id,
+                    version_id=draft.id,
+                    subject_kind="skill_draft",
+                    durable_capability_keys=tuple(durable_capability_keys or ()),
+                )
+            except CandidateClosureError as exc:
+                if exc.code == "skill_content_digest_drift":
+                    raise ApiException(
+                        status_code=409,
+                        code=40993,
+                        message="draft content digest mismatch during publish reconstruction",
+                    ) from exc
+                raise ApiException(
+                    status_code=404 if "not_found" in exc.code else 422,
+                    code=40491 if "not_found" in exc.code else 42291,
+                    message=str(exc),
+                ) from exc
+            ordered_bindings = resolved_bindings_from_closure(closure)
+            set_digest = closure.binding_set_digest
+            ver_digest = closure.version_digest
 
-            files: dict[str, bytes] = {
-                "SKILL.md": (draft.skill_md or "").encode("utf-8"),
-            }
-            if draft.mindatlas_yaml:
-                files["mindatlas.yaml"] = draft.mindatlas_yaml.encode("utf-8")
+            # Resource rows still needed to copy blob refs onto the publish version.
             resource_rows = (
                 self.db.query(AssistantSkillVersionResource, AssistantSkillResourceBlob)
                 .join(
@@ -434,41 +705,59 @@ class AgentSkillService:
                 .filter(AssistantSkillVersionResource.skill_version_id == draft.id)
                 .all()
             )
-            for resource, blob in resource_rows:
-                files[resource.path] = bytes(blob.content)
 
-            parsed = parse_skill_directory_files(
-                files,
-                expected_root_name=package.canonical_name,
+            # Rebuild candidate gate subject under lock (server-derived closure).
+            # Content/binding digests always come from the draft. Environment
+            # pins are recomputed independently (never copied from the gate row)
+            # so compare fails closed on env drift.
+            gate_svc = PublishGateService(self.db)
+            mode = publish_gate_mode()
+            # gate_id already resolved above for CAS payload.
+            subject_kind = "skill_draft"
+            subject_version_id = draft.id
+            # Dataset ids: client gate_subject pins if present; else recompute
+            # from qualifying eval runs (evidence), never from gate subject fields.
+            dataset_ids = self._gate_dataset_version_ids_from_command(command)
+            if dataset_ids is None and gate_id is not None:
+                dataset_ids = self._dataset_ids_from_gate_evidence(gate_svc, gate_id)
+            catalog_digest = skill_catalog_pin_digest(
+                package_id=package.id,
+                canonical_name=str(package.canonical_name),
+                published_version_id=package.published_version_id,
+                catalog_enabled=live_enabled,
             )
-            if parsed.content_digest != draft.content_digest:
-                raise ApiException(
-                    status_code=409,
-                    code=40993,
-                    message="draft content digest mismatch during publish reconstruction",
-                )
-
-            declarations = (
-                tuple(parsed.manifest.capabilities) if parsed.manifest is not None else ()
+            # Server-derived build pin only — never trust client gate_subject.build_revision
+            # (same contract as enable path via current_build_revision()).
+            pins = current_gate_environment_pins(
+                self.db,
+                catalog_digest=catalog_digest,
+                dataset_version_ids=dataset_ids,
+                build_revision=current_build_revision(),
             )
-            # Resolve complete closures before inserting any publish row.
-            resolver = CapabilityReferenceResolver(self.db)
-            resolved_bindings = resolver.resolve_many(declarations)
-            ordered_bindings = sorted(
-                resolved_bindings,
-                key=lambda b: (b.capability_type, b.capability_key),
+            subject = build_publish_gate_subject(
+                kind=subject_kind,
+                aggregate_id=package.id,
+                version_id=subject_version_id,
+                content_digest=str(draft.content_digest),
+                binding_digest=str(set_digest),
+                profile_digest=pins.profile_digest,
+                catalog_digest=pins.catalog_digest,
+                dataset_version_ids=pins.dataset_version_ids,
+                runtime_contract_version=pins.runtime_contract_version,
+                policy_version=pins.policy_version,
+                threshold_version=pins.threshold_version,
+                build_revision=pins.build_revision,
             )
-            # Plan 07: optionally freeze durable plan extensions on new bindings.
-            if durable_capability_keys:
-                ordered_bindings = self._apply_durable_plan_extensions(
-                    ordered_bindings,
-                    durable_capability_keys=tuple(durable_capability_keys),
-                )
-            set_digest = binding_set_digest_from_bindings(ordered_bindings)
-            ver_digest = version_digest_from_parts(
-                content_digest=draft.content_digest,
-                binding_set_digest=set_digest,
-            )
+            # Client-supplied subject (if any) must match recomputed content/binding.
+            if getattr(command, "gate_subject", None):
+                drifts = self._gate_subject_client_drifts(command.gate_subject, subject)
+                if drifts:
+                    raise ApiException(
+                        status_code=409,
+                        code=40982,
+                        message=f"client gate_subject drifted from server closure: {drifts}",
+                        details={"type": "gate_subject_drift", "details": {"drifts": drifts}},
+                    )
 
             sequence_no = self._next_sequence(package.id)
             publish_version = AssistantSkillVersion(
@@ -578,9 +867,32 @@ class AgentSkillService:
                         message="published dependency_closure_digest reconstruction mismatch",
                     )
 
+            # Gate consume (or ungated non-live bootstrap) before pointer advance.
+            actor = actor_principal or "system:skill-publish"
+            try:
+                gate_svc.enforce_or_bootstrap_publish(
+                    live_enabled=live_enabled,
+                    gate_id=gate_id,
+                    subject=subject,
+                    action="skill_publish",
+                    aggregate_id=package.id,
+                    resulting_version_id=publish_version.id,
+                    actor_principal=actor,
+                    request_id=str(request_id),
+                    aggregate_revision=current_rev,
+                    mode=mode,
+                )
+            except PublishGateError as exc:
+                raise exc.to_api_exception() from exc
+
             package.published_version_id = publish_version.id
-            # Publish never auto-enables catalog; operators use set_catalog_enabled.
-            package.catalog_enabled = False
+            # Never auto-enable; preserve existing live flag (enabled requires gate).
+            if not live_enabled:
+                package.catalog_enabled = False
+            # Always advance CAS so draft/publish observers see pointer changes.
+            package.aggregate_revision = current_rev + 1
+            package.last_admin_request_id = request_id
+            package.last_admin_request_digest = request_digest
             self.db.commit()
             return self._version_summary(publish_version)
         except ApiException:
@@ -590,96 +902,56 @@ class AgentSkillService:
             self.db.rollback()
             raise self._translate_integrity_error(exc) from exc
 
-    def _apply_durable_plan_extensions(
-        self,
-        ordered_bindings: list[Any],
-        *,
-        durable_capability_keys: Sequence[str],
-    ) -> list[Any]:
-        """Attach validated durable plan extensions to matching workflow/agent bindings.
+    def _gate_dataset_version_ids_from_command(
+        self, command: Any
+    ) -> tuple[UUID, ...] | None:
+        """Extract dataset version ids from optional client gate_subject, else None."""
+        raw = getattr(command, "gate_subject", None) or {}
+        ids = raw.get("dataset_version_ids") or raw.get("datasetVersionIds") or ()
+        if ids:
+            return tuple(UUID(str(x)) for x in ids)
+        return None
 
-        Fail-closed: unknown keys, non-workflow/agent targets, or planner denials
-        abort publish. Does not mutate the input list items in place.
-        """
-        from app.assistant.capabilities.contracts import (
-            FrozenBindingProvenance,
-            project_frozen_capability_binding,
-        )
-        from app.assistant.capabilities.registry import CapabilityRegistry
-        from app.assistant.domain.digests import sha256_canonical_json
-        from app.assistant.workflow.durable.planner import (
-            DurablePlanError,
-            plan_durable_execution_from_surface,
-            publish_durable_binding_snapshot,
-        )
-
-        wanted = {str(k) for k in durable_capability_keys if str(k).strip()}
-        if not wanted:
-            return list(ordered_bindings)
-
-        matched: set[str] = set()
-        registry = CapabilityRegistry(self.db)
-        out: list[Any] = []
-        for resolved in ordered_bindings:
-            key = str(resolved.capability_key)
-            if key not in wanted:
-                out.append(resolved)
+    def _dataset_ids_from_gate_evidence(
+        self, gate_svc: Any, gate_id: UUID
+    ) -> tuple[UUID, ...] | None:
+        """Recompute dataset pins from qualifying eval runs (not gate subject fields)."""
+        gate = gate_svc.get_gate(gate_id)
+        if gate is None:
+            return None
+        seen: list[UUID] = []
+        for rid in gate.qualifying_eval_run_ids or []:
+            run = gate_svc.repo.get_run(UUID(str(rid)))
+            if run is None:
                 continue
-            if resolved.capability_type not in {"workflow", "agent"}:
-                raise ApiException(
-                    status_code=422,
-                    code=42291,
-                    message=(
-                        f"durable publish requires workflow/agent capability: {key}"
-                    ),
-                )
-            matched.add(key)
-            # Provenance digest is publish-time only; not stored on the binding row.
-            provenance_digest = sha256_canonical_json(
-                {
-                    "capabilityKey": key,
-                    "resolutionDigest": str(resolved.resolution_digest or ""),
-                    "bindingContractDigest": str(resolved.binding_contract_digest or ""),
-                }
-            )
-            frozen = project_frozen_capability_binding(
-                resolved=resolved,
-                provenance=FrozenBindingProvenance(
-                    origin="skill_version",
-                    binding_row_id=None,
-                    owner_version_id=None,
-                    source_snapshot_digest=provenance_digest,
-                ),
-            )
-            try:
-                surface = registry.resolve_surface(frozen)
-                plan = plan_durable_execution_from_surface(surface)
-                new_resolved = publish_durable_binding_snapshot(resolved, plan=plan)
-            except DurablePlanError as exc:
-                raise ApiException(
-                    status_code=422,
-                    code=42291,
-                    message=f"durable plan denied for {key}: {exc}",
-                ) from exc
-            except Exception as exc:  # noqa: BLE001
-                raise ApiException(
-                    status_code=422,
-                    code=42291,
-                    message=f"durable plan publish failed for {key}: {exc}",
-                ) from exc
-            out.append(new_resolved)
+            for ds in run.dataset_version_ids or []:
+                u = UUID(str(ds))
+                if u not in seen:
+                    seen.append(u)
+        return tuple(seen) if seen else None
 
-        missing = wanted - matched
-        if missing:
-            raise ApiException(
-                status_code=422,
-                code=42291,
-                message=(
-                    "durable_capability_keys not present in package declarations: "
-                    + ", ".join(sorted(missing))
-                ),
-            )
-        return out
+    def _gate_subject_client_drifts(
+        self, client: dict[str, Any], subject: Any
+    ) -> list[str]:
+        """Compare optional client gate_subject digests to server-recomputed subject."""
+        drifts: list[str] = []
+        sub = subject.subject
+        client_sub = client.get("subject") or client
+        mapping = [
+            ("content_digest", "contentDigest", sub.content_digest),
+            ("resolved_binding_digest", "resolvedBindingDigest", sub.resolved_binding_digest),
+            ("content_digest", "subject_content_digest", sub.content_digest),
+            ("binding_digest", "subject_binding_digest", sub.resolved_binding_digest),
+        ]
+        # Only flag when client explicitly provided a digest that mismatches.
+        for snake, camel, expected in mapping:
+            for key in (snake, camel):
+                if key in client_sub or key in client:
+                    got = client_sub.get(key, client.get(key))
+                    if got is not None and str(got).lower() != str(expected).lower():
+                        drifts.append(snake)
+                        break
+        return sorted(set(drifts))
 
     def _acquire_catalog_enable_lock(self) -> None:
         """Serialize catalog-enable across sessions (PostgreSQL advisory xact lock)."""
@@ -700,18 +972,36 @@ class AgentSkillService:
         expected_published_version_id: UUID | None = None,
         expected_version_digest: str | None = None,
         migration_state: str | None = None,
+        gate_id: UUID | None = None,
+        request_id: str | None = None,
+        actor_principal: str | None = None,
     ) -> SkillPackageSummary:
         """Toggle package aggregate ``catalog_enabled`` without mutating versions.
 
-        Enabling requires a published version. Optional expected digests make the
-        operation fail closed on concurrent pointer/content drift.
+        Enabling requires a published version **and** a fresh matching promotion
+        gate (observe and enforce). Disabling remains ungated. Optional expected
+        digests make the operation fail closed on concurrent pointer/content drift.
         """
+        from app.assistant.evaluation.gates import (
+            PublishGateError,
+            PublishGateService,
+            build_publish_gate_subject,
+            current_gate_environment_pins,
+            skill_catalog_pin_digest,
+        )
+
         try:
             if enabled:
                 # All enable entrypoints share this mutex so concurrent enablers
                 # cannot both observe an empty catalog and commit.
                 self._acquire_catalog_enable_lock()
             package = self._lock_package(package_id)
+            if enabled and getattr(package, "archived_at", None) is not None:
+                raise ApiException(
+                    status_code=409,
+                    code=40996,
+                    message="cannot enable catalog for an archived skill package",
+                )
             if enabled:
                 if package.published_version_id is None:
                     raise ApiException(
@@ -750,6 +1040,66 @@ class AgentSkillService:
                         code=40993,
                         message="published skill version_digest drifted during enable",
                     )
+                # Plan 09: close ungated enable path — require gate + consume.
+                if gate_id is None:
+                    raise ApiException(
+                        status_code=409,
+                        code=40980,
+                        message=(
+                            "matching promotion gate required for catalog enable; "
+                            "use admin gated enable_catalog or supply gate_id"
+                        ),
+                        details={
+                            "type": "gate_required",
+                            "details": {"action": "skill_catalog_enable"},
+                        },
+                    )
+                gate_svc = PublishGateService(self.db)
+                content_digest = str(version.content_digest or ("0" * 64))
+                binding_digest = str(version.binding_set_digest or ("0" * 64))
+                dataset_ids = self._dataset_ids_from_gate_evidence(gate_svc, gate_id)
+                catalog_digest = skill_catalog_pin_digest(
+                    package_id=package.id,
+                    canonical_name=str(package.canonical_name),
+                    published_version_id=package.published_version_id,
+                    content_digest=content_digest,
+                )
+                pins = current_gate_environment_pins(
+                    self.db,
+                    catalog_digest=catalog_digest,
+                    dataset_version_ids=dataset_ids,
+                )
+                subject = build_publish_gate_subject(
+                    kind="skill_version",
+                    aggregate_id=package.id,
+                    version_id=package.published_version_id,
+                    content_digest=content_digest,
+                    binding_digest=binding_digest,
+                    profile_digest=pins.profile_digest,
+                    catalog_digest=pins.catalog_digest,
+                    dataset_version_ids=pins.dataset_version_ids,
+                    runtime_contract_version=pins.runtime_contract_version,
+                    policy_version=pins.policy_version,
+                    threshold_version=pins.threshold_version,
+                    build_revision=pins.build_revision,
+                )
+                actor = actor_principal or "system:set-catalog-enabled"
+                rid = request_id or f"set-catalog-enabled:{package.id}:{gate_id}"
+                try:
+                    gate_svc.enforce_enable(
+                        gate_id=gate_id,
+                        subject=subject,
+                        action="skill_catalog_enable",
+                        aggregate_id=package.id,
+                        resulting_version_id=package.published_version_id,
+                        actor_principal=actor,
+                        request_id=str(rid),
+                        aggregate_revision=int(
+                            getattr(package, "aggregate_revision", 0) or 0
+                        ),
+                    )
+                except PublishGateError as exc:
+                    raise exc.to_api_exception() from exc
             if migration_state is not None:
                 allowed = {"shadow", "native", "cutover"}
                 if migration_state not in allowed:
@@ -770,6 +1120,18 @@ class AgentSkillService:
                     )
                 package.migration_state = migration_state
             package.catalog_enabled = bool(enabled)
+            if enabled:
+                if getattr(package, "catalog_enabled_at", None) is None:
+                    from app.common.time import utcnow
+
+                    package.catalog_enabled_at = utcnow()
+                    if getattr(package, "catalog_enabled_by", None) is None:
+                        package.catalog_enabled_by = actor_principal or "system"
+                if hasattr(package, "aggregate_revision"):
+                    package.aggregate_revision = int(package.aggregate_revision or 0) + 1
+            else:
+                package.catalog_enabled_at = None
+                package.catalog_enabled_by = None
             self.db.commit()
             return self._package_summary(package)
         except ApiException:
@@ -809,6 +1171,8 @@ class AgentSkillService:
                     normalized_alias=a.normalized_alias,
                     alias_type=a.alias_type,  # type: ignore[arg-type]
                     created_at=a.created_at,
+                    disabled_at=getattr(a, "disabled_at", None),
+                    disabled_by=getattr(a, "disabled_by", None),
                 )
                 for a in aliases
             ],
@@ -946,7 +1310,7 @@ class AgentSkillService:
                 .filter(AssistantSkillPackageAlias.normalized_alias == normalized)
                 .one_or_none()
             )
-            if alias is None:
+            if alias is None or getattr(alias, "disabled_at", None) is not None:
                 raise ApiException(
                     status_code=404,
                     code=40490,
@@ -960,6 +1324,13 @@ class AgentSkillService:
                 .one_or_none()
             )
             if package is None:
+                raise ApiException(
+                    status_code=404,
+                    code=40490,
+                    message=f"Skill package not found for name: {name!r}",
+                )
+            # Archived packages cannot be recalled via alias resolution.
+            if getattr(package, "archived_at", None) is not None:
                 raise ApiException(
                     status_code=404,
                     code=40490,
@@ -1171,7 +1542,19 @@ class AgentSkillService:
         version_name: str,
         origin: str,
         sequence_no: int,
+        extension_manifest_extra: dict[str, Any] | None = None,
     ) -> AssistantSkillVersion:
+        """Insert a new immutable save-row draft.
+
+        ``extension_manifest_extra`` is merged into the parsed extension manifest
+        at INSERT time only (e.g. restore provenance). Never used to UPDATE an
+        existing version row — Plan 01 immutability rejects version UPDATE on PG.
+        """
+        manifest = _manifest_json(parsed)
+        if extension_manifest_extra:
+            base = dict(manifest or {})
+            base.update(extension_manifest_extra)
+            manifest = base
         version = AssistantSkillVersion(
             skill_package_id=package.id,
             sequence_no=sequence_no,
@@ -1182,7 +1565,7 @@ class AgentSkillService:
             skill_md=_decode_text(parsed.skill_md_bytes) or "",
             mindatlas_yaml=_decode_text(parsed.mindatlas_yaml_bytes),
             frontmatter=_frontmatter_json(parsed),
-            extension_manifest=_manifest_json(parsed),
+            extension_manifest=manifest,
             resource_index=_resource_index_json(parsed),
             skill_md_digest=parsed.skill_md_digest,
             manifest_digest=parsed.manifest_digest,
@@ -1372,6 +1755,11 @@ class AgentSkillService:
             migration_state=package.migration_state,  # type: ignore[arg-type]
             catalog_enabled=bool(package.catalog_enabled),
             is_system=bool(package.is_system),
+            aggregate_revision=int(getattr(package, "aggregate_revision", 0) or 0),
+            archived_at=getattr(package, "archived_at", None),
+            archived_by=getattr(package, "archived_by", None),
+            catalog_enabled_at=getattr(package, "catalog_enabled_at", None),
+            catalog_enabled_by=getattr(package, "catalog_enabled_by", None),
             draft_version=draft,
             published_version=published,
             created_at=package.created_at,
@@ -1499,6 +1887,15 @@ class AgentSkillService:
 
     def _translate_integrity_error(self, exc: IntegrityError) -> ApiException:
         msg = str(getattr(exc, "orig", exc)).lower()
+        if (
+            "last_admin_request_id" in msg
+            or "uq_assistant_skill_package_last_admin_request_id" in msg
+        ):
+            return ApiException(
+                status_code=409,
+                code=40997,
+                message="requestId was reused with a different payload",
+            )
         if "canonical_name" in msg and "unique" in msg:
             return ApiException(
                 status_code=409,
@@ -1655,6 +2052,13 @@ class MainAgentProfileService:
         profile_id: UUID,
         command: SaveMainAgentProfileDraftCommand,
     ) -> MainAgentProfileVersionSummary:
+        """Append or re-point a Main Agent Profile draft with required CAS.
+
+        Does **not** mutate ``runtime_enabled`` or the published pointer. Live
+        state changes only via explicit enable/disable or gated publish paths.
+        Sequence: lock profile → compare request ID/digest → compare expected
+        revision → apply mutation → increment revision → stamp request evidence.
+        """
         try:
             snapshot = self._validate_snapshot(command.snapshot)
             payload = snapshot.normalized_payload()
@@ -1662,8 +2066,70 @@ class MainAgentProfileService:
             version_name = command.version_name or "draft"
             origin = command.origin
             source_ref = command.source_ref
+            request_id = (command.request_id or "").strip()
+            if not request_id:
+                raise ApiException(
+                    status_code=422,
+                    code=42294,
+                    message="requestId is required",
+                )
 
             profile = self._lock_profile(profile_id)
+
+            cas_payload = {
+                "profile_id": str(profile_id),
+                "version_name": version_name,
+                "origin": origin,
+                "content_digest": digest,
+                "expected_aggregate_revision": int(
+                    command.expected_aggregate_revision
+                ),
+            }
+            body = json.dumps(
+                {"operation": "profile_save_draft", "payload": cas_payload},
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+            request_digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+            last_id = getattr(profile, "last_admin_request_id", None)
+            last_digest = getattr(profile, "last_admin_request_digest", None)
+            if last_id == request_id:
+                if last_digest == request_digest and profile.draft_version_id is not None:
+                    draft = (
+                        self.db.query(AssistantMainAgentProfileVersion)
+                        .filter(
+                            AssistantMainAgentProfileVersion.id
+                            == profile.draft_version_id
+                        )
+                        .one_or_none()
+                    )
+                    if draft is not None:
+                        return self._version_summary(draft)
+                raise ApiException(
+                    status_code=409,
+                    code=_CODE_CONFLICT_REQUEST,
+                    message="requestId was reused with a different payload",
+                    details={"requestId": request_id},
+                )
+
+            current_rev = int(getattr(profile, "aggregate_revision", 0) or 0)
+            if current_rev != int(command.expected_aggregate_revision):
+                raise ApiException(
+                    status_code=409,
+                    code=_CODE_CONFLICT_REVISION,
+                    message=(
+                        f"aggregate revision conflict: expected "
+                        f"{command.expected_aggregate_revision}, current {current_rev}"
+                    ),
+                    details={
+                        "expectedAggregateRevision": int(
+                            command.expected_aggregate_revision
+                        ),
+                        "currentAggregateRevision": current_rev,
+                        "profileId": str(profile.id),
+                    },
+                )
 
             # Migration ownership:
             # - origin=legacy keeps/sets migration_state=shadow (bootstrap→shadow)
@@ -1687,7 +2153,9 @@ class MainAgentProfileService:
             )
             if existing is not None:
                 profile.draft_version_id = existing.id
-                profile.runtime_enabled = False
+                profile.aggregate_revision = current_rev + 1
+                profile.last_admin_request_id = request_id
+                profile.last_admin_request_digest = request_digest
                 self.db.commit()
                 return self._version_summary(existing)
 
@@ -1706,7 +2174,9 @@ class MainAgentProfileService:
             self.db.add(version)
             self.db.flush()
             profile.draft_version_id = version.id
-            profile.runtime_enabled = False
+            profile.aggregate_revision = current_rev + 1
+            profile.last_admin_request_id = request_id
+            profile.last_admin_request_digest = request_digest
             self.db.commit()
             return self._version_summary(version)
         except ApiException:
@@ -1720,14 +2190,100 @@ class MainAgentProfileService:
         self,
         profile_id: UUID,
         command: PublishMainAgentProfileCommand,
+        *,
+        actor_principal: str | None = None,
     ) -> MainAgentProfileVersionSummary:
         """Create an immutable publish version from an owned draft.
 
         Always inserts a new ``version_source=publish`` row. Drafts are never
-        mutated. ``runtime_enabled`` remains false throughout Plan 01.
+        mutated. Publish never auto-enables runtime.
+
+        Sequence: lock profile → compare request ID/digest (idempotent replay) →
+        compare expected revision → apply mutation → always increment revision →
+        stamp ``last_admin_request_*`` → commit. Gate consumption remains required
+        where the live matrix already required it; CAS is additional integrity.
+
+        Plan 09: already ``runtime_enabled`` requires a matching gate in both
+        observe and enforce; live-disabled bootstrap may be ungated only in observe.
         """
+        from app.assistant.evaluation.gates import (
+            PublishGateError,
+            PublishGateService,
+            build_publish_gate_subject,
+            current_gate_environment_pins,
+            profile_catalog_pin_digest,
+            publish_gate_mode,
+        )
+
         try:
             profile = self._lock_profile(profile_id)
+
+            request_id = (command.request_id or "").strip()
+            if not request_id:
+                raise ApiException(
+                    status_code=422,
+                    code=42294,
+                    message="requestId is required",
+                )
+            gate_id = getattr(command, "gate_id", None)
+            cas_payload = {
+                "profile_id": str(profile_id),
+                "draft_version_id": str(command.draft_version_id),
+                "gate_id": str(gate_id) if gate_id is not None else None,
+                "expected_aggregate_revision": int(
+                    command.expected_aggregate_revision
+                ),
+            }
+            body = json.dumps(
+                {"operation": "profile_publish", "payload": cas_payload},
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+            request_digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+            last_id = getattr(profile, "last_admin_request_id", None)
+            last_digest = getattr(profile, "last_admin_request_digest", None)
+            if last_id == request_id:
+                if (
+                    last_digest == request_digest
+                    and profile.published_version_id is not None
+                ):
+                    published = (
+                        self.db.query(AssistantMainAgentProfileVersion)
+                        .filter(
+                            AssistantMainAgentProfileVersion.id
+                            == profile.published_version_id
+                        )
+                        .one_or_none()
+                    )
+                    if published is not None:
+                        return self._version_summary(published)
+                raise ApiException(
+                    status_code=409,
+                    code=_CODE_CONFLICT_REQUEST,
+                    message="requestId was reused with a different payload",
+                    details={"requestId": request_id},
+                )
+
+            current_rev = int(getattr(profile, "aggregate_revision", 0) or 0)
+            if current_rev != int(command.expected_aggregate_revision):
+                raise ApiException(
+                    status_code=409,
+                    code=_CODE_CONFLICT_REVISION,
+                    message=(
+                        f"aggregate revision conflict: expected "
+                        f"{command.expected_aggregate_revision}, current {current_rev}"
+                    ),
+                    details={
+                        "expectedAggregateRevision": int(
+                            command.expected_aggregate_revision
+                        ),
+                        "currentAggregateRevision": current_rev,
+                        "profileId": str(profile.id),
+                    },
+                )
+
+            live_enabled = bool(getattr(profile, "runtime_enabled", False))
             draft = (
                 self.db.query(AssistantMainAgentProfileVersion)
                 .filter(
@@ -1759,6 +2315,46 @@ class MainAgentProfileService:
                     message="draft content digest mismatch during publish validation",
                 )
 
+            gate_svc = PublishGateService(self.db)
+            mode = publish_gate_mode()
+            from app.assistant.domain.digests import profile_binding_digest
+
+            subject_kind = "main_agent_profile_draft"
+            subject_version_id = draft.id
+            dataset_ids = None
+            if gate_id is not None:
+                dataset_ids = self._dataset_ids_from_gate_evidence(gate_svc, gate_id)
+            catalog_digest = profile_catalog_pin_digest(
+                profile_id=profile.id,
+                published_version_id=profile.published_version_id,
+                runtime_enabled=live_enabled,
+            )
+            pins = current_gate_environment_pins(
+                self.db,
+                profile_digest=str(digest),
+                catalog_digest=catalog_digest,
+                dataset_version_ids=dataset_ids,
+            )
+            binding_digest = profile_binding_digest(
+                profile_id=profile.id,
+                version_id=subject_version_id,
+                content_digest=str(digest),
+            )
+            subject = build_publish_gate_subject(
+                kind=subject_kind,
+                aggregate_id=profile.id,
+                version_id=subject_version_id,
+                content_digest=str(digest),
+                binding_digest=binding_digest,
+                profile_digest=pins.profile_digest,
+                catalog_digest=pins.catalog_digest,
+                dataset_version_ids=pins.dataset_version_ids,
+                runtime_contract_version=pins.runtime_contract_version,
+                policy_version=pins.policy_version,
+                threshold_version=pins.threshold_version,
+                build_revision=pins.build_revision,
+            )
+
             sequence_no = self._next_sequence(profile.id)
             publish_version = AssistantMainAgentProfileVersion(
                 profile_id=profile.id,
@@ -1774,9 +2370,30 @@ class MainAgentProfileService:
             self.db.add(publish_version)
             self.db.flush()
 
+            actor = actor_principal or "system:profile-publish"
+            try:
+                gate_svc.enforce_or_bootstrap_publish(
+                    live_enabled=live_enabled,
+                    gate_id=gate_id,
+                    subject=subject,
+                    action="profile_publish",
+                    aggregate_id=profile.id,
+                    resulting_version_id=publish_version.id,
+                    actor_principal=actor,
+                    request_id=str(request_id),
+                    aggregate_revision=current_rev,
+                    mode=mode,
+                )
+            except PublishGateError as exc:
+                raise exc.to_api_exception() from exc
+
             profile.published_version_id = publish_version.id
-            # Publish never auto-enables runtime; operators use set_runtime_enabled.
-            profile.runtime_enabled = False
+            if not live_enabled:
+                profile.runtime_enabled = False
+            # Always advance CAS so draft/publish observers see pointer changes.
+            profile.aggregate_revision = current_rev + 1
+            profile.last_admin_request_id = request_id
+            profile.last_admin_request_digest = request_digest
             self.db.commit()
             return self._version_summary(publish_version)
         except ApiException:
@@ -1794,14 +2411,81 @@ class MainAgentProfileService:
         expected_published_version_id: UUID | None = None,
         expected_content_digest: str | None = None,
         migration_state: str | None = None,
+        gate_id: UUID | None = None,
+        request_id: str | None = None,
+        expected_aggregate_revision: int | None = None,
+        actor_principal: str | None = None,
     ) -> MainAgentProfileSummary:
         """Toggle Profile aggregate ``runtime_enabled`` without mutating versions.
 
-        Enabling requires a published version. Optional expected digests make the
-        operation fail closed on concurrent pointer/content drift.
+        Enabling requires a published version and a fresh matching promotion gate
+        (observe and enforce). Optional expected digests make the operation fail
+        closed on concurrent pointer/content drift. When ``request_id`` /
+        ``expected_aggregate_revision`` are supplied, applies the same
+        idempotency-first CAS sequence as Skill package admin mutations.
         """
+        from app.assistant.evaluation.gates import (
+            PublishGateError,
+            PublishGateService,
+            build_publish_gate_subject,
+            current_gate_environment_pins,
+            profile_catalog_pin_digest,
+        )
+
         try:
             profile = self._lock_profile(profile_id)
+            rid = (request_id or "").strip() or None
+            cas_payload = {
+                "profile_id": str(profile_id),
+                "enabled": bool(enabled),
+                "expected_published_version_id": (
+                    str(expected_published_version_id)
+                    if expected_published_version_id is not None
+                    else None
+                ),
+                "expected_content_digest": expected_content_digest,
+                "migration_state": migration_state,
+                "gate_id": str(gate_id) if gate_id is not None else None,
+                "expected_aggregate_revision": expected_aggregate_revision,
+            }
+            request_digest: str | None = None
+            if rid is not None:
+                body = json.dumps(
+                    {"operation": "profile_set_runtime_enabled", "payload": cas_payload},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=str,
+                )
+                request_digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+                last_id = getattr(profile, "last_admin_request_id", None)
+                last_digest = getattr(profile, "last_admin_request_digest", None)
+                if last_id == rid:
+                    if last_digest == request_digest:
+                        return self._profile_summary(profile)
+                    raise ApiException(
+                        status_code=409,
+                        code=_CODE_CONFLICT_REQUEST,
+                        message="requestId was reused with a different payload",
+                        details={"requestId": rid},
+                    )
+
+            current_rev = int(getattr(profile, "aggregate_revision", 0) or 0)
+            if expected_aggregate_revision is not None:
+                if current_rev != int(expected_aggregate_revision):
+                    raise ApiException(
+                        status_code=409,
+                        code=_CODE_CONFLICT_REVISION,
+                        message=(
+                            f"aggregate revision conflict: expected "
+                            f"{expected_aggregate_revision}, current {current_rev}"
+                        ),
+                        details={
+                            "expectedAggregateRevision": int(expected_aggregate_revision),
+                            "currentAggregateRevision": current_rev,
+                            "profileId": str(profile.id),
+                        },
+                    )
+
             if enabled:
                 if profile.published_version_id is None:
                     raise ApiException(
@@ -1850,6 +2534,58 @@ class MainAgentProfileService:
                         code=42294,
                         message="profile must support assistant_chat before runtime enable",
                     )
+
+                gate_svc = PublishGateService(self.db)
+                from app.assistant.domain.digests import profile_binding_digest
+
+                content_digest = str(version.content_digest or ("0" * 64))
+                dataset_ids = None
+                if gate_id is not None:
+                    dataset_ids = self._dataset_ids_from_gate_evidence(gate_svc, gate_id)
+                catalog_digest = profile_catalog_pin_digest(
+                    profile_id=profile.id,
+                    published_version_id=profile.published_version_id,
+                )
+                pins = current_gate_environment_pins(
+                    self.db,
+                    profile_digest=content_digest,
+                    catalog_digest=catalog_digest,
+                    dataset_version_ids=dataset_ids,
+                )
+                binding_digest = profile_binding_digest(
+                    profile_id=profile.id,
+                    version_id=profile.published_version_id,
+                    content_digest=content_digest,
+                )
+                subject = build_publish_gate_subject(
+                    kind="main_agent_profile_version",
+                    aggregate_id=profile.id,
+                    version_id=profile.published_version_id,
+                    content_digest=content_digest,
+                    binding_digest=binding_digest,
+                    profile_digest=pins.profile_digest,
+                    catalog_digest=pins.catalog_digest,
+                    dataset_version_ids=pins.dataset_version_ids,
+                    runtime_contract_version=pins.runtime_contract_version,
+                    policy_version=pins.policy_version,
+                    threshold_version=pins.threshold_version,
+                    build_revision=pins.build_revision,
+                )
+                try:
+                    gate_svc.enforce_enable(
+                        gate_id=gate_id,
+                        subject=subject,
+                        action="profile_runtime_enable",
+                        aggregate_id=profile.id,
+                        resulting_version_id=profile.published_version_id,
+                        actor_principal=actor_principal or "system:profile-enable",
+                        request_id=str(
+                            rid or f"profile-enable:{profile.id}:{version.id}"
+                        ),
+                        aggregate_revision=current_rev,
+                    )
+                except PublishGateError as exc:
+                    raise exc.to_api_exception() from exc
             if migration_state is not None:
                 allowed = {"bootstrap", "shadow", "native", "cutover"}
                 if migration_state not in allowed:
@@ -1874,6 +2610,11 @@ class MainAgentProfileService:
                     )
                 profile.migration_state = migration_state
             profile.runtime_enabled = bool(enabled)
+            # Always advance aggregate revision on successful live-state toggle.
+            profile.aggregate_revision = current_rev + 1
+            if rid is not None and request_digest is not None:
+                profile.last_admin_request_id = rid
+                profile.last_admin_request_digest = request_digest
             self.db.commit()
             return self._profile_summary(profile)
         except ApiException:
@@ -2014,6 +2755,7 @@ class MainAgentProfileService:
             is_default=bool(profile.is_default),
             migration_state=profile.migration_state,  # type: ignore[arg-type]
             runtime_enabled=bool(profile.runtime_enabled),
+            aggregate_revision=int(getattr(profile, "aggregate_revision", 0) or 0),
             draft_version=draft,
             published_version=published,
             legacy_skill_id=profile.legacy_skill_id,

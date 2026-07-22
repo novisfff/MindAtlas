@@ -66,6 +66,13 @@ class PublishDraftRequest(CamelModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     draft_version_id: UUID = Field(alias="draftVersionId")
+    request_id: str = Field(alias="requestId", min_length=1, max_length=128)
+    expected_aggregate_revision: int = Field(
+        alias="expectedAggregateRevision", ge=0
+    )
+    # Plan 09: optional server-derived publish gate (required when live-enabled
+    # or ASSISTANT_SKILL_PUBLISH_GATE_MODE=enforce).
+    gate_id: UUID | None = Field(default=None, alias="gateId")
 
 
 class MainAgentDraftSaveRequest(CamelModel):
@@ -74,6 +81,8 @@ class MainAgentDraftSaveRequest(CamelModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     snapshot: MainAgentProfileSnapshotV1
+    expected_aggregate_revision: int = Field(alias="expectedAggregateRevision", ge=0)
+    request_id: str = Field(alias="requestId", min_length=1, max_length=128)
     version_name: str | None = Field(default=None, alias="versionName")
 
 
@@ -265,7 +274,7 @@ def _files_from_json_request(
     if body.mindatlas_yaml is not None:
         files["mindatlas.yaml"] = body.mindatlas_yaml.encode("utf-8")
 
-    for resource in body.resources:
+    for resource in (body.resources or []):
         try:
             path = normalize_package_path(resource.path, field="resource path")
         except ValueError as exc:
@@ -510,6 +519,10 @@ async def save_skill_package_draft(
             parsed=parsed,
             version_name=body.version_name,
             origin="api",
+            expected_aggregate_revision=body.expected_aggregate_revision,
+            request_id=body.request_id,
+            # Omit resources ⇒ preserve previous draft resource bytes.
+            preserve_previous_resources=body.resources is None,
         )
     )
     return ApiResponse.ok(_dto(version))
@@ -576,7 +589,12 @@ def publish_skill_package(
     service = AgentSkillService(db)
     version = service.publish(
         package_id,
-        PublishSkillVersionCommand(draft_version_id=body.draft_version_id),
+        PublishSkillVersionCommand(
+            draft_version_id=body.draft_version_id,
+            gate_id=body.gate_id,
+            request_id=body.request_id,
+            expected_aggregate_revision=body.expected_aggregate_revision,
+        ),
     )
     return ApiResponse.ok(_dto(version))
 
@@ -693,6 +711,8 @@ async def save_default_main_agent_draft(
             snapshot=body.snapshot,
             version_name=body.version_name,
             origin="api",
+            expected_aggregate_revision=body.expected_aggregate_revision,
+            request_id=body.request_id,
         ),
     )
     return ApiResponse.ok(_dto(version))
@@ -743,6 +763,7 @@ def list_default_main_agent_versions(
     )
 
 
+
 @main_agent_profile_router.post("/default/publish")
 def publish_default_main_agent_profile(
     body: PublishDraftRequest,
@@ -758,7 +779,12 @@ def publish_default_main_agent_profile(
 
     version = service.publish(
         profile.id,
-        PublishMainAgentProfileCommand(draft_version_id=body.draft_version_id),
+        PublishMainAgentProfileCommand(
+            draft_version_id=body.draft_version_id,
+            gate_id=body.gate_id,
+            request_id=body.request_id,
+            expected_aggregate_revision=body.expected_aggregate_revision,
+        ),
     )
     return ApiResponse.ok(_dto(version))
 

@@ -40,6 +40,9 @@ PLAN07_INTERRUPT_REVISION = "7a3dac0ac2a8"
 PLAN08_LEDGER_REVISION = "984c07876856"
 PLAN08_LIFECYCLE_REVISION = "f2c3a4b5d6e7"
 PLAN08_HEAD = "d7e8f9a0b1c3"
+PLAN09_LIFECYCLE_REVISION = "403414a62e55"
+PLAN09_EVAL_REVISION = "027869a00a47"
+PLAN09_HEAD = "027869a00a47"
 DOWNGRADE_BLOCKED_TOKEN = "MINDATLAS_PLAN07_DOWNGRADE_BLOCKED_INTERRUPT_DATA"
 DIGEST_A = "a" * 64
 PEPPER = "pg-test-interrupt-pepper-not-for-prod-32bxx"
@@ -182,10 +185,9 @@ def _ensure_at_interrupt_head() -> None:
     _configure_database_env(_POSTGRES_URL)
     with _engine() as engine:
         rev = _current_revision(engine)
-    if rev != PLAN08_HEAD:
-        # Repository tests use the current ORM, including Plan 08 origin
-        # linkage columns, so exercise the Plan 07 behavior on current head.
-        _run_alembic("upgrade", PLAN08_HEAD)
+    if rev != PLAN09_HEAD:
+        # Repository tests use the current ORM; exercise on sole Plan 09 head.
+        _run_alembic("upgrade", PLAN09_HEAD)
 
 
 def _make_run(session: Session, *, status: str = "waiting_approval", state_revision: int = 2):
@@ -359,6 +361,9 @@ def test_upgrade_creates_interrupt_schema_and_indexes() -> None:
             PLAN08_LEDGER_REVISION,
             PLAN08_LIFECYCLE_REVISION,
             PLAN08_HEAD,
+            PLAN09_LIFECYCLE_REVISION,
+            PLAN09_EVAL_REVISION,
+            PLAN09_HEAD,
         }
         with engine.connect() as conn:
             assert _table_exists(conn, "assistant_run_interrupt")
@@ -604,7 +609,7 @@ def test_run_first_lock_order_resolution_path() -> None:
 
 def test_upgrade_downgrade_upgrade_refuses_interrupt_history() -> None:
     _configure_database_env(_POSTGRES_URL)
-    _run_alembic("upgrade", PLAN08_HEAD)
+    _run_alembic("upgrade", PLAN09_HEAD)
 
     with _engine() as engine:
         with _session(engine) as session:
@@ -644,8 +649,8 @@ def test_upgrade_downgrade_upgrade_refuses_interrupt_history() -> None:
         with engine.connect() as conn:
             assert not _table_exists(conn, "assistant_run_interrupt")
 
-    _run_alembic("upgrade", PLAN08_HEAD)
+    _run_alembic("upgrade", PLAN09_HEAD)
     with _engine() as engine:
-        assert _current_revision(engine) == PLAN08_HEAD
+        assert _current_revision(engine) == PLAN09_HEAD
         with engine.connect() as conn:
             assert _table_exists(conn, "assistant_run_interrupt")

@@ -30,7 +30,13 @@ class ScriptedProviderAssertionError(AssertionError):
 
 @dataclass(frozen=True)
 class ScriptedRoundScript:
-    """One expected Provider round plus the stream events to emit."""
+    """One expected Provider round plus the stream events to emit.
+
+    Evaluation fixtures may set ``assert_messages=False`` and/or leave
+    ``expected_surface_digest`` empty so versioned Provider scripts do not need
+    to precompute message digests or tool surfaces. Scripts never carry
+    acceptable Skill keys or other dataset assertion fields.
+    """
 
     expected_round_index: int
     expected_messages: tuple[ProviderMessage, ...]
@@ -41,6 +47,10 @@ class ScriptedRoundScript:
     expected_generation: ProviderGenerationOptions | None = None
     expected_tool_aliases: tuple[str, ...] | None = None
     raise_error: BaseException | None = None
+    # When False, message digests / counts are not asserted (eval fixtures).
+    assert_messages: bool = True
+    # When False, tool surface digest is not asserted (eval fixtures).
+    assert_surface_digest: bool = True
 
     def __post_init__(self) -> None:
         if self.raise_error is not None:
@@ -52,7 +62,7 @@ class ScriptedRoundScript:
 
 @dataclass
 class ScriptedProvider:
-    """Queue-driven fake ProviderAdapter for loop tests."""
+    """Queue-driven fake ProviderAdapter for loop tests and evaluation fixtures."""
 
     provider_protocol: str
     adapter_key: str
@@ -62,6 +72,8 @@ class ScriptedProvider:
     scripts: list[ScriptedRoundScript] = field(default_factory=list)
     request_count: int = 0
     seen_requests: list[ProviderRoundRequest] = field(default_factory=list)
+    # When True, skip model_ref digest checks (eval fixtures may use placeholders).
+    relax_model_ref: bool = False
 
     def enqueue(self, *scripts: ScriptedRoundScript) -> None:
         for script in scripts:
@@ -113,13 +125,18 @@ class ScriptedProvider:
                 f"finalization_round mismatch: got {request.finalization_round}, "
                 f"expected {script.expected_finalization_round}"
             )
-        if request.tool_surface.surface_digest != script.expected_surface_digest:
-            raise ScriptedProviderAssertionError(
-                "tool_surface.surface_digest mismatch: "
-                f"got {request.tool_surface.surface_digest}, "
-                f"expected {script.expected_surface_digest}"
-            )
-        if request.model_ref.model_ref_digest != self.expected_model_ref.model_ref_digest:
+        if script.assert_surface_digest and script.expected_surface_digest:
+            if request.tool_surface.surface_digest != script.expected_surface_digest:
+                raise ScriptedProviderAssertionError(
+                    "tool_surface.surface_digest mismatch: "
+                    f"got {request.tool_surface.surface_digest}, "
+                    f"expected {script.expected_surface_digest}"
+                )
+        if (
+            not self.relax_model_ref
+            and request.model_ref.model_ref_digest
+            != self.expected_model_ref.model_ref_digest
+        ):
             raise ScriptedProviderAssertionError(
                 "model_ref mismatch against scripted adapter expected_model_ref"
             )
@@ -128,18 +145,19 @@ class ScriptedProvider:
                 raise ScriptedProviderAssertionError(
                     "generation options mismatch against scripted expectation"
                 )
-        if len(request.messages) != len(script.expected_messages):
-            raise ScriptedProviderAssertionError(
-                f"message count mismatch: got {len(request.messages)}, "
-                f"expected {len(script.expected_messages)}"
-            )
-        for index, (got, expected) in enumerate(
-            zip(request.messages, script.expected_messages, strict=True)
-        ):
-            if digest_provider_message(got) != digest_provider_message(expected):
+        if script.assert_messages:
+            if len(request.messages) != len(script.expected_messages):
                 raise ScriptedProviderAssertionError(
-                    f"message[{index}] digest mismatch against scripted expectation"
+                    f"message count mismatch: got {len(request.messages)}, "
+                    f"expected {len(script.expected_messages)}"
                 )
+            for index, (got, expected) in enumerate(
+                zip(request.messages, script.expected_messages, strict=True)
+            ):
+                if digest_provider_message(got) != digest_provider_message(expected):
+                    raise ScriptedProviderAssertionError(
+                        f"message[{index}] digest mismatch against scripted expectation"
+                    )
         if script.expected_tool_aliases is not None:
             got_aliases = tuple(tool.provider_alias for tool in request.tool_surface.tools)
             if got_aliases != script.expected_tool_aliases:
@@ -147,6 +165,53 @@ class ScriptedProvider:
                     f"tool aliases mismatch: got {got_aliases}, "
                     f"expected {script.expected_tool_aliases}"
                 )
+
+
+def eval_text_round_script(
+    *chunks: str,
+    round_index: int = 0,
+    tools_enabled: bool = True,
+    finalization_round: bool = False,
+) -> ScriptedRoundScript:
+    """Build a relaxed eval fixture round that only asserts round identity."""
+    return ScriptedRoundScript(
+        expected_round_index=round_index,
+        expected_messages=(),
+        expected_surface_digest="",
+        expected_tools_enabled=tools_enabled,
+        expected_finalization_round=finalization_round,
+        events=text_then_terminal(*chunks),
+        assert_messages=False,
+        assert_surface_digest=False,
+    )
+
+
+def eval_tool_call_round_script(
+    *,
+    call_id: str,
+    provider_alias: str,
+    arguments_json: str,
+    round_index: int = 0,
+    provisional_text: str | None = None,
+    tools_enabled: bool = True,
+    finalization_round: bool = False,
+) -> ScriptedRoundScript:
+    """Build a relaxed eval fixture tool-call round (no message digest pins)."""
+    return ScriptedRoundScript(
+        expected_round_index=round_index,
+        expected_messages=(),
+        expected_surface_digest="",
+        expected_tools_enabled=tools_enabled,
+        expected_finalization_round=finalization_round,
+        events=tool_call_then_terminal(
+            call_id=call_id,
+            provider_alias=provider_alias,
+            arguments_json=arguments_json,
+            provisional_text=provisional_text,
+        ),
+        assert_messages=False,
+        assert_surface_digest=False,
+    )
 
 
 def text_then_terminal(
@@ -236,6 +301,8 @@ __all__ = [
     "ScriptedProvider",
     "ScriptedProviderAssertionError",
     "ScriptedRoundScript",
+    "eval_text_round_script",
+    "eval_tool_call_round_script",
     "text_then_terminal",
     "tool_call_then_terminal",
 ]

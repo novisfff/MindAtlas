@@ -49,11 +49,25 @@ from app.assistant.skills.models import (  # noqa: E402, F401
     AssistantMainAgentProfileVersion,
     AssistantSkillCapabilityBinding,
     AssistantSkillCapabilityDependency,
+    AssistantSkillImportPreview,
     AssistantSkillPackage,
     AssistantSkillPackageAlias,
     AssistantSkillResourceBlob,
     AssistantSkillVersion,
     AssistantSkillVersionResource,
+)
+from app.assistant.evaluation.models import (  # noqa: E402, F401
+    AssistantSkillEvalArtifact,
+    AssistantSkillEvalCapabilityCall,
+    AssistantSkillEvalCase,
+    AssistantSkillEvalCaseResult,
+    AssistantSkillEvalDataset,
+    AssistantSkillEvalDatasetDraft,
+    AssistantSkillEvalDatasetVersion,
+    AssistantSkillEvalEvent,
+    AssistantSkillEvalRun,
+    AssistantSkillPublishGate,
+    AssistantSkillPublishGateUse,
 )
 from app.assistant_config.models import AssistantTool, AssistantSkill, AssistantSkillNode, AssistantSkillEdge  # noqa: E402, F401
 from app.lightrag.models import EntryIndexOutbox  # noqa: E402, F401

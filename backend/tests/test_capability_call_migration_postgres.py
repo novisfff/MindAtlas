@@ -47,6 +47,9 @@ WORKER_ID = "plan08-attempt-pg-worker"
 PLAN08_LEDGER_REVISION = "984c07876856"
 PLAN08_LIFECYCLE_REVISION = "f2c3a4b5d6e7"
 PLAN08_EVIDENCE_REVISION = "d7e8f9a0b1c3"
+PLAN09_LIFECYCLE_REVISION = "403414a62e55"
+PLAN09_EVAL_REVISION = "027869a00a47"
+PLAN09_HEAD = "027869a00a47"
 DISPOSABLE_DATABASE_PREFIX = "mindatlas_test_plan08_"
 DESTRUCTIVE_OPT_IN_ENV = "MINDATLAS_TEST_POSTGRES_DESTRUCTIVE"
 
@@ -94,6 +97,97 @@ def _alembic_config():
     return cfg
 
 
+
+def _table_exists(conn, table: str) -> bool:
+    row = conn.execute(
+        text(
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema = 'public' AND table_name = :t"
+        ),
+        {"t": table},
+    ).first()
+    return row is not None
+
+def _prepare_plan09_downgrade(conn) -> None:
+    """Prepare DB for Plan 09 guarded downgrades without touching immutable rows.
+
+    - Complete/cancel active eval runs (downgrade refuses queued/running).
+    - Clear package archive/catalog/alias evidence (blocks 09A lifecycle downgrade).
+    Immutable eval tables are dropped by the migration itself once ACK is set.
+    """
+    if _table_exists(conn, "assistant_skill_eval_run"):
+        # Terminalize active runs so eval downgrade active-run guard passes.
+        conn.execute(
+            text(
+                "UPDATE assistant_skill_eval_run "
+                "SET status = 'cancelled', "
+                "    ended_at = COALESCE(ended_at, NOW()), "
+                "    state_revision = state_revision + 1 "
+                "WHERE status IN ('queued', 'running', 'cancelling')"
+            )
+        )
+    # gate_use pins block eval downgrade even with ACK — must remove uses.
+    # gate_use is IMMUTABLE (no DELETE). Drop the reject-delete trigger temporarily.
+    if _table_exists(conn, "assistant_skill_publish_gate_use"):
+        conn.execute(
+            text(
+                "DROP TRIGGER IF EXISTS trg_assistant_skill_publish_gate_use_reject_delete "
+                "ON assistant_skill_publish_gate_use"
+            )
+        )
+        conn.execute(text("DELETE FROM assistant_skill_publish_gate_use"))
+    if _table_exists(conn, "assistant_skill_package"):
+        conn.execute(
+            text(
+                "UPDATE assistant_skill_package SET "
+                "archived_at = NULL, archived_by = NULL, "
+                "catalog_enabled_at = NULL, catalog_enabled_by = NULL, "
+                "catalog_enabled = false"
+            )
+        )
+    if _table_exists(conn, "assistant_skill_package_alias"):
+        conn.execute(
+            text(
+                "UPDATE assistant_skill_package_alias SET "
+                "disabled_at = NULL, disabled_by = NULL "
+                "WHERE disabled_at IS NOT NULL"
+            )
+        )
+    if _table_exists(conn, "assistant_main_agent_profile"):
+        conn.execute(
+            text(
+                "UPDATE assistant_main_agent_profile SET runtime_enabled = false"
+            )
+        )
+
+
+
+
+def _downgrade_to_ledger_revision() -> None:
+    """Downgrade to Plan 08 ledger revision, clearing Plan 09 blockers first."""
+    from alembic import command
+
+    prior_eval_ack = os.environ.get("MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK")
+    prior_ledger_ack = os.environ.get("MINDATLAS_PLAN08_DOWNGRADE_ACK_PURGE_LEDGER_DATA")
+    os.environ["MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK"] = "1"
+    os.environ["MINDATLAS_PLAN08_DOWNGRADE_ACK_PURGE_LEDGER_DATA"] = "1"
+    try:
+        with _engine() as engine:
+            with engine.begin() as conn:
+                _prepare_plan09_downgrade(conn)
+        command.downgrade(_alembic_config(), PLAN08_LEDGER_REVISION)
+    finally:
+        if prior_eval_ack is None:
+            os.environ.pop("MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK", None)
+        else:
+            os.environ["MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK"] = prior_eval_ack
+        if prior_ledger_ack is None:
+            os.environ.pop("MINDATLAS_PLAN08_DOWNGRADE_ACK_PURGE_LEDGER_DATA", None)
+        else:
+            os.environ["MINDATLAS_PLAN08_DOWNGRADE_ACK_PURGE_LEDGER_DATA"] = prior_ledger_ack
+
+
+
 @pytest.fixture(scope="module", autouse=True)
 def _upgrade_to_ledger_revision() -> Iterator[None]:
     from alembic import command
@@ -110,8 +204,15 @@ def _upgrade_to_ledger_revision() -> Iterator[None]:
                 current = None if row is None else str(row[0])
             except DBAPIError:
                 current = None
-    if current in {PLAN08_LIFECYCLE_REVISION, PLAN08_EVIDENCE_REVISION}:
-        command.downgrade(_alembic_config(), PLAN08_LEDGER_REVISION)
+    if current in {
+        PLAN08_LIFECYCLE_REVISION,
+        PLAN08_EVIDENCE_REVISION,
+        PLAN09_LIFECYCLE_REVISION,
+        PLAN09_EVAL_REVISION,
+        PLAN09_HEAD,
+    }:
+        # Descend Plan 09 → Plan 08 tip → ledger revision used by this suite.
+        _downgrade_to_ledger_revision()
     elif current != PLAN08_LEDGER_REVISION:
         command.upgrade(_alembic_config(), PLAN08_LEDGER_REVISION)
     yield
@@ -364,7 +465,7 @@ def test_external_effect_boundary_survives_claim_and_dispatch_trigger() -> None:
 def test_attempt_lifecycle_downgrade_restores_unconditional_rejection() -> None:
     from alembic import command
 
-    command.downgrade(_alembic_config(), PLAN08_LEDGER_REVISION)
+    _downgrade_to_ledger_revision()
     with _engine() as engine, _session(engine) as session:
         repo, attempt = _seed_claimed_attempt(session)
         with pytest.raises(DBAPIError) as exc_info:

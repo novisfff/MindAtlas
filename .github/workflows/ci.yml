@@ -48,6 +48,15 @@ jobs:
       - name: Run backend tests
         run: python -m pytest -q
 
+      - name: Plan 09 lifecycle process harness
+        run: |
+          python -m pytest -q \
+            tests/test_plan09_lifecycle_e2e.py \
+            tests/test_skill_two_gate_lifecycle.py \
+            tests/test_skill_eval_real_orchestration.py \
+            tests/test_skill_publish_gate.py \
+            tests/test_skill_eval_api.py
+
   agent-skill-migration:
     name: Agent Skill PostgreSQL Migration Gate
     runs-on: ubuntu-latest
@@ -102,9 +111,78 @@ jobs:
           PY
 
       - name: Alembic upgrade / downgrade / upgrade gate
+        env:
+          # Plan 08/09 guarded downgrades need explicit acks on disposable CI DBs.
+          MINDATLAS_PLAN08_DOWNGRADE_ACK_PURGE_LEDGER_DATA: "1"
+          MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK: "1"
         run: |
           set -euo pipefail
           alembic upgrade head
+          # Prepare Plan 09 guarded downgrade: terminalize active runs, drop
+          # gate_use delete trigger + clear uses (pin guard), clear lifecycle
+          # archive/catalog evidence. Immutable eval tables are dropped by
+          # the migration once ACK is set — do not DELETE them here.
+          python - <<'PY'
+          import os
+          from sqlalchemy import create_engine, text
+          url = os.environ["DATABASE_URL"].replace(
+              "postgresql://", "postgresql+psycopg2://", 1
+          )
+          eng = create_engine(url, future=True)
+          with eng.begin() as conn:
+              existing = {
+                  r[0]
+                  for r in conn.execute(
+                      text(
+                          "SELECT table_name FROM information_schema.tables "
+                          "WHERE table_schema='public'"
+                      )
+                  )
+              }
+              if "assistant_skill_eval_run" in existing:
+                  conn.execute(
+                      text(
+                          "UPDATE assistant_skill_eval_run "
+                          "SET status = 'cancelled', "
+                          "    ended_at = COALESCE(ended_at, NOW()), "
+                          "    state_revision = state_revision + 1 "
+                          "WHERE status IN ('queued', 'running', 'cancelling')"
+                      )
+                  )
+              if "assistant_skill_publish_gate_use" in existing:
+                  conn.execute(
+                      text(
+                          "DROP TRIGGER IF EXISTS "
+                          "trg_assistant_skill_publish_gate_use_reject_delete "
+                          "ON assistant_skill_publish_gate_use"
+                      )
+                  )
+                  conn.execute(text("DELETE FROM assistant_skill_publish_gate_use"))
+              if "assistant_skill_package" in existing:
+                  conn.execute(
+                      text(
+                          "UPDATE assistant_skill_package SET "
+                          "archived_at=NULL, archived_by=NULL, "
+                          "catalog_enabled_at=NULL, catalog_enabled_by=NULL, "
+                          "catalog_enabled=false"
+                      )
+                  )
+              if "assistant_skill_package_alias" in existing:
+                  conn.execute(
+                      text(
+                          "UPDATE assistant_skill_package_alias SET "
+                          "disabled_at=NULL, disabled_by=NULL"
+                      )
+                  )
+              if "assistant_main_agent_profile" in existing:
+                  conn.execute(
+                      text(
+                          "UPDATE assistant_main_agent_profile SET runtime_enabled=false"
+                      )
+                  )
+          eng.dispose()
+          print("plan09 downgrade prepared")
+          PY
           alembic downgrade a7b8c9d0e1f2
           alembic upgrade head
           alembic current
@@ -113,7 +191,10 @@ jobs:
       - name: PostgreSQL migration preservation and guard tests
         env:
           MINDATLAS_TEST_POSTGRES_DESTRUCTIVE: "1"
-        run: python -m pytest tests/test_agent_skill_postgres_migration.py tests/test_provider_model_probe_postgres.py tests/test_main_agent_postgres_migration.py tests/test_capability_call_migration_postgres.py -q
+          # Do NOT set PLAN09_EVAL / PLAN08 ledger ACKs here — guarded-downgrade
+          # tests must observe blocked paths. Suites set ACKs only around intentional
+          # cleanup/downgrade helpers.
+        run: python -m pytest tests/test_agent_skill_postgres_migration.py tests/test_provider_model_probe_postgres.py tests/test_main_agent_postgres_migration.py tests/test_capability_call_migration_postgres.py tests/test_agent_skill_admin_postgres_migration.py tests/test_skill_eval_repository_postgres.py tests/test_plan09_lifecycle_postgres.py -q
 
       - name: System tool golden digest smoke
         run: python -m pytest tests/test_binding_json_schema.py::test_system_tool_golden_schemas_and_contract_set_digest_are_stable -q
@@ -140,6 +221,13 @@ jobs:
 
       - name: Run frontend tests
         run: npm run test
+
+      - name: Plan 09 lifecycle frontend component evidence
+        run: |
+          npm run test -- --run \
+            src/features/assistant-config/plan09-lifecycle.e2e.test.tsx \
+            src/features/assistant-config/pages/UniversalSkillEditorPage.test.tsx \
+            src/features/assistant-config/components/Plan09RouteGate.test.tsx
 
       - name: Run frontend build
         run: npm run build

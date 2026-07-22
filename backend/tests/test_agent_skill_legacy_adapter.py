@@ -765,13 +765,28 @@ class GeneralChatBridgeTests(unittest.TestCase):
                 snapshot=admin_snap,
                 version_name="admin-native",
                 origin="api",
+                expected_aggregate_revision=int(
+                    getattr(profile, "aggregate_revision", 0) or 0
+                ),
+                request_id="profile-draft-1",
             ),
         )
         refreshed = svc.get_default()
         self.assertEqual(refreshed.migration_state, "native")
         svc.publish(
             profile.id,
-            PublishMainAgentProfileCommand(draft_version_id=draft.id),
+            PublishMainAgentProfileCommand(
+                draft_version_id=draft.id,
+                request_id="profile-pub-2",
+                expected_aggregate_revision=int(
+                    getattr(
+                        self.db.get(AssistantMainAgentProfile, profile.id),
+                        "aggregate_revision",
+                        0,
+                    )
+                    or 0
+                ),
+            ),
         )
         self.db.refresh(profile)
         admin_pub_id = profile.published_version_id

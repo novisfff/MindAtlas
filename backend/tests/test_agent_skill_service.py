@@ -13,6 +13,13 @@ bootstrap_backend_imports()
 reset_caches()
 
 
+def _current_pkg_rev(db, package_id) -> int:
+    from app.assistant.skills.models import AssistantSkillPackage
+    row = db.get(AssistantSkillPackage, package_id)
+    return int(getattr(row, "aggregate_revision", 0) or 0) if row is not None else 0
+
+
+
 FIXTURE_ROOT = (
     Path(__file__).resolve().parent / "fixtures" / "agent_skills" / "valid-weekly-review"
 )
@@ -217,11 +224,9 @@ class AgentSkillServiceLifecycleTests(unittest.TestCase):
         )
         with self.assertRaises(ApiException) as ctx:
             self.svc.save_draft(
-                SaveSkillDraftCommand(
-                    package_id=created.id,
+                SaveSkillDraftCommand(package_id=created.id,
                     parsed=_parse(name="other-name"),
-                    version_name="v2",
-                )
+                    version_name="v2", expected_aggregate_revision=_current_pkg_rev(self.db, created.id), request_id="draft-req-1")
             )
         self.assertEqual(ctx.exception.code, 40990)
 
@@ -256,8 +261,7 @@ class AgentSkillServiceLifecycleTests(unittest.TestCase):
                     skill_md=_minimal_skill_md(name="alias-pack", body="# changed\n"),
                     mindatlas=_mindatlas_yaml(legacy_aliases=["Alias_One"]),
                 ),
-                version_name="v2",
-            )
+                version_name="v2", expected_aggregate_revision=_current_pkg_rev(self.db, created.id), request_id="sav-req-208")
         )
         after = (
             self.db.query(AssistantSkillPackageAlias)
@@ -275,8 +279,7 @@ class AgentSkillServiceLifecycleTests(unittest.TestCase):
                     skill_md=_minimal_skill_md(name="alias-pack", body="# again\n"),
                     mindatlas=_mindatlas_yaml(legacy_aliases=["Alias_One", "Alias_Two"]),
                 ),
-                version_name="v3",
-            )
+                version_name="v3", expected_aggregate_revision=_current_pkg_rev(self.db, created.id), request_id="sav-req-206")
         )
         aliases = (
             self.db.query(AssistantSkillPackageAlias)
@@ -350,11 +353,9 @@ class AgentSkillServiceLifecycleTests(unittest.TestCase):
         first_id = created.draft_version.id
 
         again = self.svc.save_draft(
-            SaveSkillDraftCommand(
-                package_id=created.id,
+            SaveSkillDraftCommand(package_id=created.id,
                 parsed=parsed,
-                version_name="draft-1-again",
-            )
+                version_name="draft-1-again", expected_aggregate_revision=_current_pkg_rev(self.db, created.id), request_id="draft-req-2")
         )
         self.assertEqual(again.id, first_id)
         self.assertEqual(again.sequence_no, 1)
@@ -388,14 +389,14 @@ class AgentSkillServiceLifecycleTests(unittest.TestCase):
             skill_md=_minimal_skill_md(name="pointer-pack", body="# two\n"),
         )
         v2 = self.svc.save_draft(
-            SaveSkillDraftCommand(package_id=created.id, parsed=p2, version_name="s2")
+            SaveSkillDraftCommand(package_id=created.id, parsed=p2, version_name="s2", expected_aggregate_revision=_current_pkg_rev(self.db, created.id), request_id="draft-req-3")
         )
         self.assertEqual(v2.sequence_no, 2)
         self.assertNotEqual(v2.id, v1_id)
 
         # Re-save identical to v1: pointer moves back to v1, no new row.
         restored = self.svc.save_draft(
-            SaveSkillDraftCommand(package_id=created.id, parsed=p1, version_name="s1-again")
+            SaveSkillDraftCommand(package_id=created.id, parsed=p1, version_name="s1-again", expected_aggregate_revision=_current_pkg_rev(self.db, created.id), request_id="draft-req-4")
         )
         self.assertEqual(restored.id, v1_id)
         detail = self.svc.get_package(created.id)
@@ -441,7 +442,7 @@ class AgentSkillServiceLifecycleTests(unittest.TestCase):
             resources={"references/a.md": b"# a\n", "references/b.md": b"# b\n"},
         )
         v2 = self.svc.save_draft(
-            SaveSkillDraftCommand(package_id=created.id, parsed=p2, version_name="s2")
+            SaveSkillDraftCommand(package_id=created.id, parsed=p2, version_name="s2", expected_aggregate_revision=_current_pkg_rev(self.db, created.id), request_id="draft-req-5")
         )
         self.assertEqual(v2.sequence_no, 2)
 
@@ -601,8 +602,7 @@ class AgentSkillServiceLifecycleTests(unittest.TestCase):
                     skill_md=_minimal_skill_md(name="blob-pack", body="# v2\n"),
                     resources={"references/a.md": content, "references/b.md": content},
                 ),
-                version_name="s2",
-            )
+                version_name="s2", expected_aggregate_revision=_current_pkg_rev(self.db, created.id), request_id="sav-req-204")
         )
         self.assertEqual(self.db.query(AssistantSkillResourceBlob).count(), 1)
 
@@ -623,8 +623,7 @@ class AgentSkillServiceLifecycleTests(unittest.TestCase):
                                 "references/new.md": b"brand-new-distinct-bytes",
                             },
                         ),
-                        version_name="s3",
-                    )
+                        version_name="s3", expected_aggregate_revision=_current_pkg_rev(self.db, created.id), request_id="sav-req-202")
                 )
             self.assertEqual(ctx.exception.code, 41391)
             # Failed save must not leave unreferenced new blob.
@@ -811,11 +810,9 @@ class AgentSkillServiceLifecycleTests(unittest.TestCase):
         self.db.commit()
 
         detail = self.svc.save_draft(
-            SaveSkillDraftCommand(
-                package_id=pkg.id,
+            SaveSkillDraftCommand(package_id=pkg.id,
                 parsed=_parse(name="shadow-pack", include_mindatlas=False),
-                version_name="native-draft",
-            )
+                version_name="native-draft", expected_aggregate_revision=_current_pkg_rev(self.db, pkg.id), request_id="draft-req-6")
         )
         self.assertEqual(detail.sequence_no, 1)
         reloaded = self.db.get(AssistantSkillPackage, pkg.id)
@@ -850,12 +847,10 @@ class AgentSkillServiceLifecycleTests(unittest.TestCase):
         self.db.commit()
 
         self.svc.save_draft(
-            SaveSkillDraftCommand(
-                package_id=pkg.id,
+            SaveSkillDraftCommand(package_id=pkg.id,
                 parsed=_parse(name="shadow-legacy-pack", include_mindatlas=False),
                 version_name="legacy-draft",
-                origin="legacy",
-            )
+                origin="legacy", expected_aggregate_revision=_current_pkg_rev(self.db, pkg.id), request_id="draft-req-7")
         )
         reloaded = self.db.get(AssistantSkillPackage, pkg.id)
         assert reloaded is not None
@@ -913,9 +908,17 @@ class AgentSkillServiceLifecycleTests(unittest.TestCase):
             PublishSkillVersionCommand.model_validate(
                 {"draftVersionId": str(uuid.uuid4()), "latest": True}
             )
-        cmd = PublishSkillVersionCommand(draft_version_id=uuid.uuid4())
+        cmd = PublishSkillVersionCommand(
+            draft_version_id=uuid.uuid4(),
+            request_id="pub-req-8",
+            expected_aggregate_revision=0,
+        )
         self.assertIsInstance(cmd.draft_version_id, uuid.UUID)
-        cmd2 = PublishMainAgentProfileCommand(draft_version_id=uuid.uuid4())
+        cmd2 = PublishMainAgentProfileCommand(
+            draft_version_id=uuid.uuid4(),
+            request_id="profile-pub-9",
+            expected_aggregate_revision=0,
+        )
         self.assertIsInstance(cmd2.draft_version_id, uuid.UUID)
 
     def test_unresolved_bindings_created_for_manifest_capabilities(self) -> None:

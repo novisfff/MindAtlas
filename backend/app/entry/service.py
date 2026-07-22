@@ -102,6 +102,10 @@ class EntryService:
         Uses the caller-owned Session. Never calls commit/rollback/close/begin
         or nested Session construction. Safe for ledger-owned Unit of Work.
         """
+        # Plan 09 Task 4: hard tripwire when Eval scope reaches production Entry write.
+        from app.assistant.evaluation.isolation import tripwire_production_writer
+
+        tripwire_production_writer("EntryService.create_in_uow")
         # Idempotent reload for trusted golden path.
         if source_capability_call_id is not None:
             existing = (

@@ -82,6 +82,21 @@ class AssistantSkillPackage(UuidPrimaryKeyMixin, TimestampMixin, Base):
     legacy_source_digest = Column(String(64), nullable=True)
     catalog_enabled = Column(Boolean, nullable=False, default=False, server_default=text("false"))
     is_system = Column(Boolean, nullable=False, default=False, server_default=text("false"))
+    # Plan 09 aggregate lifecycle (revision CAS + archive/catalog evidence).
+    aggregate_revision = Column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    archived_at = Column(DateTime(timezone=True), nullable=True)
+    archived_by = Column(String(128), nullable=True)
+    catalog_enabled_at = Column(DateTime(timezone=True), nullable=True)
+    catalog_enabled_by = Column(String(128), nullable=True)
+    # Durable last-mutation idempotency (requestId retry / altered reuse).
+    last_admin_request_id = Column(String(128), nullable=True)
+    last_admin_request_digest = Column(String(64), nullable=True)
+    # Restore provenance lives on the package aggregate so content-digest reuse
+    # never mutates immutable version rows (Plan 01 PG UPDATE triggers).
+    # UUID only (no FK): avoids circular FK with assistant_skill_version.
+    last_restored_from_version_id = Column(UUID(as_uuid=True), nullable=True)
 
     draft_version = relationship(
         "AssistantSkillVersion",
@@ -119,6 +134,27 @@ class AssistantSkillPackage(UuidPrimaryKeyMixin, TimestampMixin, Base):
             "legacy_source_digest",
             name="ck_assistant_skill_package_legacy_source_digest",
         ),
+        CheckConstraint(
+            "aggregate_revision >= 0",
+            name="ck_assistant_skill_package_aggregate_revision",
+        ),
+        CheckConstraint(
+            "(archived_at IS NULL AND archived_by IS NULL) OR "
+            "(archived_at IS NOT NULL)",
+            name="ck_assistant_skill_package_archived_shape",
+        ),
+        _nullable_sha256_check(
+            "last_admin_request_digest",
+            name="ck_assistant_skill_package_last_admin_request_digest",
+        ),
+        # Global admin requestId CAS for create/fork (and package-stamped append).
+        Index(
+            "uq_assistant_skill_package_last_admin_request_id",
+            "last_admin_request_id",
+            unique=True,
+            postgresql_where=text("last_admin_request_id IS NOT NULL"),
+            sqlite_where=text("last_admin_request_id IS NOT NULL"),
+        ),
     )
 
 
@@ -137,6 +173,9 @@ class AssistantSkillPackageAlias(UuidPrimaryKeyMixin, Base):
     normalized_alias = Column(String(512), nullable=False, unique=True, index=True)
     alias_type = Column(String(32), nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+    # Plan 09: soft-disable custom aliases; names remain reserved (never delete/reassign).
+    disabled_at = Column(DateTime(timezone=True), nullable=True)
+    disabled_by = Column(String(128), nullable=True)
 
     skill_package = relationship(
         "AssistantSkillPackage",
@@ -148,6 +187,11 @@ class AssistantSkillPackageAlias(UuidPrimaryKeyMixin, Base):
         CheckConstraint(
             "alias_type IN ('canonical','legacy','custom')",
             name="ck_assistant_skill_package_alias_type",
+        ),
+        CheckConstraint(
+            "(disabled_at IS NULL AND disabled_by IS NULL) OR "
+            "(disabled_at IS NOT NULL AND alias_type = 'custom')",
+            name="ck_assistant_skill_package_alias_disabled_shape",
         ),
     )
 
@@ -694,6 +738,12 @@ class AssistantMainAgentProfile(UuidPrimaryKeyMixin, TimestampMixin, Base):
     )
     legacy_source_digest = Column(String(64), nullable=True)
     runtime_enabled = Column(Boolean, nullable=False, default=False, server_default=text("false"))
+    # Plan 09 aggregate CAS + durable last-mutation idempotency (mirrors packages).
+    aggregate_revision = Column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    last_admin_request_id = Column(String(128), nullable=True)
+    last_admin_request_digest = Column(String(64), nullable=True)
 
     draft_version = relationship(
         "AssistantMainAgentProfileVersion",
@@ -723,6 +773,14 @@ class AssistantMainAgentProfile(UuidPrimaryKeyMixin, TimestampMixin, Base):
         _nullable_sha256_check(
             "legacy_source_digest",
             name="ck_assistant_main_agent_profile_legacy_source_digest",
+        ),
+        CheckConstraint(
+            "aggregate_revision >= 0",
+            name="ck_assistant_main_agent_profile_aggregate_revision",
+        ),
+        _nullable_sha256_check(
+            "last_admin_request_digest",
+            name="ck_assistant_main_agent_profile_last_admin_request_digest",
         ),
         Index(
             "uq_assistant_main_agent_profile_default",
@@ -812,5 +870,116 @@ class AssistantMainAgentProfileVersion(UuidPrimaryKeyMixin, Base):
             "ix_assistant_main_agent_profile_version_created",
             "profile_id",
             "created_at",
+        ),
+    )
+
+
+class AssistantSkillImportPreview(UuidPrimaryKeyMixin, TimestampMixin, Base):
+    """Durable skill-package import preview (Plan 09 remediation Task 3).
+
+    Owns bounded ZIP bytes, preview digests, consume/idempotency state, and
+    request-id audit so preview/apply works across workers and restarts.
+    """
+
+    __tablename__ = "assistant_skill_import_preview"
+
+    principal_id = Column(String(128), nullable=False)
+    principal_role = Column(String(32), nullable=False)
+    actor_scope_digest = Column(String(64), nullable=False)
+    mode = Column(String(32), nullable=False)
+    target_package_id = Column(UUID(as_uuid=True), nullable=True, index=True)
+    expected_aggregate_revision = Column(Integer, nullable=True)
+    candidate_canonical_name = Column(String(64), nullable=False)
+    fork_canonical_name = Column(String(64), nullable=True)
+    upload_digest = Column(String(64), nullable=False)
+    candidate_content_digest = Column(String(64), nullable=False)
+    preview_digest = Column(String(64), nullable=False)
+    findings = Column(JSON, nullable=False, default=list)
+    structural_diff = Column(JSON, nullable=False, default=list)
+    resource_index = Column(JSON, nullable=False, default=list)
+    capability_keys = Column(JSON, nullable=False, default=list)
+    archive_bytes = Column(LargeBinary, nullable=True)
+    expires_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    consumed = Column(Boolean, nullable=False, default=False, server_default=text("false"))
+    applied_package_id = Column(UUID(as_uuid=True), nullable=True, index=True)
+    applied_request_id = Column(String(128), nullable=True)
+    applied_request_digest = Column(String(64), nullable=True)
+    applied_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "mode IN ('create', 'append_to_existing', 'fork_as_new')",
+            name="ck_assistant_skill_import_preview_mode",
+        ),
+        CheckConstraint(
+            "principal_role IN ('operator', 'viewer')",
+            name="ck_assistant_skill_import_preview_principal_role",
+        ),
+        _sha256_check(
+            "actor_scope_digest",
+            name="ck_assistant_skill_import_preview_actor_scope_digest",
+        ),
+        _sha256_check(
+            "upload_digest",
+            name="ck_assistant_skill_import_preview_upload_digest",
+        ),
+        _sha256_check(
+            "candidate_content_digest",
+            name="ck_assistant_skill_import_preview_content_digest",
+        ),
+        _sha256_check(
+            "preview_digest",
+            name="ck_assistant_skill_import_preview_preview_digest",
+        ),
+        _nullable_sha256_check(
+            "applied_request_digest",
+            name="ck_assistant_skill_import_preview_applied_request_digest",
+        ),
+        CheckConstraint(
+            "("
+            "mode = 'create' AND target_package_id IS NULL "
+            "AND expected_aggregate_revision IS NULL "
+            "AND fork_canonical_name IS NULL"
+            ") OR ("
+            "mode = 'append_to_existing' AND target_package_id IS NOT NULL "
+            "AND expected_aggregate_revision IS NOT NULL "
+            "AND expected_aggregate_revision >= 0 "
+            "AND fork_canonical_name IS NULL"
+            ") OR ("
+            "mode = 'fork_as_new' AND target_package_id IS NULL "
+            "AND expected_aggregate_revision IS NULL "
+            "AND fork_canonical_name IS NOT NULL"
+            ")",
+            name="ck_assistant_skill_import_preview_mode_target_shape",
+        ),
+        # Consumed rows never keep archive bytes. Unconsumed rows may drop
+        # archive_bytes on expiry while retaining request/upload audit fields.
+        CheckConstraint(
+            "NOT (consumed AND archive_bytes IS NOT NULL)",
+            name="ck_assistant_skill_import_preview_consumed_archive_xor",
+        ),
+        CheckConstraint(
+            "("
+            "NOT consumed AND applied_package_id IS NULL "
+            "AND applied_request_id IS NULL AND applied_request_digest IS NULL "
+            "AND applied_at IS NULL"
+            ") OR ("
+            "consumed AND applied_package_id IS NOT NULL "
+            "AND applied_request_id IS NOT NULL "
+            "AND applied_request_digest IS NOT NULL "
+            "AND applied_at IS NOT NULL"
+            ")",
+            name="ck_assistant_skill_import_preview_consumed_shape",
+        ),
+        Index(
+            "ix_assistant_skill_import_preview_expires_archive",
+            "expires_at",
+        ),
+        Index(
+            "uq_assistant_skill_import_preview_applied_request_id",
+            "applied_request_id",
+            unique=True,
+            postgresql_where=text("applied_request_id IS NOT NULL"),
+            sqlite_where=text("applied_request_id IS NOT NULL"),
         ),
     )

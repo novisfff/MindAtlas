@@ -86,7 +86,11 @@ class SkillPackageJsonCreateRequest(CamelModel):
 
 
 class SkillPackageJsonSaveRequest(CamelModel):
-    """Router-facing draft save body. Media types/IDs/digests are forbidden."""
+    """Router-facing draft save body. Media types/IDs/digests are forbidden.
+
+    Plan 09: required ``expectedAggregateRevision`` + ``requestId`` enable
+    optimistic concurrency and identical-retry idempotency. Mismatch → 409.
+    """
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -95,8 +99,12 @@ class SkillPackageJsonSaveRequest(CamelModel):
 
     skill_md: str = Field(alias="skillMd")
     mindatlas_yaml: str | None = Field(default=None, alias="mindatlasYaml")
-    resources: list[SkillResourceInput] = Field(default_factory=list)
+    # None = preserve previous draft resources (server-side copy).
+    # Explicit [] = clear all resources. List = full replacement snapshot.
+    resources: list[SkillResourceInput] | None = None
     version_name: str | None = Field(default=None, alias="versionName")
+    expected_aggregate_revision: int = Field(alias="expectedAggregateRevision", ge=0)
+    request_id: str = Field(alias="requestId", min_length=1, max_length=128)
 
 
 class CreateSkillPackageCommand(CamelModel):
@@ -118,22 +126,46 @@ class SaveSkillDraftCommand(CamelModel):
     parsed: ParsedSkillPackage
     version_name: str | None = None
     origin: Literal["api", "import", "legacy"] = "api"
+    expected_aggregate_revision: int = Field(ge=0)
+    request_id: str = Field(min_length=1, max_length=128)
+    # When True, server copies resources from the current draft version
+    # instead of using parsed.resources (used when client omits resources).
+    preserve_previous_resources: bool = False
 
 
 class PublishSkillVersionCommand(CamelModel):
-    """Publish requires an explicit draft version id; never resolves latest."""
+    """Publish requires an explicit draft version id; never resolves latest.
+
+    Plan 09: optional ``gate_id`` + ``gate_subject`` for publish-gate enforcement.
+    Client never supplies passed/decision/metrics — only evidence refs via gate.
+    Required ``request_id`` + ``expected_aggregate_revision`` enforce the same
+    idempotency-first CAS sequence as draft save.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     draft_version_id: UUID
+    request_id: str = Field(min_length=1, max_length=128)
+    expected_aggregate_revision: int = Field(ge=0)
+    gate_id: UUID | None = None
+    # Opaque server-recomputed subject closure (PublishGateSubject dict / model).
+    # When omitted, service rebuilds closure from draft digests under lock.
+    gate_subject: dict[str, Any] | None = None
 
 
 class PublishMainAgentProfileCommand(CamelModel):
-    """Publish requires an explicit draft version id; never resolves latest."""
+    """Publish requires an explicit draft version id; never resolves latest.
+
+    Required ``request_id`` + ``expected_aggregate_revision`` match draft CAS.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     draft_version_id: UUID
+    request_id: str = Field(min_length=1, max_length=128)
+    expected_aggregate_revision: int = Field(ge=0)
+    gate_id: UUID | None = None
+    gate_subject: dict[str, Any] | None = None
 
 
 class SkillResourceMetadata(CamelModel):
@@ -181,6 +213,8 @@ class SkillPackageAliasSummary(CamelModel):
     normalized_alias: str
     alias_type: AliasType
     created_at: datetime | None = None
+    disabled_at: datetime | None = None
+    disabled_by: str | None = None
 
 
 class SkillPackageSummary(CamelModel):
@@ -191,6 +225,11 @@ class SkillPackageSummary(CamelModel):
     migration_state: SkillPackageMigrationState
     catalog_enabled: bool
     is_system: bool
+    aggregate_revision: int = 0
+    archived_at: datetime | None = None
+    archived_by: str | None = None
+    catalog_enabled_at: datetime | None = None
+    catalog_enabled_by: str | None = None
     draft_version: SkillVersionSummary | None = None
     published_version: SkillVersionSummary | None = None
     created_at: datetime | None = None
@@ -201,6 +240,145 @@ class SkillPackageDetail(SkillPackageSummary):
     aliases: list[SkillPackageAliasSummary] = Field(default_factory=list)
     legacy_skill_id: UUID | None = None
     legacy_source_digest: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Plan 09 aggregate admin commands / DTOs
+# ---------------------------------------------------------------------------
+
+
+class UpdateSkillPackageMetadataCommand(CamelModel):
+    """Revision-CAS metadata update (display name / description only)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str = Field(min_length=1, max_length=128)
+    expected_aggregate_revision: int = Field(ge=0)
+    display_name: str | None = Field(default=None, max_length=128)
+    description: str | None = Field(default=None, max_length=1024)
+
+
+class AggregateRevisionCommand(CamelModel):
+    """Shared body for archive / unarchive / catalog / alias CAS mutations."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str = Field(min_length=1, max_length=128)
+    expected_aggregate_revision: int = Field(ge=0)
+    # Plan 09: required for catalog/runtime enable (never for archive/alias).
+    gate_id: UUID | None = None
+    gate_subject: dict[str, Any] | None = None
+
+
+class AddSkillPackageAliasCommand(CamelModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str = Field(min_length=1, max_length=128)
+    expected_aggregate_revision: int = Field(ge=0)
+    alias: str = Field(min_length=1, max_length=512)
+
+
+class DisableSkillPackageAliasCommand(CamelModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str = Field(min_length=1, max_length=128)
+    expected_aggregate_revision: int = Field(ge=0)
+
+
+class RestoreSkillVersionAsDraftCommand(CamelModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str = Field(min_length=1, max_length=128)
+    expected_aggregate_revision: int = Field(ge=0)
+
+
+# ---------------------------------------------------------------------------
+# Plan 09 import preview / apply contracts
+# ---------------------------------------------------------------------------
+
+
+ImportMode = Literal["create", "append_to_existing", "fork_as_new"]
+
+
+class ImportPreviewToken(FrozenContract):
+    """Opaque server-side preview binding (never echoes raw archive bytes)."""
+
+    preview_id: UUID
+    actor_scope_digest: str
+    mode: ImportMode
+    target_package_id: UUID | None = None
+    expected_aggregate_revision: int | None = None
+    upload_digest: str
+    candidate_content_digest: str
+    expires_at: datetime
+
+
+class ImportPreviewResult(CamelModel):
+    """Bounded dry-run preview for create / append / fork import."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    preview_id: UUID
+    mode: ImportMode
+    upload_digest: str
+    candidate_content_digest: str
+    preview_digest: str
+    candidate_canonical_name: str
+    target_package_id: UUID | None = None
+    expected_aggregate_revision: int | None = None
+    expires_at: datetime
+    resource_index: list[dict[str, Any]] = Field(default_factory=list)
+    capability_keys: list[str] = Field(default_factory=list)
+    findings: list[dict[str, Any]] = Field(default_factory=list)
+    structural_diff: list[dict[str, Any]] = Field(default_factory=list)
+    # Explicit safety flags for clients / audits.
+    resource_bytes_excluded: bool = True
+    raw_archive_excluded: bool = True
+
+
+class ImportApplyResult(CamelModel):
+    """Result of consuming a preview token into an unpublished draft."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: ImportMode
+    preview_id: UUID
+    request_id: str
+    package: SkillPackageDetail
+
+
+class ImportApplyCommand(CamelModel):
+    model_config = ConfigDict(extra="forbid")
+
+    preview_id: UUID
+    request_id: str = Field(min_length=1, max_length=128)
+    preview_digest: str | None = Field(default=None, min_length=64, max_length=64)
+
+
+class SkillVersionDiffHunk(CamelModel):
+    """Bounded text hunk for version compare (no secrets / unbounded bodies)."""
+
+    path: str
+    kind: Literal["added", "removed", "changed", "unchanged_meta"]
+    left_digest: str | None = None
+    right_digest: str | None = None
+    left_preview: str | None = None
+    right_preview: str | None = None
+    truncated: bool = False
+
+
+class SkillVersionDiffResult(CamelModel):
+    package_id: UUID
+    left_version_id: UUID
+    right_version_id: UUID
+    left_content_digest: str
+    right_content_digest: str
+    left_metadata: dict[str, Any]
+    right_metadata: dict[str, Any]
+    hunks: list[SkillVersionDiffHunk] = Field(default_factory=list)
+    resource_bytes_excluded: bool = True
+    secrets_excluded: bool = True
+    unbounded_bodies_excluded: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -609,6 +787,8 @@ class SaveMainAgentProfileDraftCommand(CamelModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
     snapshot: MainAgentProfileSnapshotV1
+    expected_aggregate_revision: int = Field(ge=0)
+    request_id: str = Field(min_length=1, max_length=128)
     version_name: str | None = None
     origin: Literal["api", "legacy"] = "api"
     source_ref: dict[str, Any] | None = None
@@ -638,6 +818,7 @@ class MainAgentProfileSummary(CamelModel):
     is_default: bool
     migration_state: MainAgentMigrationState
     runtime_enabled: bool
+    aggregate_revision: int = 0
     draft_version: MainAgentProfileVersionSummary | None = None
     published_version: MainAgentProfileVersionSummary | None = None
     legacy_skill_id: UUID | None = None
@@ -655,6 +836,11 @@ __all__ = [
     "DEFAULT_MAIN_AGENT_PROFILE_KEY",
     "FallbackPolicyV1",
     "GlobalSafetyPolicyV1",
+    "ImportApplyCommand",
+    "ImportApplyResult",
+    "ImportMode",
+    "ImportPreviewResult",
+    "ImportPreviewToken",
     "KNOWN_MAIN_AGENT_ENTRYPOINTS",
     "MainAgentEntrypoint",
     "MainAgentProfileSnapshotV1",

@@ -458,6 +458,72 @@ class DurableInterruptApiTests(unittest.TestCase):
         self.assertIn(resp2.status_code, (403, 404))
         self.assertEqual(self._reason(resp2), "durable_interrupt_conversation_mismatch")
 
+    def test_eval_run_id_returns_404_not_500(self) -> None:
+        """Production interrupt APIs must not 500 on evaluation-namespace run IDs.
+
+        reject_if_evaluation_id raises ValueError from get_run; _authorize_run
+        must map that to durable_interrupt_not_found (404).
+        """
+        from app.assistant.evaluation.models import AssistantSkillEvalRun
+        from app.assistant.models import Conversation
+
+        conv = Conversation(title="eval-isolation")
+        self.db.add(conv)
+        self.db.flush()
+
+        eval_run = AssistantSkillEvalRun(
+            subject_kind="skill_draft",
+            subject_aggregate_id=uuid.uuid4(),
+            subject_version_id=uuid.uuid4(),
+            subject_content_digest=DIGEST_A,
+            subject_binding_digest=DIGEST_A,
+            dataset_version_ids=[],
+            threshold_policy_version="t1",
+            mode="interactive_scripted",
+            status="queued",
+            isolation_namespace_id=uuid.uuid4(),
+            runtime_contract_version=1,
+            required_build_revision="development",
+            runner_contract_version=1,
+            isolation_digest=DIGEST_A,
+            aggregate_metrics={},
+        )
+        self.db.add(eval_run)
+        self.db.commit()
+
+        # Pending list, detail, token, and resolve all authorize via run_id.
+        pending = self.client.get(f"{self._base(conv.id, eval_run.id)}/pending")
+        self.assertEqual(pending.status_code, 404, pending.text)
+        self.assertEqual(self._reason(pending), "durable_interrupt_not_found")
+        self.assertNotEqual(pending.status_code, 500)
+
+        detail = self.client.get(
+            f"{self._base(conv.id, eval_run.id)}/{uuid.uuid4()}"
+        )
+        self.assertEqual(detail.status_code, 404, detail.text)
+        self.assertEqual(self._reason(detail), "durable_interrupt_not_found")
+
+        token = self.client.post(
+            f"{self._base(conv.id, eval_run.id)}/{uuid.uuid4()}/token",
+            json={"expectedRequestRevision": 1, "expectedRunRevision": 1},
+        )
+        self.assertEqual(token.status_code, 404, token.text)
+        self.assertEqual(self._reason(token), "durable_interrupt_not_found")
+
+        resolve = self.client.post(
+            f"{self._base(conv.id, eval_run.id)}/{uuid.uuid4()}/resolve",
+            json={
+                "token": "not-a-real-token",
+                "resolutionRequestId": str(uuid.uuid4()),
+                "expectedTokenRevision": 1,
+                "expectedRequestRevision": 1,
+                "expectedRunRevision": 1,
+                "outcome": "approved",
+            },
+        )
+        self.assertEqual(resolve.status_code, 404, resolve.text)
+        self.assertEqual(self._reason(resolve), "durable_interrupt_not_found")
+
     # ------------------------------------------------------------------
     # Token
     # ------------------------------------------------------------------

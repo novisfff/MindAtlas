@@ -42,6 +42,10 @@ class AssistantChatRunService:
         self.db = db
 
     def get_run(self, *, conversation_id: UUID, run_id: UUID) -> AssistantChatRun | None:
+        # Plan 09 Task 4: production Run lookup rejects evaluation-namespace IDs.
+        from app.assistant.evaluation.contracts import reject_if_evaluation_id
+
+        reject_if_evaluation_id(self.db, entity="run", value=run_id)
         run = self.db.get(AssistantChatRun, run_id)
         if run is None:
             return None
@@ -83,6 +87,10 @@ class AssistantChatRunService:
         workers never claim a Run that is still missing its initialization event
         (Plan 06 §9 / Task 3 atomic write path).
         """
+        # Plan 09 Task 4: hard tripwire when Eval scope reaches production Run writer.
+        from app.assistant.evaluation.isolation import tripwire_production_writer
+
+        tripwire_production_writer("run_service.create_run")
         active = self.get_active_run(conversation_id=conversation.id)
         if active is not None:
             raise ValueError("conversation already has an active run")
@@ -151,6 +159,10 @@ class AssistantChatRunService:
         Pass ``commit=False`` when composing Main Agent create + initial event in
         a single transaction (must not interleave with worker claim).
         """
+        # Plan 09 Task 4: hard tripwire when Eval scope reaches production event writer.
+        from app.assistant.evaluation.isolation import tripwire_production_writer
+
+        tripwire_production_writer("run_service.append_event")
         run = self.db.get(AssistantChatRun, run_id)
         if run is None:
             raise ValueError(f"run not found: {run_id}")
@@ -184,6 +196,10 @@ class AssistantChatRunService:
         after_seq: int,
         limit: int = 200,
     ) -> list[AssistantChatRunEvent]:
+        # Plan 09 Task 4: production event lookup rejects evaluation-namespace IDs.
+        from app.assistant.evaluation.contracts import reject_if_evaluation_id
+
+        reject_if_evaluation_id(self.db, entity="run", value=run_id)
         return (
             self.db.query(AssistantChatRunEvent)
             .filter(

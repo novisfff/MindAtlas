@@ -169,20 +169,29 @@ def create_or_refresh_fixture_package(
         draft_id = detail.draft_version.id if detail.draft_version else None
     else:
         package_id = existing.id
+        rev = int(getattr(existing, "aggregate_revision", 0) or 0)
         draft = svc.save_draft(
             SaveSkillDraftCommand(
                 package_id=package_id,
                 parsed=parsed,
                 version_name="golden-draft",
                 origin="api",
+                expected_aggregate_revision=rev,
+                request_id=f"golden-draft:{package_id}:{rev}",
             )
         )
         draft_id = draft.id
     if draft_id is None:
         raise RuntimeError("fixture package has no draft to publish")
+    package_row = db.get(AssistantSkillPackage, package_id)
+    pub_rev = int(getattr(package_row, "aggregate_revision", 0) or 0) if package_row else 0
     published = svc.publish(
         package_id,
-        PublishSkillVersionCommand(draft_version_id=draft_id),
+        PublishSkillVersionCommand(
+            draft_version_id=draft_id,
+            request_id=f"golden-publish:{package_id}:{draft_id}:{pub_rev}",
+            expected_aggregate_revision=pub_rev,
+        ),
     )
     detail = svc.get_package(package_id)
     return detail, published
@@ -402,17 +411,32 @@ def publish_golden_profile(
     snapshot = build_golden_profile_snapshot(
         package_id=package_id, base_prompt=base_prompt
     )
+    rev = int(getattr(profile, "aggregate_revision", 0) or 0)
+    # ensure_default returns summary; re-read ORM for CAS revision when needed
+    from app.assistant.skills.models import AssistantMainAgentProfile
+
+    profile_row = db.get(AssistantMainAgentProfile, profile.id)
+    if profile_row is not None:
+        rev = int(getattr(profile_row, "aggregate_revision", 0) or 0)
     draft = profile_svc.save_draft(
         profile.id,
         SaveMainAgentProfileDraftCommand(
             snapshot=snapshot,
             version_name="plan04-golden",
             origin="api",
+            expected_aggregate_revision=rev,
+            request_id=f"golden-profile-draft:{profile.id}:{rev}",
         ),
     )
+    profile_row = db.get(AssistantMainAgentProfile, profile.id)
+    pub_rev = int(getattr(profile_row, "aggregate_revision", 0) or 0) if profile_row else 0
     published = profile_svc.publish(
         profile.id,
-        PublishMainAgentProfileCommand(draft_version_id=draft.id),
+        PublishMainAgentProfileCommand(
+            draft_version_id=draft.id,
+            request_id=f"golden-profile-publish:{profile.id}:{draft.id}:{pub_rev}",
+            expected_aggregate_revision=pub_rev,
+        ),
     )
     return profile_svc.get_default(), published
 
