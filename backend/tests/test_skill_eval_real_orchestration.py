@@ -872,3 +872,99 @@ def test_orchestrator_without_session_falls_back_and_records_status() -> None:
         ]
         assert started
         assert started[0]["payload"]["compose_status"] == "fallback"
+
+
+def test_compose_fallback_is_not_gate_eligible_even_with_matching_skills() -> None:
+    """Hand-rolled fallback path must not produce gate-eligible evidence."""
+    from app.assistant.evaluation.isolation import eval_execution_scope
+    from app.assistant.evaluation.runner import EvaluationRunner
+
+    namespace_id = uuid4()
+    isolation = build_isolation_context(
+        namespace_id=namespace_id,
+        subject_digest=DIGEST_A,
+        dataset_version_ids=(uuid4(),),
+        memory_mode="empty",
+        data_mode="fixture",
+    )
+    # No session → forced fallback compose path.
+    orchestrator = EvaluationOrchestrator(
+        config=EvaluationOrchestratorConfig(app_build_revision="test"),
+        candidate_closure=None,
+        profile_snapshot=None,
+        db_session=None,
+        session_factory=None,
+        safety_counter_probe=zero_safety_counter_probe,
+        production_delta_probe=zero_production_delta_probe,
+    )
+    case = _HarnessCase(
+        expected_mode="golden_skill",
+        acceptable_skill_keys=["skill-b"],
+        fixture_refs=[
+            {
+                "kind": "provider_script",
+                "script_key": "provider-selects-skill-b",
+                "revision": "eval-v1",
+            }
+        ],
+    )
+    identity = EvalExecutionIdentity(
+        eval_run_id=uuid4(),
+        eval_case_id=case.id,
+        namespace_id=namespace_id,
+        owner_kind=EVAL_OWNER_KIND,
+        subject_kind="skill_draft",
+        subject_aggregate_id=uuid4(),
+        subject_version_id=uuid4(),
+    )
+    with eval_execution_scope(
+        isolation=isolation,
+        identity=identity,
+        fixture_store={},
+    ) as scope:
+        observed = orchestrator.execute_case(
+            isolation,
+            case,
+            None,
+            identity=identity,
+            scope=scope,
+        )
+        assert orchestrator.last_compose_status == "fallback"
+        assert observed.actual_active_skills == ("skill-b",)
+
+    # Simulate worker eligibility persistence rules for fallback metrics.
+    metrics = {
+        "compose_status": "fallback",
+        "safety_counters": dict(observed.safety_counters or {}),
+    }
+    case_outcomes = [
+        {
+            "compose_status": "fallback",
+            "activated_skills": list(observed.actual_active_skills),
+        }
+    ]
+    compose_status = str(metrics.get("compose_status") or "").strip()
+    case_statuses = [
+        str(raw.get("compose_status") or "").strip()
+        for raw in case_outcomes
+        if isinstance(raw, dict)
+    ]
+    gate_eligible = True
+    if (
+        compose_status != "composed"
+        or any(status != "composed" for status in case_statuses)
+        or not case_statuses
+    ):
+        gate_eligible = False
+    assert gate_eligible is False
+
+
+def test_any_fallback_case_taints_whole_run_compose_status() -> None:
+    """Multi-case: one fallback must not be masked by another composed case."""
+    statuses = ["composed", "fallback", "composed"]
+    aggregate = (
+        "composed"
+        if statuses and all(s == "composed" for s in statuses)
+        else next((s for s in statuses if s != "composed"), statuses[-1])
+    )
+    assert aggregate == "fallback"

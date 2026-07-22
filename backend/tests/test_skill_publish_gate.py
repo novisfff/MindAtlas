@@ -743,6 +743,32 @@ class PublishGateServiceUnitTests(unittest.TestCase):
         )
         self.assertEqual(str(verified.id), str(result.gate.id))
 
+    def test_compose_fallback_run_cannot_qualify_gate(self) -> None:
+        """Runs with compose_status=fallback are not qualifying gate evidence."""
+        from app.assistant.evaluation.gates import (
+            PublishGateError,
+            PublishGateService,
+            make_create_gate_request,
+        )
+
+        run, ds_id, _, _ = self._seed_completed_run()
+        # Mark completed real_orchestration run as compose fallback.
+        run.aggregate_metrics = dict(run.aggregate_metrics or {})
+        run.aggregate_metrics["compose_status"] = "fallback"
+        self.db.flush()
+        subject = self._subject(run, ds_id)
+        svc = PublishGateService(self.db)
+        with self.assertRaises(PublishGateError) as ctx:
+            svc.create_gate(
+                make_create_gate_request(
+                    subject=subject, qualifying_eval_run_ids=(run.id,)
+                ),
+                actor_principal="op",
+                subject=subject,
+                _allow_prebuilt_subject=True,
+            )
+        self.assertEqual(ctx.exception.code, "eval_run_compose_fallback")
+
     def test_expired_gate_rejected(self) -> None:
         from app.assistant.evaluation.gates import (
             PublishGateError,
@@ -1613,6 +1639,9 @@ class DatasetRunnerGateEligibilityTests(unittest.TestCase):
                 case_outcomes=[],
                 live=live,
             )
+
+
+
 
 
 if __name__ == "__main__":

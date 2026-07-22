@@ -590,9 +590,15 @@ class EvaluationWorker:
         if runtime_digests:
             orchestrator.last_runtime_digest = runtime_digests[-1]
         if compose_statuses:
-            # Prefer "composed" if any case composed successfully.
+            # Any fallback case taints the whole run for gate eligibility.
+            # Only report "composed" when *every* case composed successfully.
             orchestrator.last_compose_status = (
-                "composed" if "composed" in compose_statuses else compose_statuses[-1]
+                "composed"
+                if compose_statuses and all(s == "composed" for s in compose_statuses)
+                else next(
+                    (s for s in compose_statuses if s != "composed"),
+                    compose_statuses[-1],
+                )
             )
         # Attach for later persistence via outcome metrics merge.
         self._last_orchestrator_digests = {
@@ -789,6 +795,25 @@ class EvaluationWorker:
                 "duplicate_write",
             )):
                 gate_eligible = False
+        # Compose fallback is not production Main Agent evidence. Any fallback
+        # case (or missing compose status on the real path) makes the whole run
+        # ineligible for publish/promotion gates.
+        if provenance == "real_orchestration":
+            compose_status = str(metrics.get("compose_status") or "").strip()
+            case_statuses = [
+                str(raw.get("compose_status") or "").strip()
+                for raw in case_outcomes
+                if isinstance(raw, dict)
+            ]
+            if (
+                compose_status != "composed"
+                or any(status != "composed" for status in case_statuses)
+                or not case_statuses
+            ):
+                gate_eligible = False
+                metrics["compose_gate_ineligible"] = True
+                if compose_status:
+                    metrics["compose_status"] = compose_status
         repo.transition_run(
             run_id=run_id,
             expected_revision=rev,

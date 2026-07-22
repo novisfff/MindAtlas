@@ -633,13 +633,27 @@ class EvaluationOrchestrator:
             sequence=1,
             content_digest=profile["profile_digest"],
         )
+        # Production compose requires control capabilities already on the
+        # Manifest (skill.search/inject/etc). Empty create_base_run_manifest
+        # causes ExposureBuildError: binding input not in Manifest.
+        from app.assistant.main_agent.control_capabilities import (
+            build_all_main_agent_control_bindings,
+        )
+        from app.assistant.main_agent.service import build_base_manifest_with_controls
+
+        control_bindings = build_all_main_agent_control_bindings(
+            owner_version_id=profile["profile_version_id"],
+            source_snapshot_digest=profile["profile_digest"],
+            app_build_revision=self.config.app_build_revision,
+        )
         # Placeholder digest; compose aligns Manifest.effective_policy_digest.
-        manifest = create_base_run_manifest(
+        manifest = build_base_manifest_with_controls(
             run_id=run_id,
             main_agent=main_agent,
             provider=provider_ref,
             model=model_ref,
             effective_policy_digest=EVAL_POLICY_DIGEST,
+            control_bindings=control_bindings,
         )
 
         provider = ScriptedProvider(

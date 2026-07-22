@@ -1275,6 +1275,23 @@ class PublishGateService:
                     http_code=CODE_GATE_ACTION_MISMATCH,
                     details={"eval_run_id": str(rid)},
                 )
+            # Compose fallback is not production Main Agent evidence.
+            metrics = dict(run.aggregate_metrics or {})
+            compose_status = str(metrics.get("compose_status") or "").strip()
+            if compose_status and compose_status != "composed":
+                raise PublishGateError(
+                    "eval_run_compose_fallback",
+                    (
+                        f"qualifying eval run used compose fallback "
+                        f"({compose_status}); not gate evidence: {rid}"
+                    ),
+                    http_status=422,
+                    http_code=CODE_GATE_NOT_QUALIFYING,
+                    details={
+                        "eval_run_id": str(rid),
+                        "compose_status": compose_status,
+                    },
+                )
             runs.append(run)
         return runs
 
@@ -1334,6 +1351,23 @@ class PublishGateService:
                     details={
                         "eval_run_id": str(rid),
                         "evidence_provenance": provenance,
+                    },
+                )
+            # Compose fallback is not production Main Agent evidence.
+            metrics = dict(run.aggregate_metrics or {})
+            compose_status = str(metrics.get("compose_status") or "").strip()
+            if compose_status and compose_status != "composed":
+                raise PublishGateError(
+                    "eval_run_compose_fallback",
+                    (
+                        f"qualifying eval run used compose fallback "
+                        f"({compose_status}); not gate evidence: {rid}"
+                    ),
+                    http_status=422,
+                    http_code=CODE_GATE_NOT_QUALIFYING,
+                    details={
+                        "eval_run_id": str(rid),
+                        "compose_status": compose_status,
                     },
                 )
             drifts = compare_run_to_subject(run, subject)
@@ -1500,6 +1534,22 @@ class PublishGateService:
                     http_status=409,
                     http_code=CODE_GATE_DRIFT,
                     details={"eval_run_id": str(rid)},
+                )
+            metrics = dict(run.aggregate_metrics or {})
+            compose_status = str(metrics.get("compose_status") or "").strip()
+            if compose_status and compose_status != "composed":
+                raise PublishGateError(
+                    "eval_run_compose_fallback",
+                    (
+                        f"qualifying eval run used compose fallback "
+                        f"({compose_status}); not gate evidence: {rid}"
+                    ),
+                    http_status=422,
+                    http_code=CODE_GATE_NOT_QUALIFYING,
+                    details={
+                        "eval_run_id": str(rid),
+                        "compose_status": compose_status,
+                    },
                 )
             drifts = compare_run_to_subject(run, subject)
             if drifts:

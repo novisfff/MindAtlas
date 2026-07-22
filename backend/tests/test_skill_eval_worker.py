@@ -587,6 +587,9 @@ class EvalWorkerExecuteTests(unittest.TestCase):
             self.assertEqual(stored.status, "completed")
             self.assertTrue(stored.gate_eligible)
             metrics = dict(stored.aggregate_metrics or {})
+            # Gate-eligible real_orchestration must have composed (not fallback).
+            self.assertEqual(metrics.get("compose_status"), "composed", metrics)
+            self.assertNotEqual(metrics.get("compose_status"), "fallback")
             counters = dict(metrics.get("safety_counters") or {})
             self.assertTrue(counters)
             self.assertTrue(all(v is not None for v in counters.values()), counters)
@@ -875,3 +878,43 @@ class EvalWorkerExecuteTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EvalWorkerComposeFallbackEligibilityTests(unittest.TestCase):
+    def test_compose_fallback_metric_forces_gate_ineligible_rule(self) -> None:
+        """Unit-level eligibility rule: fallback compose_status rejects gate."""
+        metrics = {
+            "compose_status": "fallback",
+            "safety_counters": {
+                "budget_policy_bypass": 0,
+                "false_completion_pending_obligation": 0,
+                "unresolved_obligation_falsely_completed": 0,
+                "schema_escape": 0,
+                "secret_exposure": 0,
+                "duplicate_write": 0,
+            },
+        }
+        case_outcomes = [{"compose_status": "fallback"}]
+        compose_status = str(metrics.get("compose_status") or "").strip()
+        case_statuses = [
+            str(raw.get("compose_status") or "").strip()
+            for raw in case_outcomes
+            if isinstance(raw, dict)
+        ]
+        gate_eligible = True
+        if (
+            compose_status != "composed"
+            or any(status != "composed" for status in case_statuses)
+            or not case_statuses
+        ):
+            gate_eligible = False
+        self.assertFalse(gate_eligible)
+
+    def test_mixed_compose_statuses_taint_run(self) -> None:
+        statuses = ["composed", "fallback"]
+        aggregate = (
+            "composed"
+            if statuses and all(s == "composed" for s in statuses)
+            else next((s for s in statuses if s != "composed"), statuses[-1])
+        )
+        self.assertEqual(aggregate, "fallback")

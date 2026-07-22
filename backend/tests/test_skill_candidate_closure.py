@@ -11,8 +11,10 @@ from tests._bootstrap import bootstrap_backend_imports, reset_caches
 bootstrap_backend_imports()
 reset_caches()
 
-os.environ.setdefault("APP_BUILD_REVISION", "test-build-c25d03f")
-os.environ.setdefault("APP_ENV", "test")
+# Module-local pin only — never leave process-global APP_BUILD_REVISION drifted
+# after this module (lifecycle workers pin identity to "development").
+_CLOSURE_BUILD_REVISION = "test-build-c25d03f"
+_CLOSURE_APP_ENV = "test"
 
 
 def _minimal_skill_md(name: str) -> bytes:
@@ -62,8 +64,10 @@ def _parse(name: str, capabilities: str):
 class SkillCandidateClosureTests(unittest.TestCase):
     def setUp(self) -> None:
         reset_caches()
-        os.environ["APP_BUILD_REVISION"] = "test-build-c25d03f"
-        os.environ["APP_ENV"] = "test"
+        self._prev_build = os.environ.get("APP_BUILD_REVISION")
+        self._prev_env = os.environ.get("APP_ENV")
+        os.environ["APP_BUILD_REVISION"] = _CLOSURE_BUILD_REVISION
+        os.environ["APP_ENV"] = _CLOSURE_APP_ENV
         from app.config import get_settings
 
         get_settings.cache_clear()
@@ -78,6 +82,16 @@ class SkillCandidateClosureTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.db.close()
+        # Restore process env so later suites (lifecycle workers on
+        # app_build_revision="development") are not polluted.
+        if self._prev_build is None:
+            os.environ.pop("APP_BUILD_REVISION", None)
+        else:
+            os.environ["APP_BUILD_REVISION"] = self._prev_build
+        if self._prev_env is None:
+            os.environ.pop("APP_ENV", None)
+        else:
+            os.environ["APP_ENV"] = self._prev_env
         from app.config import get_settings
 
         get_settings.cache_clear()
