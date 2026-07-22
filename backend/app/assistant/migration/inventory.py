@@ -130,8 +130,8 @@ def _skill_state(record: Mapping[str, Any]) -> tuple[MigrationItemState, str | N
 
     # Enabled custom skills outside the known system set are discovered for
     # migration; names that look like unexpected new production system skills
-    # (or are explicitly marked unknown) become blockers.
-    if record.get("unknown") is True or name == "brand_new_unknown_skill":
+    # (or are explicitly marked unknown by the adapter/policy) become blockers.
+    if record.get("unknown") is True:
         return "blocked", "unknown_skill_source"
 
     if is_system and name not in KNOWN_MIGRATION_MAP_NAMES:

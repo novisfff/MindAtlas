@@ -80,6 +80,61 @@ class InventoryScanFixtureTests(unittest.TestCase):
         self.assertIn("unknown_skill_source", reasons)
         self.assertGreaterEqual(snapshot.blocker_count, 1)
 
+        # Ordinary custom skills (no unknown flag) remain discoverable.
+        custom = [
+            item
+            for item in snapshot.items
+            if item.subject_kind == "skill"
+            and item.source_name_normalized == "custom_note_taker"
+        ]
+        self.assertEqual(len(custom), 1)
+        self.assertEqual(custom[0].state, "discovered")
+        self.assertNotIn("custom_note_taker", blocker_names)
+
+    def test_generic_unknown_flag_blocks_without_name_hardcode(self) -> None:
+        from app.assistant.migration.inventory import scan_inventory_from_records
+
+        records = _load_fixture("sanitized_skill_records.json")
+        records = json.loads(json.dumps(records))
+        records["skills"].append(
+            {
+                "id": "88888888-8888-4888-8888-888888888888",
+                "name": "some_other_custom_unknown",
+                "enabled": True,
+                "is_system": False,
+                "unknown": True,
+                "workflow_id": str(uuid4()),
+                "agent_profile_id": None,
+                "system_prompt": "should not leak",
+                "description": "generic unknown custom skill",
+            }
+        )
+        snapshot = scan_inventory_from_records(records)
+        blocked = [
+            item
+            for item in snapshot.items
+            if item.subject_kind == "skill"
+            and item.source_name_normalized == "some_other_custom_unknown"
+        ]
+        self.assertEqual(len(blocked), 1)
+        self.assertEqual(blocked[0].state, "blocked")
+        self.assertEqual(blocked[0].reason_code, "unknown_skill_source")
+
+        # Same name without unknown remains discoverable.
+        records_ok = json.loads(json.dumps(records))
+        for skill in records_ok["skills"]:
+            if skill.get("name") == "some_other_custom_unknown":
+                skill.pop("unknown", None)
+        ok_snapshot = scan_inventory_from_records(records_ok)
+        discovered = [
+            item
+            for item in ok_snapshot.items
+            if item.subject_kind == "skill"
+            and item.source_name_normalized == "some_other_custom_unknown"
+        ]
+        self.assertEqual(len(discovered), 1)
+        self.assertEqual(discovered[0].state, "discovered")
+
     def test_null_vs_default_namespace_classification(self) -> None:
         from app.assistant.migration.inventory import scan_inventory_from_records
 

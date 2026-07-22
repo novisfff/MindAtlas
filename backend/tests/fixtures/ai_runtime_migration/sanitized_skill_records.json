@@ -69,6 +69,7 @@
       "name": "brand_new_unknown_skill",
       "enabled": true,
       "is_system": false,
+      "unknown": true,
       "workflow_id": "99999999-9999-4999-8999-999999999999",
       "agent_profile_id": null,
       "system_prompt": "unknown source prompt",

@@ -18,7 +18,6 @@ from typing import Any
 
 from app.assistant.migration.contracts import (
     CLI_EXIT_COMPLETED,
-    CLI_EXIT_COMPLETED_WITH_BLOCKERS,
     CLI_EXIT_PRECONDITION_FAILED,
     CLI_EXIT_UNEXPECTED_FAILURE,
 )
@@ -97,12 +96,60 @@ def _write_report(path: str | Path, payload: Mapping[str, Any]) -> None:
     )
 
 
-def _run_inventory_scan(args: argparse.Namespace) -> int:
+def _complete_inventory_scan(
+    records: Mapping[str, Any],
+    *,
+    environment: str,
+    database_fingerprint: str,
+    schema_head: str,
+    build_revision: str,
+    request_id: str,
+    report_json: str,
+) -> int:
+    """Shared dry-run inventory scan path (fixture or injected loader).
+
+    Always returns exit 0 on success. Dry-run discovery reports blockers in the
+    payload; mutation apply paths will use exit 2 (COMPLETED_WITH_BLOCKERS) later.
+    """
     from app.assistant.migration.inventory import (
         build_safe_inventory_report,
         scan_inventory_from_records,
     )
 
+    bound = {
+        **dict(records),
+        "environment": environment,
+        "database_fingerprint": database_fingerprint,
+        "schema_head": schema_head,
+        "build_revision": build_revision,
+    }
+    snapshot = scan_inventory_from_records(bound)
+    report = build_safe_inventory_report(
+        snapshot,
+        dry_run=True,
+        request_id=request_id,
+    )
+    payload = report.model_dump(mode="json", by_alias=True)
+    _write_report(report_json, payload)
+    _emit(
+        {
+            "ok": True,
+            "command": "inventory.scan",
+            "snapshotDigest": snapshot.snapshot_digest,
+            "blockerCount": snapshot.blocker_count,
+            "counts": snapshot.counts,
+            "reportJson": str(report_json),
+            "dryRun": True,
+        }
+    )
+    return CLI_EXIT_COMPLETED
+
+
+def _run_inventory_scan(
+    args: argparse.Namespace,
+    *,
+    records_loader: Callable[[], Mapping[str, Any]] | None = None,
+) -> int:
     if not args.dry_run:
         # Inventory is always non-mutating; --apply is rejected as precondition.
         _emit(
@@ -114,7 +161,11 @@ def _run_inventory_scan(args: argparse.Namespace) -> int:
         )
         return CLI_EXIT_PRECONDITION_FAILED
 
-    if not args.fixture_json:
+    if args.fixture_json:
+        records = _load_fixture(args.fixture_json)
+    elif records_loader is not None:
+        records = dict(records_loader())
+    else:
         _emit(
             {
                 "ok": False,
@@ -124,40 +175,15 @@ def _run_inventory_scan(args: argparse.Namespace) -> int:
         )
         return CLI_EXIT_PRECONDITION_FAILED
 
-    records = _load_fixture(args.fixture_json)
-    # Bind CLI safety labels into the scan context (do not invent DB truth).
-    records = {
-        **records,
-        "environment": args.environment,
-        "database_fingerprint": args.database_fingerprint,
-        "schema_head": args.expected_schema_head,
-        "build_revision": args.expected_build_revision,
-    }
-    snapshot = scan_inventory_from_records(records)
-    report = build_safe_inventory_report(
-        snapshot,
-        dry_run=True,
+    return _complete_inventory_scan(
+        records,
+        environment=args.environment,
+        database_fingerprint=args.database_fingerprint,
+        schema_head=args.expected_schema_head,
+        build_revision=args.expected_build_revision,
         request_id=str(args.request_id),
+        report_json=str(args.report_json),
     )
-    payload = report.model_dump(mode="json", by_alias=True)
-    _write_report(args.report_json, payload)
-    _emit(
-        {
-            "ok": True,
-            "command": "inventory.scan",
-            "snapshotDigest": snapshot.snapshot_digest,
-            "blockerCount": snapshot.blocker_count,
-            "counts": snapshot.counts,
-            "reportJson": str(args.report_json),
-            "dryRun": True,
-        }
-    )
-    if snapshot.blocker_count > 0:
-        # Inventory scan still "completed"; blockers are reported. Use 0 for
-        # dry-run discovery so CI can freeze inventory tooling; mutation
-        # commands will use exit 2 when applying with blockers.
-        return CLI_EXIT_COMPLETED
-    return CLI_EXIT_COMPLETED
 
 
 def _run_stub(args: argparse.Namespace) -> int:
@@ -189,41 +215,7 @@ def main(
 
     try:
         if args.group == "inventory" and args.cmd == "scan":
-            if records_loader is not None and not args.fixture_json:
-                # Allow injected loader for tests without fixture path.
-                from app.assistant.migration.inventory import (
-                    build_safe_inventory_report,
-                    scan_inventory_from_records,
-                )
-
-                records = dict(records_loader())
-                records.update(
-                    {
-                        "environment": args.environment,
-                        "database_fingerprint": args.database_fingerprint,
-                        "schema_head": args.expected_schema_head,
-                        "build_revision": args.expected_build_revision,
-                    }
-                )
-                snapshot = scan_inventory_from_records(records)
-                report = build_safe_inventory_report(
-                    snapshot, dry_run=True, request_id=str(args.request_id)
-                )
-                payload = report.model_dump(mode="json", by_alias=True)
-                _write_report(args.report_json, payload)
-                _emit(
-                    {
-                        "ok": True,
-                        "command": "inventory.scan",
-                        "snapshotDigest": snapshot.snapshot_digest,
-                        "blockerCount": snapshot.blocker_count,
-                        "counts": snapshot.counts,
-                        "reportJson": str(args.report_json),
-                        "dryRun": True,
-                    }
-                )
-                return CLI_EXIT_COMPLETED
-            return _run_inventory_scan(args)
+            return _run_inventory_scan(args, records_loader=records_loader)
         return _run_stub(args)
     except Exception as exc:  # pragma: no cover - unexpected path
         _emit(
