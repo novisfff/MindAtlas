@@ -366,6 +366,110 @@ class PublishGateServiceUnitTests(unittest.TestCase):
         self.assertEqual(result.gate.decision, "passed")
         self.assertEqual(result.gate.actor_principal, "op-1")
 
+    def test_create_gate_request_id_identical_retry_returns_existing(self) -> None:
+        """Same requestId + same payload is an idempotent create."""
+        from app.assistant.evaluation.gates import (
+            PublishGateService,
+            make_create_gate_request,
+        )
+
+        run, ds_id, _, _ = self._seed_completed_run()
+        subject = self._subject(run, ds_id)
+        svc = PublishGateService(self.db)
+        req = make_create_gate_request(
+            subject=subject,
+            qualifying_eval_run_ids=(run.id,),
+            request_id=uuid.uuid4(),
+        )
+        first = svc.create_gate(
+            req,
+            actor_principal="op-1",
+            subject=subject,
+            _allow_prebuilt_subject=True,
+        )
+        self.db.commit()
+        second = svc.create_gate(
+            req,
+            actor_principal="op-other",
+            subject=subject,
+            _allow_prebuilt_subject=True,
+        )
+        self.assertEqual(second.gate.id, first.gate.id)
+        self.assertEqual(second.decision, first.decision)
+        # Actor is not part of the request digest; original row is returned.
+        self.assertEqual(second.gate.actor_principal, "op-1")
+
+    def test_create_gate_request_id_payload_drift_conflicts(self) -> None:
+        """Same requestId with different subject/runs/action must 409."""
+        from app.assistant.evaluation.gates import (
+            CODE_GATE_REQUEST_CONFLICT,
+            PublishGateError,
+            PublishGateService,
+            make_create_gate_request,
+        )
+
+        run, ds_id, _, _ = self._seed_completed_run()
+        run2, ds_id2, _, _ = self._seed_completed_run()
+        subject = self._subject(run, ds_id)
+        subject2 = self._subject(run2, ds_id2)
+        svc = PublishGateService(self.db)
+        shared_request_id = uuid.uuid4()
+        first = svc.create_gate(
+            make_create_gate_request(
+                subject=subject,
+                qualifying_eval_run_ids=(run.id,),
+                request_id=shared_request_id,
+            ),
+            actor_principal="op-1",
+            subject=subject,
+            _allow_prebuilt_subject=True,
+        )
+        self.db.commit()
+        self.assertIsNotNone(first.gate.id)
+
+        with self.assertRaises(PublishGateError) as ctx:
+            svc.create_gate(
+                make_create_gate_request(
+                    subject=subject2,
+                    qualifying_eval_run_ids=(run2.id,),
+                    request_id=shared_request_id,
+                ),
+                actor_principal="op-1",
+                subject=subject2,
+                _allow_prebuilt_subject=True,
+            )
+        self.assertEqual(ctx.exception.code, "gate_request_conflict")
+        self.assertEqual(ctx.exception.http_status, 409)
+        self.assertEqual(ctx.exception.http_code, CODE_GATE_REQUEST_CONFLICT)
+
+    def test_gate_request_digest_is_order_insensitive_for_runs(self) -> None:
+        from app.assistant.evaluation.gates import gate_request_digest
+
+        a = uuid.uuid4()
+        b = uuid.uuid4()
+        agg = uuid.uuid4()
+        ver = uuid.uuid4()
+        d1 = gate_request_digest(
+            action="skill_publish",
+            subject_aggregate_id=agg,
+            subject_version_id=ver,
+            qualifying_eval_run_ids=(a, b),
+        )
+        d2 = gate_request_digest(
+            action="skill_publish",
+            subject_aggregate_id=agg,
+            subject_version_id=ver,
+            qualifying_eval_run_ids=(b, a),
+        )
+        self.assertEqual(d1, d2)
+        d3 = gate_request_digest(
+            action="skill_catalog_enable",
+            subject_aggregate_id=agg,
+            subject_version_id=ver,
+            qualifying_eval_run_ids=(a, b),
+        )
+        self.assertNotEqual(d1, d3)
+
     def test_create_gate_rejects_hard_safety_waiver(self) -> None:
         from app.assistant.evaluation.gates import (
             PublishGateError,

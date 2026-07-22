@@ -94,6 +94,7 @@ CODE_GATE_HARD_SAFETY = 42281
 CODE_GATE_NOT_QUALIFYING = 42282
 CODE_GATE_ACTION_MISMATCH = 40984
 CODE_GATE_ALREADY_USED = 40985
+CODE_GATE_REQUEST_CONFLICT = 40986
 
 GATE_ACTION_SKILL_PUBLISH: PublishGateAction = "skill_publish"
 GATE_ACTION_SKILL_CATALOG_ENABLE: PublishGateAction = "skill_catalog_enable"
@@ -170,6 +171,51 @@ def profile_catalog_pin_digest(
     if runtime_enabled is not None:
         payload["runtime_enabled"] = bool(runtime_enabled)
     return sha256_canonical_json(payload)
+
+
+def gate_request_digest(
+    *,
+    action: str,
+    subject_aggregate_id: UUID | str,
+    subject_version_id: UUID | str,
+    qualifying_eval_run_ids: Sequence[UUID | str],
+    requested_non_safety_waiver_codes: Sequence[str] = (),
+    waiver_reason: str | None = None,
+) -> str:
+    """Canonical request payload digest for create_gate requestId CAS.
+
+    No ``request_digest`` column on the gate row (shared DB Plan 08 head is
+    frozen at 027869a00a47). Callers recompute this from stored gate fields and
+    compare against the retry payload so identical retries return the existing
+    gate and payload drift 409s.
+    """
+    from app.assistant.domain.digests import sha256_canonical_json
+
+    run_ids = sorted({str(rid) for rid in qualifying_eval_run_ids})
+    waiver_codes = sorted({str(code) for code in requested_non_safety_waiver_codes})
+    reason = None if waiver_reason is None else str(waiver_reason)
+    return sha256_canonical_json(
+        {
+            "action": str(action),
+            "qualifying_eval_run_ids": run_ids,
+            "requested_non_safety_waiver_codes": waiver_codes,
+            "subject_aggregate_id": str(subject_aggregate_id),
+            "subject_version_id": str(subject_version_id),
+            "waiver_reason": reason,
+        }
+    )
+
+
+def existing_gate_request_digest(gate: AssistantSkillPublishGate) -> str:
+    """Recompute the create request digest from a persisted gate row."""
+    return gate_request_digest(
+        action=str(gate.action),
+        subject_aggregate_id=gate.subject_aggregate_id,
+        subject_version_id=gate.subject_version_id,
+        qualifying_eval_run_ids=tuple(gate.qualifying_eval_run_ids or ()),
+        requested_non_safety_waiver_codes=tuple(gate.waiver_codes or ()),
+        waiver_reason=gate.reason,
+    )
 
 
 def current_gate_environment_pins(
@@ -742,6 +788,9 @@ class PublishGateService:
                 )
 
         # Idempotent retry on request_id before expensive recompute.
+        # Compare the canonical request digest recomputed from the existing row
+        # against the retry payload. Identical payload → return existing gate;
+        # payload drift → 409 (do not silently return a mismatched gate).
         if request.request_id is not None:
             existing = (
                 self.session.query(AssistantSkillPublishGate)
@@ -749,6 +798,31 @@ class PublishGateService:
                 .one_or_none()
             )
             if existing is not None:
+                retry_digest = gate_request_digest(
+                    action=request.action,
+                    subject_aggregate_id=request.subject_aggregate_id,
+                    subject_version_id=request.subject_version_id,
+                    qualifying_eval_run_ids=request.qualifying_eval_run_ids,
+                    requested_non_safety_waiver_codes=request.requested_non_safety_waiver_codes,
+                    waiver_reason=request.waiver_reason,
+                )
+                stored_digest = existing_gate_request_digest(existing)
+                if retry_digest != stored_digest:
+                    raise PublishGateError(
+                        "gate_request_conflict",
+                        (
+                            "requestId already used with a different gate payload "
+                            f"(request_id={request.request_id})"
+                        ),
+                        http_status=409,
+                        http_code=CODE_GATE_REQUEST_CONFLICT,
+                        details={
+                            "request_id": str(request.request_id),
+                            "existing_gate_id": str(existing.id),
+                            "existing_action": str(existing.action),
+                            "retry_action": str(request.action),
+                        },
+                    )
                 return GateCreateResult(
                     gate=existing,
                     decision=existing.decision,  # type: ignore[arg-type]
@@ -1523,6 +1597,7 @@ __all__ = [
     "CODE_GATE_INVALID_REQUEST",
     "CODE_GATE_MISSING",
     "CODE_GATE_NOT_QUALIFYING",
+    "CODE_GATE_REQUEST_CONFLICT",
     "DEFAULT_GATE_TTL_DAYS",
     "DEFAULT_POLICY_VERSION",
     "DEFAULT_PROFILE_DIGEST_PLACEHOLDER",
@@ -1542,6 +1617,8 @@ __all__ = [
     "compare_subject_closure",
     "current_build_revision",
     "current_gate_environment_pins",
+    "existing_gate_request_digest",
+    "gate_request_digest",
     "gate_required_for_enable",
     "gate_required_for_publish",
     "make_create_gate_request",
