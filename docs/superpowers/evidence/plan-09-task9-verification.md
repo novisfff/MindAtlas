@@ -1,11 +1,11 @@
 # Plan 09 Task 9 Final Verification & Plan 10 Handoff
 
-**Recorded at (UTC):** 2026-07-21  
-**Branch:** `worktree-plan-09-skill-admin`  
-**Worktree / repo:** `/Users/zyf/IdeaProjects/MindAtlas`  
-**HEAD at verification runs:** `50edecf75bf6cd62f96810d2b194bc1d94cd0dfe` (Tasks 1–11 tip; suites re-verified before Task 12 commit)  
-**Task 12 commit message:** `test(ai): prove Plan 09 completion lifecycle` (tip of `worktree-plan-09-skill-admin` after this change)  
-**Base (Plan 08 tip):** `cb5dac3`  
+**Recorded at (UTC):** 2026-07-21
+**Branch:** `worktree-plan-09-skill-admin`
+**Worktree / repo:** `/Users/zyf/IdeaProjects/MindAtlas`
+**HEAD at verification runs:** `50edecf75bf6cd62f96810d2b194bc1d94cd0dfe` (Tasks 1–11 tip; suites re-verified before Task 12 commit)
+**Task 12 commit message:** `test(ai): prove Plan 09 completion lifecycle` (tip of `worktree-plan-09-skill-admin` after this change)
+**Base (Plan 08 tip):** `cb5dac3`
 **Sole Alembic head:** `027869a00a47` (`add skill evaluation workbench`)
 
 ---
@@ -218,10 +218,10 @@ Synthetic structural tests remain unit evidence only — **not** release evidenc
 
 ## 10. Explicit M4 release decision
 
-**Plan 09 implementation is code-complete** behind default-off trusted mount, with process-level create→enable lifecycle, negative matrix, PG durable pins, and component-level two-gate UI evidence regenerated on this branch.
+**Plan 09 implementation is partial** behind default-off trusted mount. Process-level create→enable lifecycle, negative matrix, PG durable pins, and component-level two-gate UI evidence exist on this branch, but the worker/gate chain is still incomplete (worker not in production compose; multi-process API+worker E2E and full real-probe MA compose remain open).
 
-**Plan 09 / M4 release is NOT complete** because the repository still lacks a real server-side assistant-config principal/operator dependency (project-wide RBAC).
+**Plan 09 / M4 release is NOT complete** because the repository still lacks a real server-side assistant-config principal/operator dependency (project-wide RBAC), and worker/gate operational evidence is incomplete.
 
-**Plan 10 must not start production cutover** until that guard is merged and the checklist in §7 is green under enforce.
+**Plan 10 must not start production cutover** until that guard is merged, the checklist in §7 is green under enforce, and worker/gate chain evidence is regenerated.
 
 See also: `docs/superpowers/evidence/plan-09-remediation-e2e.md`.

@@ -1,10 +1,10 @@
 # Plan 09 Task 0 Baseline (Plans 01–08 Freeze + UX/API Inventory)
 
-**Recorded at (UTC):** 2026-07-19T15:06:01Z  
-**Branch:** `worktree-plan-09-skill-admin`  
-**Worktree:** `/root/MindAtlas/.claude/worktrees/plan-09-skill-admin`  
-**HEAD at freeze:** `cb5dac353408021fffeb5e3902acd2fc317b91de` (`cb5dac3`)  
-**HEAD subject:** `feat(ai): Plan 08 capability call ledger and durable golden writes (#55)`  
+**Recorded at (UTC):** 2026-07-19T15:06:01Z
+**Branch:** `worktree-plan-09-skill-admin`
+**Worktree:** `/root/MindAtlas/.claude/worktrees/plan-09-skill-admin`
+**HEAD at freeze:** `cb5dac353408021fffeb5e3902acd2fc317b91de` (`cb5dac3`)
+**HEAD subject:** `feat(ai): Plan 08 capability call ledger and durable golden writes (#55)`
 **Working tree product code at freeze start:** clean (untracked local `backend/.venv` symlink only; frontend `node_modules` installed during Task 0 for baseline commands).
 
 ---
@@ -232,7 +232,7 @@ backend/.venv/bin/python -m pytest \
 | frontend build | OK | — | — |
 | **Focused total** | **333** | **0** | **0** |
 
-**Unexplained baseline failures:** none in focused suites.  
+**Unexplained baseline failures:** none in focused suites.
 **Honest skips not exercised here:** PG two-session, MinIO live, full backend suite, live compose.
 
 ---

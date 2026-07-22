@@ -18,8 +18,8 @@
 
 ## Shared/dev database probe
 
-**Env name:** Shared/dev (`backend/.env` `DATABASE_URL`)  
-**Host/DB:** `192.168.30.120:5432/mindatlas`  
+**Env name:** Shared/dev (`backend/.env` `DATABASE_URL`)
+**Host/DB:** `192.168.30.120:5432/mindatlas`
 **UTC timestamp:** `2026-07-21T02:32:13Z`
 
 ### Command: `alembic current -v`
