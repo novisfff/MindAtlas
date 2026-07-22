@@ -1,8 +1,9 @@
-"""Plan 10 AI runtime migration tooling (Deploy-A inventory + package migration).
+"""Plan 10 AI runtime migration tooling (Deploy-A inventory + package + L2).
 
 Task 0: read-only inventory contracts/CLI. Task 1: additive evidence schema,
 repository, discovered-only backfill, and prepare/apply/resume CLI for inventory.
 Task 2: package/Profile migration + cutover locks + independent verify.
+Task 3: L2 package-ID backfill + compatibility seam + verify.
 Runtime selection remains legacy; traffic routing is later.
 """
 
