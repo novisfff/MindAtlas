@@ -42,6 +42,7 @@ import {
 import { mapSkillPackageError, newRequestId } from '../api/skill-packages'
 import { SkillPublishGateDialog } from '../components/SkillPublishGateDialog'
 import { SkillTestWorkbench } from '../components/SkillTestWorkbench'
+import { useSkillTestRunStore } from '../stores/skill-test-run-store'
 
 const DEFAULT_SNAPSHOT: MainAgentProfileSnapshot = {
   schemaVersion: 1,
@@ -84,6 +85,7 @@ const DEFAULT_SNAPSHOT: MainAgentProfileSnapshot = {
 
 type MutationKind = 'draft' | 'publish' | 'enable' | 'disable' | null
 type GateDialogMode = 'publish' | 'promotion' | null
+type EvalTarget = 'draft' | 'published'
 
 function gateMatches(
   gate: GateUiState | null,
@@ -113,6 +115,9 @@ function ProfileEditorBody() {
   const [gateDialogMode, setGateDialogMode] = useState<GateDialogMode>(null)
   const [draftEvidence, setDraftEvidence] = useState<QualifyingEvidenceSummary[]>([])
   const [promotionEvidence, setPromotionEvidence] = useState<QualifyingEvidenceSummary[]>([])
+  // Dual-pointer eval target: draft for publish evidence, published for promotion.
+  const [evalTarget, setEvalTarget] = useState<EvalTarget>('draft')
+  const clearEvalForSubjectChange = useSkillTestRunStore((s) => s.clearForSubjectChange)
 
   // Live-state UI mirrors server only; draft save never mutates these locally.
   const runtimeEnabled = Boolean(profile?.runtimeEnabled)
@@ -121,12 +126,35 @@ function ProfileEditorBody() {
   const aggregateRevision = profile?.aggregateRevision ?? 0
   const profileId = profile?.id ?? null
 
+  const dualPointer = Boolean(draftVersionId && publishedVersionId)
+  const workbenchSubjectKind:
+    | 'main_agent_profile_draft'
+    | 'main_agent_profile_version' = (() => {
+    if (dualPointer) {
+      return evalTarget === 'published'
+        ? 'main_agent_profile_version'
+        : 'main_agent_profile_draft'
+    }
+    if (publishedVersionId && !draftVersionId) return 'main_agent_profile_version'
+    return 'main_agent_profile_draft'
+  })()
+  const workbenchVersionId =
+    workbenchSubjectKind === 'main_agent_profile_version'
+      ? publishedVersionId
+      : draftVersionId
+
   const publishGateValid = gateMatches(publishGate, 'profile_publish', draftVersionId)
   const promotionGateValid = gateMatches(
     promotionGate,
     'profile_runtime_enable',
     publishedVersionId,
   )
+
+  function handleEvalTargetChange(next: EvalTarget) {
+    if (next === evalTarget) return
+    setEvalTarget(next)
+    clearEvalForSubjectChange()
+  }
 
   const draftQualifyingRunIds = useMemo(
     () => draftEvidence.map((row) => row.evalRunId).filter(Boolean),
@@ -308,8 +336,12 @@ function ProfileEditorBody() {
         gateId: publishGate.gateId,
         requestId: newRequestId('profile-pub'),
       })
-      // Publish invalidates draft gate; promotion must be re-earned on published subject.
+      // Publish invalidates draft evidence: clear draft run/gate and default the
+      // workbench to the published pointer so promotion eval is immediately reachable
+      // even when the backend keeps the draft pointer.
       setPublishGate(null)
+      clearEvalForSubjectChange()
+      setEvalTarget('published')
       setMessage(t('settings.universalSkills.profilePublished'))
       await reload()
     } catch (err) {
@@ -549,14 +581,48 @@ function ProfileEditorBody() {
             <h3 className="text-sm font-medium">
               {t('settings.universalSkills.evaluationWorkbench')}
             </h3>
+            {dualPointer || publishedVersionId ? (
+              <div
+                className="flex flex-wrap items-center gap-2 text-sm"
+                data-testid="profile-eval-target-selector"
+                role="group"
+                aria-label={t('settings.universalSkills.evalTargetLabel')}
+              >
+                <span className="text-muted-foreground">
+                  {t('settings.universalSkills.evalTargetLabel')}
+                </span>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={
+                    workbenchSubjectKind === 'main_agent_profile_draft'
+                      ? 'default'
+                      : 'outline'
+                  }
+                  disabled={!draftVersionId}
+                  onClick={() => handleEvalTargetChange('draft')}
+                >
+                  {t('settings.universalSkills.evalTargetDraft')}
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={
+                    workbenchSubjectKind === 'main_agent_profile_version'
+                      ? 'default'
+                      : 'outline'
+                  }
+                  disabled={!publishedVersionId}
+                  onClick={() => handleEvalTargetChange('published')}
+                >
+                  {t('settings.universalSkills.evalTargetPublished')}
+                </Button>
+              </div>
+            ) : null}
             <SkillTestWorkbench
               packageId={profileId}
-              versionId={draftVersionId ?? publishedVersionId}
-              subjectKind={
-                draftVersionId
-                  ? 'main_agent_profile_draft'
-                  : 'main_agent_profile_version'
-              }
+              versionId={workbenchVersionId}
+              subjectKind={workbenchSubjectKind}
             />
           </div>
         ) : null}

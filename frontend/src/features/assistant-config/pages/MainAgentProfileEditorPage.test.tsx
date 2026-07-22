@@ -128,6 +128,9 @@ vi.mock('react-i18next', () => ({
         'settings.universalSkills.openPromotionGateDialog': 'Open promotion gate dialog',
         'settings.universalSkills.evaluatePublishedBeforeEnable':
           'Evaluate the published version before enabling',
+        'settings.universalSkills.evalTargetLabel': 'Evaluation target',
+        'settings.universalSkills.evalTargetDraft': 'Draft',
+        'settings.universalSkills.evalTargetPublished': 'Published',
         'settings.universalSkills.evalPrompt': 'Prompt',
         'settings.universalSkills.evalLocale': 'Locale',
         'settings.universalSkills.evalMode': 'Evaluation mode',
@@ -533,6 +536,83 @@ describe('MainAgentProfileEditorPage two-gate lifecycle', () => {
     expect(screen.getByText('Evaluation workbench')).toBeInTheDocument()
     const inner = await screen.findByTestId('skill-test-workbench')
     expect(inner).toHaveAttribute('data-subject-kind', 'main_agent_profile_draft')
+  })
+
+  it('exposes dual-pointer eval target selector when draft and published both exist', async () => {
+    vi.mocked(profilesApi.getProtectedDefaultMainAgentProfile).mockResolvedValue(
+      profileSummary({
+        draftVersion: draftVersion(),
+        publishedVersion: publishedVersion(),
+        aggregateRevision: 4,
+      }) as never,
+    )
+    vi.mocked(profilesApi.listProtectedDefaultMainAgentVersions).mockResolvedValue({
+      items: [draftVersion(), publishedVersion()],
+      total: 2,
+    })
+    renderPage()
+    const selector = await screen.findByTestId('profile-eval-target-selector')
+    expect(selector).toBeInTheDocument()
+    const inner = await screen.findByTestId('skill-test-workbench')
+    // Default dual-pointer target is draft for publish evidence.
+    expect(inner).toHaveAttribute('data-subject-kind', 'main_agent_profile_draft')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Published' }))
+    await waitFor(() => {
+      expect(screen.getByTestId('skill-test-workbench')).toHaveAttribute(
+        'data-subject-kind',
+        'main_agent_profile_version',
+      )
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Draft' }))
+    await waitFor(() => {
+      expect(screen.getByTestId('skill-test-workbench')).toHaveAttribute(
+        'data-subject-kind',
+        'main_agent_profile_draft',
+      )
+    })
+  })
+
+  it('switches workbench to published subject after publish while draft remains', async () => {
+    // Dual pointer after publish: draft still present alongside published.
+    vi.mocked(profilesApi.publishProtectedDefaultMainAgent).mockImplementation(async () => {
+      const published = publishedVersion()
+      vi.mocked(profilesApi.getProtectedDefaultMainAgentProfile).mockResolvedValue(
+        profileSummary({
+          aggregateRevision: 3,
+          draftVersion: draftVersion(),
+          publishedVersion: published,
+        }) as never,
+      )
+      vi.mocked(profilesApi.listProtectedDefaultMainAgentVersions).mockResolvedValue({
+        items: [draftVersion(), published],
+        total: 2,
+      })
+      return published as never
+    })
+
+    renderPage()
+    await screen.findByTestId('skill-test-workbench')
+    // Request publish gate then publish.
+    fireEvent.click(screen.getByRole('button', { name: 'Open publish gate dialog' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Request gate' }))
+    await waitFor(() => {
+      expect(skillEvaluations.createPublishGate).toHaveBeenCalled()
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Publish profile' }))
+    await waitFor(() => {
+      expect(profilesApi.publishProtectedDefaultMainAgent).toHaveBeenCalled()
+    })
+    // After publish, dual-pointer selector defaults to published for promotion eval.
+    await waitFor(() => {
+      expect(screen.getByTestId('skill-test-workbench')).toHaveAttribute(
+        'data-subject-kind',
+        'main_agent_profile_version',
+      )
+    })
+    expect(screen.getByTestId('profile-eval-target-selector')).toBeInTheDocument()
   })
 
   it('can start a profile draft eval run via workbench (mocked API)', async () => {
