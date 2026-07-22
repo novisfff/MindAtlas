@@ -174,7 +174,7 @@ class SnapshotComparison(FrozenContract):
 
 
 class MigrationBatchResultShape(FrozenContract):
-    """Forward-compatible batch result shape (not yet persisted in Task 0)."""
+    """Forward-compatible batch result shape (Task 0 stub; Task 1 persists)."""
 
     schema_version: Literal[1] = 1
     command_kind: str
@@ -190,3 +190,71 @@ class MigrationBatchResultShape(FrozenContract):
     blocked_count: int = 0
     failed_count: int = 0
     report_digest: str | None = None
+
+
+MigrationBatchStatus = Literal[
+    "prepared", "running", "completed", "failed", "cancelled"
+]
+
+RolloutAssignmentReason = Literal["hash", "staff", "explicit_override", "rollback"]
+
+RuntimeKind = Literal["legacy", "main_agent"]
+
+EvalRunPurpose = Literal["admin_evaluation", "runtime_shadow"]
+
+
+class MigrationBatchResult(FrozenContract):
+    """Typed batch outcome returned by prepare/apply/resume services."""
+
+    schema_version: Literal[1] = 1
+    batch_id: str
+    status: MigrationBatchStatus
+    processed: int = 0
+    succeeded: int = 0
+    blocked: int = 0
+    failed: int = 0
+    next_cursor: str | None = None
+    report_artifact_id: str | None = None
+    report_digest: str | None = None
+    request_id: str | None = None
+    dry_run: bool = True
+
+
+class RuntimeShadowInputSnapshot(FrozenContract):
+    """Private evaluation-namespace snapshot identity (no raw content)."""
+
+    schema_version: Literal[1] = 1
+    snapshot_id: str
+    source_production_run_id: str
+    source_user_message_id: str | None = None
+    principal_scope_digest: str
+    message_prefix_digest: str
+    authorized_context_digest: str
+    snapshot_policy_digest: str
+    private_eval_artifact_id: str | None = None
+    payload_digest: str
+    expires_at: str | None = None
+
+
+class RolloutDecision(FrozenContract):
+    """Admission decision evidence (Task 1 schema only; routing later)."""
+
+    schema_version: Literal[1] = 1
+    rollout_revision_id: str
+    assignment_id: str | None = None
+    assigned_runtime_kind: RuntimeKind
+    selected_runtime_kind: RuntimeKind
+    write_mode: str = "off"
+    bucket: int = 0
+    assignment_reason: RolloutAssignmentReason = "hash"
+    selection_reason: Literal["assigned", "preinsert_fallback"] = "assigned"
+    fallback_event_id: str | None = None
+    admission_failure_digest: str | None = None
+
+
+class CleanupPreflightResult(FrozenContract):
+    schema_version: Literal[1] = 1
+    gate_id: str
+    valid: bool
+    blockers: tuple[dict[str, Any], ...] = ()
+    evidence_digest: str

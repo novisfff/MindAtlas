@@ -587,6 +587,7 @@ class EvaluationRepository:
         evidence_provenance: EvidenceProvenance | str = DEFAULT_EVIDENCE_PROVENANCE,
         provider_fixture_revision: str | None = None,
         provider_fixture_digest: str | None = None,
+        purpose: str = "admin_evaluation",
         actor_principal: str | None = None,
         request_id: str | None = None,
         run_id: UUID | None = None,
@@ -600,6 +601,12 @@ class EvaluationRepository:
             raise EvaluationRepositoryError(
                 CODE_INVALID_INPUT,
                 "dataset_version_ids required for dataset evaluation modes",
+            )
+        purpose_norm = str(purpose or "admin_evaluation").strip()
+        if purpose_norm not in {"admin_evaluation", "runtime_shadow"}:
+            raise EvaluationRepositoryError(
+                CODE_INVALID_INPUT,
+                f"purpose must be admin_evaluation|runtime_shadow, got {purpose_norm}",
             )
         (
             provenance,
@@ -649,6 +656,7 @@ class EvaluationRepository:
             provider_fixture_revision=fixture_rev,
             provider_fixture_digest=fixture_dig,
             gate_eligible=False,
+            purpose=purpose_norm,
             actor_principal=actor_principal,
             request_id=request_id,
         )
@@ -714,6 +722,12 @@ class EvaluationRepository:
             run.failure_code = failure_code
         if gate_eligible is not None:
             want_eligible = bool(gate_eligible)
+            # runtime_shadow is always gate-ineligible (Plan 10).
+            if want_eligible and str(getattr(run, "purpose", "") or "") == "runtime_shadow":
+                raise EvaluationRepositoryError(
+                    CODE_SYNTHETIC_GATE_INELIGIBLE,
+                    "runtime_shadow eval runs cannot become gate_eligible",
+                )
             if want_eligible and str(run.evidence_provenance) == "structural_synthetic":
                 raise EvaluationRepositoryError(
                     CODE_SYNTHETIC_GATE_INELIGIBLE,

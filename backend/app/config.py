@@ -32,6 +32,8 @@ ASSISTANT_INTERRUPT_COMMENT_MAX_CHARS_HARD_MAX = 4000
 AssistantMainAgentMode = Literal["off", "shadow", "read_only"]
 AssistantCapabilityLedgerMode = Literal["legacy_read_only", "enforced"]
 AssistantMainAgentWriteMode = Literal["off", "golden"]
+# Plan 10 runtime selection config (parser only in Task 1; no traffic effect).
+AssistantRuntimeMode = Literal["legacy", "main_agent"]
 
 
 def compute_artifact_orphan_grace_floor_sec(
@@ -85,6 +87,18 @@ class Settings(BaseSettings):
         alias="AI_MODEL_CAPABILITY_PROBE_ENABLED",
     )
 
+    # Plan 10 runtime mode (default legacy). Parser only in Task 1 — does not
+    # switch production admission. Compat mapping of ASSISTANT_MAIN_AGENT_MODE
+    # is Task 6.
+    assistant_runtime_mode: AssistantRuntimeMode = Field(
+        default="legacy",
+        alias="ASSISTANT_RUNTIME_MODE",
+    )
+    # Optional active durable rollout revision label (empty = none/default legacy).
+    assistant_runtime_rollout_revision: str = Field(
+        default="",
+        alias="ASSISTANT_RUNTIME_ROLLOUT_REVISION",
+    )
     # Plan 04 main agent feature mode + bounded resource ceilings (production default off).
     assistant_main_agent_mode: AssistantMainAgentMode = Field(
         default="off",

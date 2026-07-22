@@ -1,0 +1,565 @@
+"""Unit + contract tests for Plan 10 rollout evidence (Task 1).
+
+SQLite-friendly repository logic for assignment immutability and control pointer.
+PostgreSQL immutability triggers are covered in
+test_ai_runtime_migration_repository_postgres.py when URL is set.
+"""
+
+from __future__ import annotations
+
+import os
+import unittest
+import uuid
+from pathlib import Path
+
+from sqlalchemy import create_engine, event
+from sqlalchemy.orm import sessionmaker
+
+from tests._bootstrap import bootstrap_backend_imports, reset_caches
+
+bootstrap_backend_imports()
+reset_caches()
+
+_DIGEST_A = "a" * 64
+_DIGEST_B = "b" * 64
+_DIGEST_C = "c" * 64
+
+
+def _sqlite_session():
+    from app.database import Base
+    from app.assistant.migration import models as migration_models  # noqa: F401
+
+    engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
+
+    @event.listens_for(engine, "connect")
+    def _fk(dbapi_conn, _connection_record):  # noqa: ANN001
+        cursor = dbapi_conn.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+    # Only create migration evidence tables (avoid full app graph FKs).
+    tables = [
+        migration_models.AssistantRuntimeMigrationItem.__table__,
+        migration_models.AssistantRuntimeMigrationEvent.__table__,
+        migration_models.AssistantRuntimeMigrationBatch.__table__,
+        migration_models.AssistantRuntimeRolloutRevision.__table__,
+        migration_models.AssistantRuntimeRolloutControl.__table__,
+        migration_models.AssistantRuntimeRolloutEvent.__table__,
+        migration_models.AssistantRuntimeRolloutAssignment.__table__,
+        migration_models.AssistantLegacyApprovalArchive.__table__,
+        migration_models.AssistantRuntimeCleanupGate.__table__,
+    ]
+    Base.metadata.create_all(engine, tables=tables)
+    factory = sessionmaker(bind=engine, autoflush=True, autocommit=False, future=True)
+    return factory(), engine
+
+
+class RolloutRevisionAndControlTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.session, self.engine = _sqlite_session()
+
+    def tearDown(self) -> None:
+        self.session.close()
+        self.engine.dispose()
+
+    def test_prepare_revision_is_idempotent_for_same_label_and_digest(self) -> None:
+        from app.assistant.migration.repository import RuntimeMigrationRepository
+
+        repo = RuntimeMigrationRepository(self.session)
+        rev1 = repo.prepare_rollout_revision(
+            revision_label="legacy-default-v1",
+            runtime_mode="legacy",
+            eligible_closure_digest=_DIGEST_A,
+            build_revision="development",
+            cohort_salt_fingerprint=_DIGEST_B,
+            actor_principal="op-1",
+            reason="task1 default",
+        )
+        rev2 = repo.prepare_rollout_revision(
+            revision_label="legacy-default-v1",
+            runtime_mode="legacy",
+            eligible_closure_digest=_DIGEST_A,
+            build_revision="development",
+            cohort_salt_fingerprint=_DIGEST_B,
+            actor_principal="op-1",
+            reason="task1 default",
+        )
+        self.assertEqual(rev1.id, rev2.id)
+        self.assertEqual(rev1.config_digest, rev2.config_digest)
+        self.session.commit()
+
+    def test_prepare_revision_conflicts_on_label_digest_drift(self) -> None:
+        from app.assistant.migration.repository import (
+            CODE_CONFLICT,
+            RuntimeMigrationRepository,
+            RuntimeMigrationRepositoryError,
+        )
+
+        repo = RuntimeMigrationRepository(self.session)
+        repo.prepare_rollout_revision(
+            revision_label="legacy-default-v1",
+            runtime_mode="legacy",
+            eligible_closure_digest=_DIGEST_A,
+            build_revision="development",
+            cohort_salt_fingerprint=_DIGEST_B,
+        )
+        with self.assertRaises(RuntimeMigrationRepositoryError) as ctx:
+            repo.prepare_rollout_revision(
+                revision_label="legacy-default-v1",
+                runtime_mode="legacy",
+                shadow_percent=1,
+                eligible_closure_digest=_DIGEST_A,
+                build_revision="development",
+                cohort_salt_fingerprint=_DIGEST_B,
+            )
+        self.assertEqual(ctx.exception.code, CODE_CONFLICT)
+
+    def test_plan04_compat_rejects_nonzero_canary(self) -> None:
+        from app.assistant.migration.repository import (
+            CODE_INVALID_INPUT,
+            RuntimeMigrationRepository,
+            RuntimeMigrationRepositoryError,
+        )
+
+        repo = RuntimeMigrationRepository(self.session)
+        with self.assertRaises(RuntimeMigrationRepositoryError) as ctx:
+            repo.prepare_rollout_revision(
+                revision_label="compat-shadow",
+                runtime_mode="legacy",
+                config_origin="plan04_compat",
+                shadow_percent=5,
+                eligible_closure_digest=_DIGEST_A,
+                build_revision="development",
+                cohort_salt_fingerprint=_DIGEST_B,
+            )
+        self.assertEqual(ctx.exception.code, CODE_INVALID_INPUT)
+
+    def test_activate_advances_singleton_control_pointer(self) -> None:
+        from app.assistant.migration.repository import RuntimeMigrationRepository
+
+        repo = RuntimeMigrationRepository(self.session)
+        control = repo.ensure_rollout_control()
+        self.assertEqual(int(control.state_revision), 0)
+        self.assertIsNone(control.active_rollout_revision_id)
+
+        rev = repo.prepare_rollout_revision(
+            revision_label="legacy-default-v1",
+            runtime_mode="legacy",
+            eligible_closure_digest=_DIGEST_A,
+            build_revision="development",
+            cohort_salt_fingerprint=_DIGEST_B,
+        )
+        control = repo.activate_rollout_revision(
+            rollout_revision_id=rev.id,
+            expected_control_revision=0,
+            actor_principal="op-1",
+            reason="activate default",
+        )
+        self.assertEqual(control.active_rollout_revision_id, rev.id)
+        self.assertGreaterEqual(int(control.state_revision), 1)
+
+        active = repo.get_active_rollout_revision()
+        assert active is not None
+        self.assertEqual(active.id, rev.id)
+
+        # Stale expected control revision fails.
+        from app.assistant.migration.repository import (
+            CODE_STALE_REVISION,
+            RuntimeMigrationRepositoryError,
+        )
+
+        rev2 = repo.prepare_rollout_revision(
+            revision_label="legacy-default-v2",
+            runtime_mode="legacy",
+            eligible_closure_digest=_DIGEST_C,
+            build_revision="development",
+            cohort_salt_fingerprint=_DIGEST_B,
+        )
+        with self.assertRaises(RuntimeMigrationRepositoryError) as ctx:
+            repo.activate_rollout_revision(
+                rollout_revision_id=rev2.id,
+                expected_control_revision=0,
+            )
+        self.assertEqual(ctx.exception.code, CODE_STALE_REVISION)
+
+        control2 = repo.activate_rollout_revision(
+            rollout_revision_id=rev2.id,
+            expected_control_revision=int(control.state_revision),
+        )
+        self.assertEqual(control2.active_rollout_revision_id, rev2.id)
+        self.session.commit()
+
+    def test_assignment_immutable_for_scope_and_revision(self) -> None:
+        from app.assistant.migration.repository import (
+            CODE_IMMUTABLE,
+            RuntimeMigrationRepository,
+            RuntimeMigrationRepositoryError,
+        )
+
+        repo = RuntimeMigrationRepository(self.session)
+        rev = repo.prepare_rollout_revision(
+            revision_label="legacy-default-v1",
+            runtime_mode="legacy",
+            eligible_closure_digest=_DIGEST_A,
+            build_revision="development",
+            cohort_salt_fingerprint=_DIGEST_B,
+        )
+        conv = uuid.uuid4()
+        a1 = repo.create_assignment(
+            conversation_id=conv,
+            rollout_revision_id=rev.id,
+            assigned_runtime_kind="legacy",
+            assignment_reason="hash",
+            cohort_key_digest=_DIGEST_C,
+        )
+        a2 = repo.create_assignment(
+            conversation_id=conv,
+            rollout_revision_id=rev.id,
+            assigned_runtime_kind="legacy",
+            assignment_reason="hash",
+            cohort_key_digest=_DIGEST_C,
+        )
+        self.assertEqual(a1.id, a2.id)
+
+        with self.assertRaises(RuntimeMigrationRepositoryError) as ctx:
+            repo.create_assignment(
+                conversation_id=conv,
+                rollout_revision_id=rev.id,
+                assigned_runtime_kind="main_agent",
+                assignment_reason="hash",
+                cohort_key_digest=_DIGEST_C,
+            )
+        self.assertEqual(ctx.exception.code, CODE_IMMUTABLE)
+        self.session.commit()
+
+    def test_cleanup_gate_append_only_and_safe_counts(self) -> None:
+        from app.assistant.migration.repository import (
+            CODE_INVALID_INPUT,
+            RuntimeMigrationRepository,
+            RuntimeMigrationRepositoryError,
+        )
+
+        repo = RuntimeMigrationRepository(self.session)
+        gate = repo.append_cleanup_gate(
+            gate_kind="deploy_b1",
+            decision="failed",
+            schema_revision="6417df0243be",
+            build_revision="development",
+            inventory_digest=_DIGEST_A,
+            evidence_digest=_DIGEST_B,
+            snapshot_counts={"nonterminalRuns": 0, "blockers": 3},
+            actor_principal="op-1",
+            reason="not ready",
+        )
+        self.assertEqual(gate.decision, "failed")
+        with self.assertRaises(RuntimeMigrationRepositoryError) as ctx:
+            repo.append_cleanup_gate(
+                gate_kind="deploy_b1",
+                decision="failed",
+                schema_revision="6417df0243be",
+                build_revision="development",
+                inventory_digest=_DIGEST_A,
+                evidence_digest=_DIGEST_B,
+                snapshot_counts={"system_prompt": "LEAK"},
+            )
+        self.assertEqual(ctx.exception.code, CODE_INVALID_INPUT)
+
+
+class MigrationItemAndBatchTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.session, self.engine = _sqlite_session()
+
+    def tearDown(self) -> None:
+        self.session.close()
+        self.engine.dispose()
+
+    def test_discovered_upsert_and_digest_drift_blocks(self) -> None:
+        from app.assistant.migration.repository import RuntimeMigrationRepository
+
+        repo = RuntimeMigrationRepository(self.session)
+        item, outcome = repo.upsert_discovered_item(
+            subject_kind="skill",
+            source_type="legacy_skill",
+            source_id="skill-1",
+            source_name="quick_stats",
+            source_name_normalized="quick_stats",
+            source_digest=_DIGEST_A,
+            actor_principal="op-1",
+            build_revision="development",
+        )
+        self.assertEqual(outcome, "created")
+        self.assertEqual(item.state, "discovered")
+        events = repo.list_item_events(item.id)
+        self.assertEqual(len(events), 1)
+
+        item2, outcome2 = repo.upsert_discovered_item(
+            subject_kind="skill",
+            source_type="legacy_skill",
+            source_id="skill-1",
+            source_name="quick_stats",
+            source_name_normalized="quick_stats",
+            source_digest=_DIGEST_A,
+        )
+        self.assertEqual(outcome2, "unchanged")
+        self.assertEqual(item2.id, item.id)
+
+        item3, outcome3 = repo.upsert_discovered_item(
+            subject_kind="skill",
+            source_type="legacy_skill",
+            source_id="skill-1",
+            source_name="quick_stats",
+            source_name_normalized="quick_stats",
+            source_digest=_DIGEST_B,
+        )
+        self.assertEqual(outcome3, "drifted")
+        self.assertEqual(item3.state, "blocked")
+        self.assertEqual(item3.reason_code, "source_digest_drift")
+        self.assertEqual(len(repo.list_item_events(item.id)), 2)
+
+    def test_item_transition_requires_expected_revision(self) -> None:
+        from app.assistant.migration.repository import (
+            CODE_FORBIDDEN_TRANSITION,
+            CODE_STALE_REVISION,
+            RuntimeMigrationRepository,
+            RuntimeMigrationRepositoryError,
+        )
+
+        repo = RuntimeMigrationRepository(self.session)
+        item, _ = repo.upsert_discovered_item(
+            subject_kind="skill",
+            source_type="legacy_skill",
+            source_id="skill-2",
+            source_name="x",
+            source_name_normalized="x",
+            source_digest=_DIGEST_A,
+        )
+        mapped = repo.transition_item(
+            item_id=item.id,
+            expected_revision=int(item.state_revision),
+            to_state="mapped",
+            target_type="package",
+            target_id="pkg-1",
+            target_digest=_DIGEST_C,
+        )
+        self.assertEqual(mapped.state, "mapped")
+        with self.assertRaises(RuntimeMigrationRepositoryError) as ctx:
+            repo.transition_item(
+                item_id=item.id,
+                expected_revision=0,
+                to_state="migrated",
+            )
+        self.assertEqual(ctx.exception.code, CODE_STALE_REVISION)
+        with self.assertRaises(RuntimeMigrationRepositoryError) as ctx2:
+            repo.transition_item(
+                item_id=item.id,
+                expected_revision=int(mapped.state_revision),
+                to_state="verified",  # must go migrated first
+            )
+        self.assertEqual(ctx2.exception.code, CODE_FORBIDDEN_TRANSITION)
+
+    def test_batch_request_id_idempotent_and_resume_drift(self) -> None:
+        from app.assistant.migration.repository import (
+            CODE_CONFLICT,
+            CODE_DRIFT,
+            RuntimeMigrationRepository,
+            RuntimeMigrationRepositoryError,
+        )
+
+        repo = RuntimeMigrationRepository(self.session)
+        batch = repo.prepare_batch(
+            command_kind="inventory",
+            source_snapshot_digest=_DIGEST_A,
+            configuration_digest=_DIGEST_B,
+            build_revision="development",
+            schema_revision="6417df0243be",
+            environment="test",
+            database_fingerprint="fp-1",
+            request_id="req-1",
+            batch_size=50,
+        )
+        same = repo.prepare_batch(
+            command_kind="inventory",
+            source_snapshot_digest=_DIGEST_A,
+            configuration_digest=_DIGEST_B,
+            build_revision="development",
+            schema_revision="6417df0243be",
+            environment="test",
+            database_fingerprint="fp-1",
+            request_id="req-1",
+            batch_size=50,
+        )
+        self.assertEqual(batch.id, same.id)
+        with self.assertRaises(RuntimeMigrationRepositoryError) as ctx:
+            repo.prepare_batch(
+                command_kind="inventory",
+                source_snapshot_digest=_DIGEST_C,
+                configuration_digest=_DIGEST_B,
+                build_revision="development",
+                schema_revision="6417df0243be",
+                environment="test",
+                database_fingerprint="fp-1",
+                request_id="req-1",
+            )
+        self.assertEqual(ctx.exception.code, CODE_CONFLICT)
+
+        with self.assertRaises(RuntimeMigrationRepositoryError) as ctx2:
+            repo.resume_batch(
+                batch_id=batch.id,
+                expected_revision=0,
+                source_snapshot_digest=_DIGEST_C,
+                configuration_digest=_DIGEST_B,
+                build_revision="development",
+                schema_revision="6417df0243be",
+            )
+        self.assertEqual(ctx2.exception.code, CODE_DRIFT)
+
+    def test_discovery_backfill_dry_run_and_apply(self) -> None:
+        from app.assistant.migration.discovery import backfill_discovered_from_records
+        from app.assistant.migration.repository import RuntimeMigrationRepository
+
+        fixture = Path(__file__).resolve().parents[0] / "fixtures" / "ai_runtime_migration" / "sanitized_skill_records.json"
+        import json
+
+        records = json.loads(fixture.read_text(encoding="utf-8"))
+        dry = backfill_discovered_from_records(
+            self.session,
+            records,
+            request_id="dry-1",
+            dry_run=True,
+            batch_size=100,
+        )
+        self.assertGreater(dry.created, 0)
+        self.assertIsNone(dry.batch_id)
+        # dry-run does not persist
+        repo = RuntimeMigrationRepository(self.session)
+        self.assertIsNone(
+            repo.get_item_by_source(
+                subject_kind="skill",
+                source_type="legacy_skill",
+                source_id="11111111-1111-4111-8111-111111111111",
+            )
+        )
+
+        applied = backfill_discovered_from_records(
+            self.session,
+            records,
+            request_id="apply-1",
+            actor_principal="op-1",
+            dry_run=False,
+            batch_size=100,
+        )
+        self.session.commit()
+        self.assertGreater(applied.created, 0)
+        self.assertIsNotNone(applied.batch_id)
+        item = repo.get_item_by_source(
+            subject_kind="skill",
+            source_type="legacy_skill",
+            source_id="11111111-1111-4111-8111-111111111111",
+        )
+        self.assertIsNotNone(item)
+
+        # Idempotent re-apply
+        again = backfill_discovered_from_records(
+            self.session,
+            records,
+            request_id="apply-2",
+            actor_principal="op-1",
+            dry_run=False,
+            batch_size=100,
+        )
+        self.session.commit()
+        self.assertEqual(again.created, 0)
+        self.assertGreater(again.unchanged, 0)
+
+
+class CliPrepareApplyTests(unittest.TestCase):
+    def test_cli_prepare_dry_run_exit_0(self) -> None:
+        import tempfile
+        from app.assistant.migration.cli import main
+
+        fixture = (
+            Path(__file__).resolve().parents[0]
+            / "fixtures"
+            / "ai_runtime_migration"
+            / "sanitized_skill_records.json"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "report.json"
+            code = main(
+                [
+                    "inventory",
+                    "prepare",
+                    "--environment",
+                    "test",
+                    "--database-fingerprint",
+                    "fp",
+                    "--source-snapshot-digest",
+                    "0" * 64,
+                    "--expected-schema-head",
+                    "6417df0243be",
+                    "--expected-build-revision",
+                    "development",
+                    "--request-id",
+                    "cli-prep-1",
+                    "--batch-size",
+                    "50",
+                    "--dry-run",
+                    "--report-json",
+                    str(report),
+                    "--fixture-json",
+                    str(fixture),
+                ]
+            )
+            self.assertEqual(code, 0)
+            self.assertTrue(report.exists())
+
+    def test_cli_apply_fail_closed_without_operator(self) -> None:
+        import tempfile
+        from app.assistant.migration.cli import main
+
+        fixture = (
+            Path(__file__).resolve().parents[0]
+            / "fixtures"
+            / "ai_runtime_migration"
+            / "sanitized_skill_records.json"
+        )
+        os.environ.pop("MINDATLAS_MIGRATION_OPERATOR_PRINCIPAL", None)
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "report.json"
+            code = main(
+                [
+                    "inventory",
+                    "apply",
+                    "--environment",
+                    "test",
+                    "--database-fingerprint",
+                    "fp",
+                    "--source-snapshot-digest",
+                    "0" * 64,
+                    "--expected-schema-head",
+                    "6417df0243be",
+                    "--expected-build-revision",
+                    "development",
+                    "--request-id",
+                    "cli-apply-1",
+                    "--batch-size",
+                    "50",
+                    "--apply",
+                    "--report-json",
+                    str(report),
+                    "--fixture-json",
+                    str(fixture),
+                ]
+            )
+            self.assertEqual(code, 3)
+
+    def test_runtime_mode_config_defaults_legacy(self) -> None:
+        from app.config import Settings
+
+        s = Settings()
+        self.assertEqual(s.assistant_runtime_mode, "legacy")
+        self.assertEqual(s.assistant_runtime_rollout_revision, "")
+
+
+if __name__ == "__main__":
+    unittest.main()
