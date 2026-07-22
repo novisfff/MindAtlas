@@ -932,5 +932,219 @@ class CliPrepareApplyTests(unittest.TestCase):
         self.assertEqual(s.assistant_runtime_rollout_revision, "")
 
 
+
+
+class DeterministicAssignmentTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.session, self.engine = _sqlite_session()
+
+    def tearDown(self) -> None:
+        self.session.close()
+        self.engine.dispose()
+
+    def test_bucket_is_stable_for_scope_and_revision(self) -> None:
+        from app.assistant.migration.rollout import compute_cohort_bucket, prepare_revision
+
+        rev = prepare_revision(
+            self.session,
+            revision_label="assign-stable-v1",
+            runtime_mode="main_agent",
+            eligible_closure_digest=_DIGEST_A,
+            build_revision="development",
+            read_canary_percent=100,
+            cohort_salt="test-salt-1",
+        )
+        conv = uuid.uuid4()
+        b1, d1 = compute_cohort_bucket(
+            conversation_id=conv,
+            rollout_revision_id=rev.id,
+            salt="test-salt-1",
+        )
+        b2, d2 = compute_cohort_bucket(
+            conversation_id=conv,
+            rollout_revision_id=rev.id,
+            salt="test-salt-1",
+        )
+        self.assertEqual(b1, b2)
+        self.assertEqual(d1, d2)
+        self.assertGreaterEqual(b1, 0)
+        self.assertLess(b1, 100)
+
+    def test_assignment_main_at_100_percent(self) -> None:
+        from app.assistant.migration.rollout import ensure_assignment, prepare_revision
+
+        rev = prepare_revision(
+            self.session,
+            revision_label="main-100-v1",
+            runtime_mode="main_agent",
+            eligible_closure_digest=_DIGEST_A,
+            build_revision="development",
+            read_canary_percent=100,
+            cohort_salt="salt-a",
+        )
+        result = ensure_assignment(
+            self.session,
+            conversation_id=uuid.uuid4(),
+            revision=rev,
+            salt="salt-a",
+        )
+        self.assertEqual(result.assigned_runtime_kind, "main_agent")
+        self.assertEqual(result.assignment_reason, "hash")
+        # Idempotent
+        again = ensure_assignment(
+            self.session,
+            conversation_id=result.assignment.conversation_id,
+            revision=rev,
+            salt="salt-a",
+        )
+        self.assertEqual(again.assignment.id, result.assignment.id)
+
+    def test_assignment_legacy_at_zero_percent(self) -> None:
+        from app.assistant.migration.rollout import ensure_assignment, prepare_revision
+
+        rev = prepare_revision(
+            self.session,
+            revision_label="main-0-v1",
+            runtime_mode="main_agent",
+            eligible_closure_digest=_DIGEST_A,
+            build_revision="development",
+            read_canary_percent=0,
+            cohort_salt="salt-b",
+        )
+        # prepare_revision auto-bumps main_agent 0 → 100 for local/dev; force 0 via repo
+        from app.assistant.migration.repository import RuntimeMigrationRepository
+
+        rev2 = RuntimeMigrationRepository(self.session).prepare_rollout_revision(
+            revision_label="main-0-forced",
+            runtime_mode="main_agent",
+            read_canary_percent=0,
+            eligible_closure_digest=_DIGEST_C,
+            build_revision="development",
+            cohort_salt_fingerprint=_DIGEST_B,
+        )
+        result = ensure_assignment(
+            self.session,
+            conversation_id=uuid.uuid4(),
+            revision=rev2,
+            salt="salt-b",
+        )
+        self.assertEqual(result.assigned_runtime_kind, "legacy")
+
+    def test_plan04_compat_mapping_table(self) -> None:
+        from app.assistant.migration.rollout import (
+            RolloutError,
+            resolve_runtime_mode_from_env,
+        )
+
+        absent = resolve_runtime_mode_from_env(
+            runtime_mode_present=False, main_agent_mode_present=False
+        )
+        self.assertEqual(absent["runtime_mode"], "legacy")
+
+        off = resolve_runtime_mode_from_env(
+            main_agent_mode="off",
+            runtime_mode_present=False,
+            main_agent_mode_present=True,
+        )
+        self.assertEqual(off["runtime_mode"], "legacy")
+        self.assertFalse(off["paired_shadow_eligible"])
+
+        shadow = resolve_runtime_mode_from_env(
+            main_agent_mode="shadow",
+            runtime_mode_present=False,
+            main_agent_mode_present=True,
+        )
+        self.assertEqual(shadow["runtime_mode"], "legacy")
+        self.assertFalse(shadow["paired_shadow_eligible"])
+
+        with self.assertRaises(RolloutError) as ctx:
+            resolve_runtime_mode_from_env(
+                main_agent_mode="read_only",
+                runtime_mode_present=False,
+                main_agent_mode_present=True,
+            )
+        self.assertEqual(ctx.exception.code, "explicit_runtime_mode_required")
+
+        with self.assertRaises(RolloutError) as ctx2:
+            resolve_runtime_mode_from_env(
+                runtime_mode="legacy",
+                main_agent_mode="off",
+                runtime_mode_present=True,
+                main_agent_mode_present=True,
+            )
+        self.assertEqual(ctx2.exception.code, "dual_runtime_mode_variables")
+
+    def test_activate_and_rollback_wrappers(self) -> None:
+        from app.assistant.migration.rollout import (
+            activate_revision,
+            prepare_revision,
+            rollback_to_legacy,
+        )
+
+        rev = prepare_revision(
+            self.session,
+            revision_label="main-local-v1",
+            runtime_mode="main_agent",
+            eligible_closure_digest=_DIGEST_A,
+            build_revision="development",
+            read_canary_percent=100,
+        )
+        control = activate_revision(
+            self.session,
+            rollout_revision_id=rev.id,
+            expected_control_revision=0,
+            actor_principal="op-1",
+            reason="local main",
+        )
+        self.assertEqual(control.active_rollout_revision_id, rev.id)
+
+        rb_rev, rb_control = rollback_to_legacy(
+            self.session,
+            revision_label="rollback-legacy-v1",
+            eligible_closure_digest=_DIGEST_C,
+            build_revision="development",
+            actor_principal="op-1",
+            expected_control_revision=int(control.state_revision),
+        )
+        self.assertEqual(rb_rev.runtime_mode, "legacy")
+        self.assertEqual(rb_control.active_rollout_revision_id, rb_rev.id)
+        self.session.commit()
+
+    def test_cli_rollout_prepare_dry_run(self) -> None:
+        import tempfile
+        from app.assistant.migration.cli import main
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "rollout.json"
+            code = main(
+                [
+                    "rollout",
+                    "prepare",
+                    "--environment",
+                    "test",
+                    "--database-fingerprint",
+                    "fp",
+                    "--source-snapshot-digest",
+                    "a" * 64,
+                    "--expected-schema-head",
+                    "6417df0243be",
+                    "--expected-build-revision",
+                    "development",
+                    "--request-id",
+                    "rollout-prep-1",
+                    "--batch-size",
+                    "1",
+                    "--dry-run",
+                    "--report-json",
+                    str(report),
+                    "--revision-label",
+                    "cli-main-v1",
+                    "--runtime-mode",
+                    "main_agent",
+                ]
+            )
+            self.assertEqual(code, 0)
+            self.assertTrue(report.exists())
+
 if __name__ == "__main__":
     unittest.main()

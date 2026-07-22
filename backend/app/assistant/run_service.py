@@ -76,6 +76,7 @@ class AssistantChatRunService:
         memory_commit_status: str | None = None,
         deadline_at=None,
         commit: bool = True,
+        run_id: UUID | None = None,
     ) -> AssistantChatRun:
         """Create a Run with immutable ``runtime_kind``.
 
@@ -86,6 +87,9 @@ class AssistantChatRunService:
         append the initial public event on the same Session, then commit once so
         workers never claim a Run that is still missing its initialization event
         (Plan 06 §9 / Task 3 atomic write path).
+
+        Plan 10: optional ``run_id`` pre-generates the primary key so a pre-insert
+        fallback event can reference the Legacy Run id in the same transaction.
         """
         # Plan 09 Task 4: hard tripwire when Eval scope reaches production Run writer.
         from app.assistant.evaluation.isolation import tripwire_production_writer
@@ -123,20 +127,23 @@ class AssistantChatRunService:
                 memory_commit_status = "not_applicable"
             capability_ledger_mode = None
 
-        run = AssistantChatRun(
-            conversation_id=conversation.id,
-            user_message_id=user_message.id,
-            assistant_message_id=assistant_message.id,
-            status=RUN_STATUS_QUEUED,
-            last_event_seq=0,
-            checkpoint_seq=0,
-            runtime_kind=kind,
-            runtime_contract_version=runtime_contract_version,
-            required_app_build_revision=required_app_build_revision,
-            memory_commit_status=memory_commit_status,
-            capability_ledger_mode=capability_ledger_mode,
-            deadline_at=deadline_at,
-        )
+        run_kwargs: dict = {
+            "conversation_id": conversation.id,
+            "user_message_id": user_message.id,
+            "assistant_message_id": assistant_message.id,
+            "status": RUN_STATUS_QUEUED,
+            "last_event_seq": 0,
+            "checkpoint_seq": 0,
+            "runtime_kind": kind,
+            "runtime_contract_version": runtime_contract_version,
+            "required_app_build_revision": required_app_build_revision,
+            "memory_commit_status": memory_commit_status,
+            "capability_ledger_mode": capability_ledger_mode,
+            "deadline_at": deadline_at,
+        }
+        if run_id is not None:
+            run_kwargs["id"] = run_id
+        run = AssistantChatRun(**run_kwargs)
         self.db.add(run)
         if commit:
             self.db.commit()

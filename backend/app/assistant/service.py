@@ -497,27 +497,58 @@ class AssistantService:
         self.db.commit()
         self.db.refresh(assistant_msg)
 
-        # Plan 06 Task 6: admit + select immutable runtime_kind immediately before
-        # Run insertion. A permitted Legacy fallback happens only before the
-        # durable row exists; once main_agent is inserted, never fall back.
+        # Plan 06 Task 6 / Plan 10 Task 6: admit + select immutable runtime_kind
+        # immediately before Run insertion. A permitted Legacy fallback happens
+        # only before the durable row exists; once main_agent is inserted, never
+        # fall back. When an active rollout revision exists, freeze assignment.
         from app.assistant.durable.admission import admit_and_select_runtime
 
         runtime_kind, admit_reason, create_kwargs = admit_and_select_runtime(
             self.db,
             execution_kind="production",
+            conversation_id=conversation.id,
         )
+        # Strip internal Plan 10 metadata before create_run kwargs.
+        preinsert_fallback = create_kwargs.pop("_preinsert_fallback", None)
+        create_kwargs.pop("_rollout_decision", None)
+        if preinsert_fallback is not None and getattr(
+            preinsert_fallback, "resulting_legacy_run_id", None
+        ):
+            create_kwargs["run_id"] = preinsert_fallback.resulting_legacy_run_id
         is_main_agent = str(create_kwargs.get("runtime_kind") or runtime_kind) == "main_agent"
         try:
             # Main Agent: create Run + initial public event in ONE transaction so a
             # worker cannot claim a half-initialized queued row (Plan 06 §3/§9).
             # Legacy keeps the historical two-step commit for compatibility.
+            # Pre-insert fallback: insert Legacy Run then record fallback event
+            # atomically before commit.
             run = run_svc.create_run(
                 conversation=conversation,
                 user_message=user_msg,
                 assistant_message=assistant_msg,
-                commit=not is_main_agent,
+                commit=not is_main_agent and preinsert_fallback is None,
                 **create_kwargs,
             )
+            if preinsert_fallback is not None:
+                try:
+                    from app.assistant.migration.rollout import record_preinsert_fallback
+                    from app.config import get_settings
+
+                    record_preinsert_fallback(
+                        self.db,
+                        decision=preinsert_fallback,
+                        resulting_legacy_run_id=run.id,
+                        build_revision=getattr(
+                            get_settings(), "app_build_revision", None
+                        ),
+                    )
+                except Exception:  # noqa: BLE001
+                    # Fallback evidence failure must not invent a second Run; the
+                    # Legacy Run already exists — continue without remapping.
+                    logger = __import__("logging").getLogger(__name__)
+                    logger.exception(
+                        "preinsert fallback evidence write failed run=%s", run.id
+                    )
             run_svc.append_event(
                 run_id=run.id,
                 event_name="run_status",
@@ -527,9 +558,9 @@ class AssistantService:
                     "runtimeKind": str(run.runtime_kind or runtime_kind),
                     **({"admissionReason": admit_reason} if admit_reason else {}),
                 },
-                commit=not is_main_agent,
+                commit=not is_main_agent and preinsert_fallback is None,
             )
-            if is_main_agent:
+            if is_main_agent or preinsert_fallback is not None:
                 self.db.commit()
                 self.db.refresh(run)
         except ValueError as exc:

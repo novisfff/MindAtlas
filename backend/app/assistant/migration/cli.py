@@ -2,8 +2,8 @@
 
 Not mounted as HTTP. Inventory scan is read-only; inventory prepare/apply/resume
 write discovered evidence under --apply with operator principal fail-closed.
-Packages, L2, and approvals mutation groups are implemented; rollout/cleanup
-remain stubs until later tasks.
+Packages, L2, approvals, and rollout prepare/activate/rollback are implemented;
+cleanup remains a stub until later tasks.
 
 Safety flags are bindings, not authority. No flag can mint a principal.
 """
@@ -228,9 +228,87 @@ def _build_parser() -> argparse.ArgumentParser:
                 help="Skip terminal-row ↔ archive digest matching",
             )
 
+    # Rollout prepare/activate/rollback (Task 6).
+    rollout = sub.add_parser("rollout", help="Runtime rollout revision commands")
+    rollout_sub = rollout.add_subparsers(dest="cmd", required=True)
+    for cmd, help_text in (
+        ("prepare", "Prepare an immutable rollout revision"),
+        ("activate", "Activate a prepared rollout revision"),
+        ("rollback", "Prepare+activate a legacy-selecting revision"),
+    ):
+        cmd_p = rollout_sub.add_parser(cmd, help=help_text)
+        _add_safety_flags(cmd_p)
+        cmd_p.add_argument(
+            "--operator-principal",
+            default=None,
+            help="Operator principal id (required for --apply)",
+        )
+        cmd_p.add_argument(
+            "--revision-label",
+            required=True,
+            help="Immutable rollout revision label",
+        )
+        cmd_p.add_argument(
+            "--runtime-mode",
+            choices=["legacy", "main_agent"],
+            default="legacy",
+            help="Runtime mode for prepare/rollback (activate ignores)",
+        )
+        cmd_p.add_argument(
+            "--eligible-closure-digest",
+            default=None,
+            help="Eligible package/profile/gate closure digest (sha256 hex)",
+        )
+        cmd_p.add_argument(
+            "--read-canary-percent",
+            type=int,
+            default=None,
+            help="Read canary percent 0..100 (main_agent defaults to 100 for local/dev)",
+        )
+        cmd_p.add_argument(
+            "--write-mode",
+            choices=["off", "golden"],
+            default="off",
+        )
+        cmd_p.add_argument(
+            "--write-percent",
+            type=int,
+            default=0,
+        )
+        cmd_p.add_argument(
+            "--shadow-eligible-scope",
+            choices=["none", "staff", "fixture", "approved_production"],
+            default="none",
+        )
+        cmd_p.add_argument(
+            "--shadow-percent",
+            type=int,
+            default=0,
+        )
+        cmd_p.add_argument(
+            "--config-origin",
+            choices=["native", "plan04_compat"],
+            default="native",
+        )
+        cmd_p.add_argument(
+            "--rollout-revision-id",
+            default=None,
+            help="Existing revision UUID (activate) or omit to resolve by label",
+        )
+        cmd_p.add_argument(
+            "--expected-control-revision",
+            type=int,
+            default=None,
+            help="CAS expected control state_revision (activate/rollback)",
+        )
+        cmd_p.add_argument(
+            "--reason",
+            default=None,
+            help="Operator reason (bounded)",
+        )
+
     # Remaining mutation groups — stubs until later tasks.
     for group_name, commands in (
-        ("rollout", ("prepare", "activate", "rollback")),
         ("cleanup", ("evaluate", "preflight")),
     ):
         grp = sub.add_parser(group_name, help=f"{group_name} commands (not yet implemented)")
@@ -925,6 +1003,270 @@ def _run_stub(args: argparse.Namespace) -> int:
     return CLI_EXIT_PRECONDITION_FAILED
 
 
+def _run_rollout_command(
+    args: argparse.Namespace,
+    *,
+    session_factory: Callable[[], Any] | None = None,
+) -> int:
+    """rollout prepare / activate / rollback."""
+    from app.assistant.domain.digests import sha256_canonical_json
+    from app.assistant.migration.rollout import (
+        RolloutError,
+        activate_revision,
+        get_revision_by_label,
+        prepare_revision,
+        rollback_to_legacy,
+    )
+    from app.assistant.migration.repository import (
+        RuntimeMigrationRepository,
+        RuntimeMigrationRepositoryError,
+    )
+
+    dry_run = bool(args.dry_run)
+    apply = bool(args.apply)
+    if dry_run == apply:
+        _emit(
+            {
+                "ok": False,
+                "error": "precondition_failed",
+                "reason": "exactly_one_of_dry_run_or_apply",
+            }
+        )
+        return CLI_EXIT_PRECONDITION_FAILED
+
+    operator = _resolve_operator_principal(getattr(args, "operator_principal", None))
+    if apply and not operator:
+        _emit(
+            {
+                "ok": False,
+                "error": "precondition_failed",
+                "reason": "operator_principal_required_for_apply",
+            }
+        )
+        return CLI_EXIT_PRECONDITION_FAILED
+
+    if apply and _is_wildcard_source_digest(str(args.source_snapshot_digest)):
+        _emit(
+            {
+                "ok": False,
+                "error": "conflict_or_drift",
+                "reason": "wildcard_source_snapshot_digest_not_allowed_on_apply",
+                "expected": str(args.source_snapshot_digest),
+            }
+        )
+        return CLI_EXIT_CONFLICT_OR_DRIFT
+
+    label = str(args.revision_label or "").strip()
+    if not label:
+        _emit(
+            {
+                "ok": False,
+                "error": "precondition_failed",
+                "reason": "revision_label_required",
+            }
+        )
+        return CLI_EXIT_PRECONDITION_FAILED
+
+    eligible = getattr(args, "eligible_closure_digest", None)
+    if not eligible:
+        # Bind eligible closure to source snapshot when not provided.
+        eligible = str(args.source_snapshot_digest)
+    eligible = str(eligible).strip().lower()
+    if len(eligible) != 64 or any(ch not in "0123456789abcdef" for ch in eligible):
+        _emit(
+            {
+                "ok": False,
+                "error": "precondition_failed",
+                "reason": "eligible_closure_digest_invalid",
+            }
+        )
+        return CLI_EXIT_PRECONDITION_FAILED
+
+    runtime_mode = str(getattr(args, "runtime_mode", "legacy") or "legacy")
+    read_canary = getattr(args, "read_canary_percent", None)
+    if read_canary is None:
+        read_canary = 100 if runtime_mode == "main_agent" else 0
+    report_payload: dict[str, Any] = {
+        "command": f"rollout.{args.cmd}",
+        "dryRun": dry_run,
+        "revisionLabel": label,
+        "runtimeMode": runtime_mode,
+        "environment": str(args.environment),
+        "databaseFingerprint": str(args.database_fingerprint),
+        "schemaHead": str(args.expected_schema_head),
+        "buildRevision": str(args.expected_build_revision),
+        "sourceSnapshotDigest": str(args.source_snapshot_digest),
+        "eligibleClosureDigest": eligible,
+        "requestId": str(args.request_id),
+    }
+
+    if dry_run and session_factory is None:
+        report_payload["ok"] = True
+        report_payload["projected"] = True
+        report_payload["reportDigest"] = sha256_canonical_json(report_payload)
+        _write_report(args.report_json, report_payload)
+        _emit(
+            {
+                "ok": True,
+                "command": report_payload["command"],
+                "dryRun": True,
+                "revisionLabel": label,
+                "reportDigest": report_payload["reportDigest"],
+                "reportJson": str(args.report_json),
+            }
+        )
+        return CLI_EXIT_COMPLETED
+
+    resolved_factory = _resolve_session_factory(session_factory, require=True)
+    assert resolved_factory is not None
+    session = resolved_factory()
+    try:
+        if args.cmd == "prepare":
+            if dry_run:
+                # Project only; still allow optional durable prepare via apply.
+                report_payload["ok"] = True
+                report_payload["projected"] = True
+            else:
+                rev = prepare_revision(
+                    session,
+                    revision_label=label,
+                    runtime_mode=runtime_mode,
+                    eligible_closure_digest=eligible,
+                    build_revision=str(args.expected_build_revision),
+                    shadow_eligible_scope=str(
+                        getattr(args, "shadow_eligible_scope", "none") or "none"
+                    ),
+                    shadow_percent=int(getattr(args, "shadow_percent", 0) or 0),
+                    read_canary_percent=int(read_canary),
+                    write_mode=str(getattr(args, "write_mode", "off") or "off"),
+                    write_percent=int(getattr(args, "write_percent", 0) or 0),
+                    config_origin=str(getattr(args, "config_origin", "native") or "native"),
+                    actor_principal=operator,
+                    reason=getattr(args, "reason", None),
+                )
+                session.commit()
+                report_payload["ok"] = True
+                report_payload["rolloutRevisionId"] = str(rev.id)
+                report_payload["configDigest"] = str(rev.config_digest)
+                report_payload["readCanaryPercent"] = int(rev.read_canary_percent)
+        elif args.cmd == "activate":
+            rev_id_raw = getattr(args, "rollout_revision_id", None)
+            if rev_id_raw:
+                rev_id = UUID(str(rev_id_raw))
+            else:
+                existing = get_revision_by_label(session, label)
+                if existing is None:
+                    _emit(
+                        {
+                            "ok": False,
+                            "error": "precondition_failed",
+                            "reason": "rollout_revision_not_found",
+                            "revisionLabel": label,
+                        }
+                    )
+                    return CLI_EXIT_PRECONDITION_FAILED
+                rev_id = existing.id
+            if dry_run:
+                report_payload["ok"] = True
+                report_payload["projected"] = True
+                report_payload["rolloutRevisionId"] = str(rev_id)
+            else:
+                control = activate_revision(
+                    session,
+                    rollout_revision_id=rev_id,
+                    expected_control_revision=getattr(
+                        args, "expected_control_revision", None
+                    ),
+                    actor_principal=operator,
+                    reason=getattr(args, "reason", None),
+                )
+                session.commit()
+                report_payload["ok"] = True
+                report_payload["rolloutRevisionId"] = str(rev_id)
+                report_payload["controlRevision"] = int(control.state_revision)
+                report_payload["activeRolloutRevisionId"] = str(
+                    control.active_rollout_revision_id
+                )
+        elif args.cmd == "rollback":
+            if dry_run:
+                report_payload["ok"] = True
+                report_payload["projected"] = True
+                report_payload["runtimeMode"] = "legacy"
+            else:
+                rev, control = rollback_to_legacy(
+                    session,
+                    revision_label=label,
+                    eligible_closure_digest=eligible,
+                    build_revision=str(args.expected_build_revision),
+                    actor_principal=operator,
+                    reason=getattr(args, "reason", None) or "cli_rollback",
+                    expected_control_revision=getattr(
+                        args, "expected_control_revision", None
+                    ),
+                )
+                session.commit()
+                report_payload["ok"] = True
+                report_payload["runtimeMode"] = "legacy"
+                report_payload["rolloutRevisionId"] = str(rev.id)
+                report_payload["controlRevision"] = int(control.state_revision)
+                report_payload["activeRolloutRevisionId"] = str(
+                    control.active_rollout_revision_id
+                )
+        else:
+            _emit(
+                {
+                    "ok": False,
+                    "error": "precondition_failed",
+                    "reason": "unknown_rollout_command",
+                    "cmd": args.cmd,
+                }
+            )
+            return CLI_EXIT_PRECONDITION_FAILED
+
+        if dry_run:
+            session.rollback()
+        report_payload["reportDigest"] = sha256_canonical_json(
+            {k: v for k, v in report_payload.items() if k != "reportDigest"}
+        )
+        _write_report(args.report_json, report_payload)
+        _emit(
+            {
+                "ok": True,
+                "command": report_payload["command"],
+                "dryRun": dry_run,
+                "revisionLabel": label,
+                "rolloutRevisionId": report_payload.get("rolloutRevisionId"),
+                "controlRevision": report_payload.get("controlRevision"),
+                "reportDigest": report_payload["reportDigest"],
+                "reportJson": str(args.report_json),
+            }
+        )
+        return CLI_EXIT_COMPLETED
+    except (RolloutError, RuntimeMigrationRepositoryError) as exc:
+        session.rollback()
+        code_name = getattr(exc, "code", "precondition_failed")
+        exit_code = (
+            CLI_EXIT_CONFLICT_OR_DRIFT
+            if code_name in {"conflict", "drift", "stale_revision", "immutable"}
+            else CLI_EXIT_PRECONDITION_FAILED
+        )
+        _emit(
+            {
+                "ok": False,
+                "error": code_name,
+                "reason": str(getattr(exc, "message", exc))[:200],
+            }
+        )
+        return exit_code
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        close = getattr(session, "close", None)
+        if callable(close) and session_factory is None:
+            close()
+
+
 def _run_approvals_command(
     args: argparse.Namespace,
     *,
@@ -1406,6 +1748,8 @@ def main(
             return _run_l2_command(args, session_factory=session_factory)
         if args.group == "approvals" and args.cmd in {"archive", "verify"}:
             return _run_approvals_command(args, session_factory=session_factory)
+        if args.group == "rollout" and args.cmd in {"prepare", "activate", "rollback"}:
+            return _run_rollout_command(args, session_factory=session_factory)
         return _run_stub(args)
     except Exception as exc:  # pragma: no cover - unexpected path
         _emit(

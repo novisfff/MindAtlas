@@ -3,6 +3,10 @@
 Selects immutable ``runtime_kind`` after conversation/message preparation and
 Main Agent + compatible-worker preflight. A permitted Legacy fallback happens
 only before the durable Run row exists.
+
+Plan 10 Task 6: when ``conversation_id`` is provided and an active rollout
+revision exists, freeze the durable assignment first and apply pre-insert-only
+fallback. Post-insert failures never open the fallback path.
 """
 
 from __future__ import annotations
@@ -10,6 +14,7 @@ from __future__ import annotations
 import logging
 from datetime import timedelta
 from typing import Any
+from uuid import UUID
 
 from sqlalchemy.orm import Session
 
@@ -25,14 +30,73 @@ def admit_and_select_runtime(
     execution_kind: str = "production",
     app_build_revision: str | None = None,
     require_compatible_worker: bool = True,
+    conversation_id: UUID | None = None,
+    request_id: str | None = None,
+    principal_scope_digest: str | None = None,
+    chat_run_already_inserted: bool = False,
+    use_rollout_assignment: bool = True,
 ) -> tuple[str, str | None, dict[str, Any]]:
     """Return ``(runtime_kind, reason_code, create_run_kwargs)``.
 
     - ``runtime_kind`` is ``legacy`` or ``main_agent`` (immutable once inserted).
     - On Main Agent admission failure in read_only mode, returns legacy with a
       reason when automatic pre-insert fallback is allowed.
+    - When ``conversation_id`` is set and an active Plan 10 rollout revision
+      exists, freezes assignment and may return pre-insert fallback metadata in
+      ``create_run_kwargs`` (``_preinsert_fallback`` / ``_rollout_decision``).
     - Raises only for hard configuration errors that must fail the request.
     """
+    # Plan 10: prefer durable rollout assignment when available.
+    if (
+        use_rollout_assignment
+        and conversation_id is not None
+        and not chat_run_already_inserted
+    ):
+        try:
+            from app.assistant.migration.repository import RuntimeMigrationRepository
+
+            active = RuntimeMigrationRepository(db).get_active_rollout_revision()
+        except Exception:
+            active = None
+            logger.exception("rollout revision lookup failed; using plan04 admission")
+        if active is not None:
+            try:
+                from app.assistant.migration.rollout import admit_with_rollout
+
+                kind, reason, kwargs, _decision = admit_with_rollout(
+                    db,
+                    conversation_id=conversation_id,
+                    request_id=request_id,
+                    execution_kind=execution_kind,
+                    app_build_revision=app_build_revision,
+                    require_compatible_worker=require_compatible_worker,
+                    principal_scope_digest=principal_scope_digest,
+                    chat_run_already_inserted=False,
+                )
+                return kind, reason, kwargs
+            except Exception:
+                logger.exception(
+                    "rollout admission failed; falling through to plan04 path"
+                )
+
+    return _admit_plan04_main_agent(
+        db,
+        mode=mode,
+        execution_kind=execution_kind,
+        app_build_revision=app_build_revision,
+        require_compatible_worker=require_compatible_worker,
+    )
+
+
+def _admit_plan04_main_agent(
+    db: Session,
+    *,
+    mode: str | None = None,
+    execution_kind: str = "production",
+    app_build_revision: str | None = None,
+    require_compatible_worker: bool = True,
+) -> tuple[str, str | None, dict[str, Any]]:
+    """Plan 04 Main Agent mode admission (pre-insert only)."""
     settings = get_settings()
     main_agent_mode = str(
         mode if mode is not None else getattr(settings, "assistant_main_agent_mode", "off")
