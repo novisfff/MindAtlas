@@ -352,11 +352,11 @@ class CliInventoryScanTests(unittest.TestCase):
     def test_cli_mutation_stub_exits_precondition_failed(self) -> None:
         from app.assistant.migration import cli as migration_cli
 
-        # packages + l2 are implemented; remaining groups stay stubs.
+        # packages + l2 + approvals are implemented; rollout/cleanup stay stubs.
         code = migration_cli.main(
             [
-                "approvals",
-                "archive",
+                "rollout",
+                "prepare",
                 "--environment",
                 "test",
                 "--database-fingerprint",

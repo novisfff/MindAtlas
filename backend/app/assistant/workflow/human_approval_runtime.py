@@ -311,6 +311,15 @@ class HumanLoopRuntime:
         # AssistantHumanApproval row is created.
         _reject_durable_blocking_runtime(self._session_factory, self._context.run_id)
 
+        # Plan 10 Task 4: after the entrypoint matrix is green and the creation
+        # cutoff is enabled, refuse new legacy pending rows. Existing pending
+        # rows may still resolve/drain; never invent durable resume tokens.
+        from app.assistant.migration.approvals import (
+            assert_legacy_approval_creation_allowed,
+        )
+
+        assert_legacy_approval_creation_allowed(channel_type=self._context.channel_type)
+
         with self._session_factory() as session:
             approval = AssistantHumanApproval(
                 run_id=self._context.run_id,

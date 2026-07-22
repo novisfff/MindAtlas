@@ -2,7 +2,7 @@
 
 Not mounted as HTTP. Inventory scan is read-only; inventory prepare/apply/resume
 write discovered evidence under --apply with operator principal fail-closed.
-Packages and L2 mutation groups are implemented; approvals/rollout/cleanup
+Packages, L2, and approvals mutation groups are implemented; rollout/cleanup
 remain stubs until later tasks.
 
 Safety flags are bindings, not authority. No flag can mint a principal.
@@ -184,9 +184,52 @@ def _build_parser() -> argparse.ArgumentParser:
                 help="Consecutive invariant scans required for zero-delta stability",
             )
 
+    # Approvals archive/verify (Task 4).
+    approvals = sub.add_parser("approvals", help="Legacy HITL approval archive/verify commands")
+    approvals_sub = approvals.add_subparsers(dest="cmd", required=True)
+    for cmd, help_text in (
+        ("archive", "Archive terminal legacy human approvals (digest only)"),
+        ("verify", "Verify archives and zero-pending gate"),
+    ):
+        cmd_p = approvals_sub.add_parser(cmd, help=help_text)
+        _add_safety_flags(cmd_p)
+        cmd_p.add_argument(
+            "--operator-principal",
+            default=None,
+            help="Operator principal id (required for --apply)",
+        )
+        if cmd == "archive":
+            cmd_p.add_argument(
+                "--source-row-id",
+                action="append",
+                default=None,
+                help="Limit to one or more legacy approval row ids (repeatable)",
+            )
+        if cmd == "verify":
+            cmd_p.add_argument(
+                "--require-zero-pending",
+                action="store_true",
+                default=True,
+                help="Fail verify when any pending legacy approvals remain (default)",
+            )
+            cmd_p.add_argument(
+                "--allow-pending",
+                action="store_true",
+                help="Do not require zero pending (drain in progress)",
+            )
+            cmd_p.add_argument(
+                "--require-cutoff-active",
+                action="store_true",
+                help="Fail verify when creation cutoff is inactive",
+            )
+            cmd_p.add_argument(
+                "--skip-archive-match",
+                action="store_true",
+                help="Skip terminal-row ↔ archive digest matching",
+            )
+
     # Remaining mutation groups — stubs until later tasks.
     for group_name, commands in (
-        ("approvals", ("archive", "verify")),
         ("rollout", ("prepare", "activate", "rollback")),
         ("cleanup", ("evaluate", "preflight")),
     ):
@@ -882,6 +925,135 @@ def _run_stub(args: argparse.Namespace) -> int:
     return CLI_EXIT_PRECONDITION_FAILED
 
 
+def _run_approvals_command(
+    args: argparse.Namespace,
+    *,
+    session_factory: Callable[[], Any] | None = None,
+) -> int:
+    """approvals archive / approvals verify."""
+    from app.assistant.migration.approvals import (
+        archive_terminal_approvals,
+        verify_approvals,
+    )
+    from app.assistant.migration.repository import RuntimeMigrationRepositoryError
+
+    dry_run = bool(args.dry_run)
+    apply = bool(args.apply)
+    if dry_run == apply:
+        _emit(
+            {
+                "ok": False,
+                "error": "precondition_failed",
+                "reason": "exactly_one_of_dry_run_or_apply",
+            }
+        )
+        return CLI_EXIT_PRECONDITION_FAILED
+
+    operator = _resolve_operator_principal(getattr(args, "operator_principal", None))
+    if apply and not operator:
+        _emit(
+            {
+                "ok": False,
+                "error": "precondition_failed",
+                "reason": "operator_principal_required_for_apply",
+            }
+        )
+        return CLI_EXIT_PRECONDITION_FAILED
+
+    if apply and _is_wildcard_source_digest(str(args.source_snapshot_digest)):
+        _emit(
+            {
+                "ok": False,
+                "error": "conflict_or_drift",
+                "reason": "wildcard_source_snapshot_digest_not_allowed_on_apply",
+                "expected": str(args.source_snapshot_digest),
+            }
+        )
+        return CLI_EXIT_CONFLICT_OR_DRIFT
+
+    resolved_factory = _resolve_session_factory(session_factory, require=True)
+    assert resolved_factory is not None
+    session = resolved_factory()
+    try:
+        common = dict(
+            request_id=str(args.request_id),
+            actor_principal=operator,
+            build_revision=str(args.expected_build_revision),
+            environment=str(args.environment),
+            database_fingerprint=str(args.database_fingerprint),
+            schema_head=str(args.expected_schema_head),
+            dry_run=dry_run,
+            batch_size=int(args.batch_size),
+            source_snapshot_digest=str(args.source_snapshot_digest),
+        )
+        if args.cmd == "archive":
+            report = archive_terminal_approvals(
+                session,
+                source_row_ids=getattr(args, "source_row_id", None),
+                **common,
+            )
+        else:
+            require_zero = bool(getattr(args, "require_zero_pending", True))
+            if bool(getattr(args, "allow_pending", False)):
+                require_zero = False
+            report = verify_approvals(
+                session,
+                require_zero_pending=require_zero,
+                require_cutoff_active=bool(getattr(args, "require_cutoff_active", False)),
+                require_archives_match=not bool(getattr(args, "skip_archive_match", False)),
+                **common,
+            )
+        if not dry_run:
+            session.commit()
+        else:
+            session.rollback()
+    except RuntimeMigrationRepositoryError as exc:
+        session.rollback()
+        code = (
+            CLI_EXIT_CONFLICT_OR_DRIFT
+            if exc.code in {"conflict", "drift", "stale_revision", "immutable"}
+            else CLI_EXIT_PRECONDITION_FAILED
+        )
+        _emit({"ok": False, "error": exc.code, "reason": exc.message[:200]})
+        return code
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        close = getattr(session, "close", None)
+        if callable(close):
+            if session_factory is None:
+                close()
+
+    payload = report.to_dict()
+    payload["environment"] = str(args.environment)
+    payload["databaseFingerprint"] = str(args.database_fingerprint)
+    payload["schemaHead"] = str(args.expected_schema_head)
+    payload["buildRevision"] = str(args.expected_build_revision)
+    payload["sourceSnapshotDigest"] = str(args.source_snapshot_digest)
+    _write_report(args.report_json, payload)
+    _emit(
+        {
+            "ok": bool(payload.get("ok")),
+            "command": f"approvals.{args.cmd}",
+            "processed": payload.get("processed"),
+            "succeeded": payload.get("succeeded"),
+            "blocked": payload.get("blocked"),
+            "failed": payload.get("failed"),
+            "pendingCount": payload.get("pendingCount"),
+            "archivedCount": payload.get("archivedCount"),
+            "batchId": payload.get("batchId"),
+            "reportDigest": payload.get("reportDigest"),
+            "reportJson": str(args.report_json),
+        }
+    )
+    if int(payload.get("failed") or 0) > 0:
+        return CLI_EXIT_UNEXPECTED_FAILURE
+    if int(payload.get("blocked") or 0) > 0 or payload.get("blockers"):
+        return CLI_EXIT_COMPLETED_WITH_BLOCKERS
+    return CLI_EXIT_COMPLETED
+
+
 def _parse_skill_ids(raw: list[str] | None) -> list[UUID] | None:
     if not raw:
         return None
@@ -1232,6 +1404,8 @@ def main(
             return _run_packages_command(args, session_factory=session_factory)
         if args.group == "l2" and args.cmd in {"backfill", "verify"}:
             return _run_l2_command(args, session_factory=session_factory)
+        if args.group == "approvals" and args.cmd in {"archive", "verify"}:
+            return _run_approvals_command(args, session_factory=session_factory)
         return _run_stub(args)
     except Exception as exc:  # pragma: no cover - unexpected path
         _emit(
