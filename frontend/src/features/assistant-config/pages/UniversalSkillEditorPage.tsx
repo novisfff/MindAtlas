@@ -47,6 +47,7 @@ import { useSkillEditorStore } from '../stores/skill-editor-store'
 import { useSkillTestRunStore } from '../stores/skill-test-run-store'
 
 type GateDialogMode = 'publish' | 'promotion' | null
+type EvalTarget = 'draft' | 'published'
 
 function gateMatches(
   gate: GateUiState | null,
@@ -90,6 +91,10 @@ export function UniversalSkillEditorPage() {
   const [publishGate, setPublishGate] = useState<GateUiState | null>(null)
   const [promotionGate, setPromotionGate] = useState<GateUiState | null>(null)
   const [gateDialogMode, setGateDialogMode] = useState<GateDialogMode>(null)
+  // Dual-pointer eval target: draft for publish evidence, published for promotion.
+  // After successful publish the selector defaults to published so promotion is reachable
+  // even while a draft pointer remains.
+  const [evalTarget, setEvalTarget] = useState<EvalTarget>('draft')
   const versionsQuery = useSkillPackageVersionsQuery(packageId, { limit: 50, offset: 0 }, surfaceReady)
   const restoreMutation = useRestoreSkillPackageVersionMutation()
   const diffMutation = useDiffSkillPackageVersionsMutation()
@@ -97,8 +102,16 @@ export function UniversalSkillEditorPage() {
   const evalRun = useSkillTestRunStore((s) => s.run)
   const clearEvalForSubjectChange = useSkillTestRunStore((s) => s.clearForSubjectChange)
 
-  // After publish, evaluate the published pointer; otherwise evaluate the draft.
-  const workbenchSubjectKind = publishedVersionId && !draftVersionId ? 'skill_version' : 'skill_draft'
+  const dualPointer = Boolean(draftVersionId && publishedVersionId)
+  // Prefer explicit selector when both pointers exist; otherwise fall back to the
+  // single available pointer (draft-only or published-only after draft cleared).
+  const workbenchSubjectKind: 'skill_draft' | 'skill_version' = (() => {
+    if (dualPointer) {
+      return evalTarget === 'published' ? 'skill_version' : 'skill_draft'
+    }
+    if (publishedVersionId && !draftVersionId) return 'skill_version'
+    return 'skill_draft'
+  })()
   const workbenchVersionId =
     workbenchSubjectKind === 'skill_version' ? publishedVersionId : draftVersionId
 
@@ -174,14 +187,24 @@ export function UniversalSkillEditorPage() {
         gateId: publishGate.gateId,
         requestId: newRequestId('publish'),
       })
-      // Publish invalidates draft evidence: clear draft run/gate and switch to published subject.
+      // Publish invalidates draft evidence: clear draft run/gate and default the
+      // workbench to the published pointer so promotion eval is immediately reachable
+      // even when the backend keeps the draft pointer.
       setPublishGate(null)
       clearEvalForSubjectChange()
+      setEvalTarget('published')
       await packageQuery.refetch()
       await versionsQuery.refetch()
     } catch (err) {
       setPageError(mapSkillPackageError(err).message)
     }
+  }
+
+  function handleEvalTargetChange(next: EvalTarget) {
+    if (next === evalTarget) return
+    // Changing the eval subject invalidates the in-memory run (subject-scoped).
+    clearEvalForSubjectChange()
+    setEvalTarget(next)
   }
 
   async function handleEnableCatalog() {
@@ -433,6 +456,36 @@ export function UniversalSkillEditorPage() {
             <p className="text-sm text-muted-foreground">
               {t('settings.universalSkills.evaluatePublishedBeforeEnable')}
             </p>
+          ) : null}
+          {dualPointer || publishedVersionId ? (
+            <div
+              className="flex flex-wrap items-center gap-2 text-sm"
+              data-testid="eval-target-selector"
+              role="group"
+              aria-label={t('settings.universalSkills.evalTargetLabel')}
+            >
+              <span className="text-muted-foreground">
+                {t('settings.universalSkills.evalTargetLabel')}
+              </span>
+              <Button
+                type="button"
+                size="sm"
+                variant={workbenchSubjectKind === 'skill_draft' ? 'default' : 'outline'}
+                disabled={!draftVersionId}
+                onClick={() => handleEvalTargetChange('draft')}
+              >
+                {t('settings.universalSkills.evalTargetDraft')}
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant={workbenchSubjectKind === 'skill_version' ? 'default' : 'outline'}
+                disabled={!publishedVersionId}
+                onClick={() => handleEvalTargetChange('published')}
+              >
+                {t('settings.universalSkills.evalTargetPublished')}
+              </Button>
+            </div>
           ) : null}
           <SkillPublishGateDialog
             open={gateDialogMode === 'publish'}

@@ -98,6 +98,9 @@ vi.mock('react-i18next', () => ({
         'settings.universalSkills.enableCatalog': 'Enable catalog',
         'settings.universalSkills.evaluatePublishedBeforeEnable':
           'Evaluate the published version before enabling',
+        'settings.universalSkills.evalTargetLabel': 'Evaluation target',
+        'settings.universalSkills.evalTargetDraft': 'Draft',
+        'settings.universalSkills.evalTargetPublished': 'Published',
         'settings.universalSkills.adminUnmountedHint':
           'Admin lifecycle routes are unmounted.',
         'settings.universalSkills.draftLoadFailed': 'Draft version details could not be loaded.',
@@ -289,10 +292,11 @@ describe('UniversalSkillEditorPage two-gate lifecycle', () => {
     })
     vi.mocked(skillPackagesApi.publishSkillPackageVersion).mockImplementation(async () => {
       const published = publishedVersion()
+      // Backend publish keeps both draft and published pointers.
       vi.mocked(skillPackagesApi.getSkillPackage).mockResolvedValue(
         packageDetail({
           aggregateRevision: 3,
-          draftVersion: null,
+          draftVersion: packageDetail().draftVersion,
           publishedVersion: published,
         }) as never,
       )
@@ -302,7 +306,7 @@ describe('UniversalSkillEditorPage two-gate lifecycle', () => {
       packageDetail({
         catalogEnabled: true,
         publishedVersion: publishedVersion(),
-        draftVersion: null,
+        draftVersion: packageDetail().draftVersion,
       }) as never,
     )
   })
@@ -338,7 +342,7 @@ describe('UniversalSkillEditorPage two-gate lifecycle', () => {
     expect(lastGateRequest()).not.toHaveProperty('profileDigest')
   })
 
-  it('switches workbench to published subject after publish', async () => {
+  it('switches workbench to published subject after publish while draft remains', async () => {
     await renderEditorWithPassingDraftRun()
     expect(screen.getByTestId('skill-editor')).toHaveTextContent(`workbench=skill_draft:${DRAFT_ID}`)
     await requestGateAndPublish()
@@ -347,15 +351,96 @@ describe('UniversalSkillEditorPage two-gate lifecycle', () => {
         `workbench=skill_version:${PUBLISHED_ID}`,
       )
     })
+    // Dual-pointer package: draft still present after publish.
+    expect(screen.getByTestId('eval-target-selector')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Draft' })).not.toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Published' })).not.toBeDisabled()
     // Draft eval run must be cleared after publish.
     expect(useSkillTestRunStore.getState().run).toBeNull()
   })
 
-  it('enable uses a skill_catalog_enable gate on the published version', async () => {
-    // Start already published with a promotion-qualifying run.
+  it('evaluates published skill while draft remains and fills promotion runs', async () => {
+    // Dual-pointer package (draft + published both present).
     vi.mocked(skillPackagesApi.getSkillPackage).mockResolvedValue(
       packageDetail({
-        draftVersion: null,
+        draftVersion: packageDetail().draftVersion,
+        publishedVersion: publishedVersion(),
+        aggregateRevision: 3,
+      }) as never,
+    )
+    renderEditor()
+    await screen.findByTestId('eval-target-selector')
+    // Default is draft when both exist until user/publish selects published.
+    expect(screen.getByTestId('skill-editor')).toHaveTextContent(`workbench=skill_draft:${DRAFT_ID}`)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Published' }))
+    await waitFor(() => {
+      expect(screen.getByTestId('skill-editor')).toHaveTextContent(
+        `workbench=skill_version:${PUBLISHED_ID}`,
+      )
+    })
+
+    // Seed a real skill_version run after switching to published.
+    useSkillTestRunStore.getState().beginRun({
+      id: 'promo-run-1',
+      subjectKind: 'skill_version',
+      subjectAggregateId: PACKAGE_ID,
+      subjectVersionId: PUBLISHED_ID,
+      mode: 'dataset_scripted',
+      status: 'completed',
+      stateRevision: 2,
+      lastEventSeq: 2,
+      gateEligible: true,
+      evidenceProvenance: 'real_orchestration',
+    })
+    vi.mocked(skillEvaluations.listQualifyingEvidence).mockResolvedValue({
+      items: [
+        {
+          evalRunId: 'promo-run-1',
+          mode: 'dataset_scripted',
+          status: 'completed',
+          gateEligible: true,
+          evidenceProvenance: 'real_orchestration',
+          subjectKind: 'skill_version',
+          subjectVersionId: PUBLISHED_ID,
+          aggregateMetrics: {},
+        },
+      ],
+      total: 1,
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open promotion gate dialog' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Request gate' }))
+    await waitFor(() => {
+      expect(lastGateRequest()?.action).toBe('skill_catalog_enable')
+    })
+    expect(lastGateRequest()).toMatchObject({
+      action: 'skill_catalog_enable',
+      subjectAggregateId: PACKAGE_ID,
+      subjectVersionId: PUBLISHED_ID,
+      qualifyingEvalRunIds: ['promo-run-1'],
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Enable catalog' })).not.toBeDisabled()
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Enable catalog' }))
+    await waitFor(() => {
+      expect(skillPackagesApi.enableSkillPackageCatalog).toHaveBeenCalledWith(
+        PACKAGE_ID,
+        expect.objectContaining({
+          gateId: PROMOTION_GATE_ID,
+          expectedAggregateRevision: 3,
+        }),
+      )
+    })
+  })
+
+  it('enable uses a skill_catalog_enable gate on the published version', async () => {
+    // Dual-pointer package with a promotion-qualifying run on published.
+    vi.mocked(skillPackagesApi.getSkillPackage).mockResolvedValue(
+      packageDetail({
+        draftVersion: packageDetail().draftVersion,
         publishedVersion: publishedVersion(),
         aggregateRevision: 3,
       }) as never,
@@ -389,6 +474,28 @@ describe('UniversalSkillEditorPage two-gate lifecycle', () => {
     })
 
     renderEditor()
+    // Select published eval target so workbench matches the skill_version run.
+    await screen.findByTestId('eval-target-selector')
+    fireEvent.click(screen.getByRole('button', { name: 'Published' }))
+    await waitFor(() => {
+      expect(screen.getByTestId('skill-editor')).toHaveTextContent(
+        `workbench=skill_version:${PUBLISHED_ID}`,
+      )
+    })
+    // Re-seed after subject switch clears the store.
+    useSkillTestRunStore.getState().beginRun({
+      id: 'promo-run-1',
+      subjectKind: 'skill_version',
+      subjectAggregateId: PACKAGE_ID,
+      subjectVersionId: PUBLISHED_ID,
+      mode: 'dataset_scripted',
+      status: 'completed',
+      stateRevision: 2,
+      lastEventSeq: 2,
+      gateEligible: true,
+      evidenceProvenance: 'real_orchestration',
+    })
+
     await screen.findByRole('button', { name: 'Open promotion gate dialog' })
     fireEvent.click(screen.getByRole('button', { name: 'Open promotion gate dialog' }))
     fireEvent.click(await screen.findByRole('button', { name: 'Request gate' }))
