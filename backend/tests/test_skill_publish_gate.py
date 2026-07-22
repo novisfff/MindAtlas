@@ -9,6 +9,18 @@ Covers:
 - enforce: native publish requires gateId
 - enable always requires gate; gate-use in same transaction
 - zero production mutation from eval
+
+Note on evidence seeding
+------------------------
+Unit tests in this module still use ``_seed_completed_run`` /
+``_passing_metrics`` and ``_allow_prebuilt_subject=True`` for isolated gate
+service math (thresholds, hard-safety, drift matrices). Those paths are
+**unit-only** and do not claim worker evidence.
+
+Process-level create→enable evidence lives in
+``test_plan09_lifecycle_e2e.py`` and ``test_skill_two_gate_lifecycle.py``,
+which execute EvaluationWorker observations and create gates without
+prebuilt subjects.
 """
 
 from __future__ import annotations
