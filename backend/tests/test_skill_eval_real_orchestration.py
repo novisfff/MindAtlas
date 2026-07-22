@@ -692,3 +692,183 @@ def test_orchestrator_without_closure_still_activates_with_synthetic_ids() -> No
         assert inject_events[0]["payload"]["content_digest"] == sha256_canonical_json(
             {"skill": "skill-b"}
         )
+
+
+def test_orchestrator_compose_path_with_session_records_status_and_digests() -> None:
+    """With db session + profile snapshot, compose is attempted with isolated inject."""
+    from tests._db import make_session
+
+    from app.assistant.evaluation.isolation import eval_execution_scope
+    from app.assistant.skills.candidate_closure import SkillCandidateClosure
+
+    package_id = uuid4()
+    version_id = uuid4()
+    content_digest = "c" * 64
+    version_digest = "d" * 64
+    closure = SkillCandidateClosure(
+        subject_kind="skill_draft",
+        package_id=package_id,
+        version_id=version_id,
+        content_digest=content_digest,
+        binding_set_digest="e" * 64,
+        version_digest=version_digest,
+        bindings=(),
+    )
+    profile_version_id = uuid4()
+    profile_id = uuid4()
+    profile_snapshot = {
+        "profile_key": "eval-compose-profile",
+        "profile_version_id": str(profile_version_id),
+        "content_digest": "a" * 64,
+        "profile_id": str(profile_id),
+    }
+    namespace_id = uuid4()
+    isolation = build_isolation_context(
+        namespace_id=namespace_id,
+        subject_digest=DIGEST_A,
+        dataset_version_ids=(uuid4(),),
+        memory_mode="empty",
+        data_mode="fixture",
+    )
+    db = make_session()
+    try:
+        orchestrator = EvaluationOrchestrator(
+            config=EvaluationOrchestratorConfig(app_build_revision="test"),
+            candidate_closure=closure,
+            profile_snapshot=profile_snapshot,
+            db_session=db,
+            session_factory=lambda: make_session(),
+            safety_counter_probe=zero_safety_counter_probe,
+            production_delta_probe=zero_production_delta_probe,
+        )
+        case = _HarnessCase(
+            expected_mode="golden_skill",
+            acceptable_skill_keys=["skill-b"],
+            fixture_refs=[
+                {
+                    "kind": "provider_script",
+                    "script_key": "provider-selects-skill-b",
+                    "revision": "eval-v1",
+                }
+            ],
+            input_messages=[{"role": "user", "content": "activate skill-b"}],
+        )
+        identity = EvalExecutionIdentity(
+            eval_run_id=uuid4(),
+            eval_case_id=case.id,
+            namespace_id=namespace_id,
+            owner_kind=EVAL_OWNER_KIND,
+            subject_kind="skill_draft",
+            subject_aggregate_id=package_id,
+            subject_version_id=version_id,
+        )
+        with eval_execution_scope(
+            isolation=isolation,
+            identity=identity,
+            fixture_store={},
+        ) as scope:
+            observed = orchestrator.execute_case(
+                isolation,
+                case,
+                None,
+                identity=identity,
+                scope=scope,
+            )
+            assert observed.actual_active_skills == ("skill-b",)
+            assert orchestrator.last_compose_status in {"composed", "fallback"}
+            # Digests must be recorded (placeholder EVAL_POLICY_DIGEST on fallback,
+            # real effective policy digest on composed).
+            assert orchestrator.last_policy_digest is not None
+            assert len(orchestrator.last_policy_digest) == 64
+            if orchestrator.last_compose_status == "composed":
+                assert orchestrator.last_policy_digest != ("e" * 64)
+                assert orchestrator.last_runtime_digest is not None
+                assert len(orchestrator.last_runtime_digest) == 64
+                assert any(
+                    e.get("event_type") == "eval.compose_succeeded" for e in scope.events
+                )
+                inject_events = [
+                    e
+                    for e in scope.events
+                    if e.get("event_type") == "eval.skill_inject_dispatched"
+                ]
+                assert inject_events
+                assert inject_events[0]["payload"]["compose_path"] is True
+                assert inject_events[0]["payload"]["package_id"] == str(package_id)
+            else:
+                # Fallback is allowed when compose cannot complete; status must be
+                # explicit and digests still recorded for gate pins.
+                assert any(
+                    e.get("event_type") == "eval.compose_fallback"
+                    or (
+                        e.get("event_type") == "eval.case_started"
+                        and (e.get("payload") or {}).get("compose_status") == "fallback"
+                    )
+                    for e in scope.events
+                )
+    finally:
+        db.close()
+
+
+def test_orchestrator_without_session_falls_back_and_records_status() -> None:
+    """Missing session keeps the hand-rolled path with compose_status=fallback."""
+    from app.assistant.evaluation.isolation import eval_execution_scope
+    from app.assistant.evaluation.orchestration import EVAL_POLICY_DIGEST
+
+    namespace_id = uuid4()
+    isolation = build_isolation_context(
+        namespace_id=namespace_id,
+        subject_digest=DIGEST_A,
+        dataset_version_ids=(uuid4(),),
+        memory_mode="empty",
+        data_mode="fixture",
+    )
+    orchestrator = EvaluationOrchestrator(
+        config=EvaluationOrchestratorConfig(app_build_revision="test"),
+        candidate_closure=None,
+        profile_snapshot=None,
+        db_session=None,
+        session_factory=None,
+        safety_counter_probe=zero_safety_counter_probe,
+        production_delta_probe=zero_production_delta_probe,
+    )
+    case = _HarnessCase(
+        expected_mode="golden_skill",
+        acceptable_skill_keys=["skill-b"],
+        fixture_refs=[
+            {
+                "kind": "provider_script",
+                "script_key": "provider-selects-skill-b",
+                "revision": "eval-v1",
+            }
+        ],
+    )
+    identity = EvalExecutionIdentity(
+        eval_run_id=uuid4(),
+        eval_case_id=case.id,
+        namespace_id=namespace_id,
+        owner_kind=EVAL_OWNER_KIND,
+        subject_kind="skill_draft",
+        subject_aggregate_id=uuid4(),
+        subject_version_id=uuid4(),
+    )
+    with eval_execution_scope(
+        isolation=isolation,
+        identity=identity,
+        fixture_store={},
+    ) as scope:
+        observed = orchestrator.execute_case(
+            isolation,
+            case,
+            None,
+            identity=identity,
+            scope=scope,
+        )
+        assert observed.actual_active_skills == ("skill-b",)
+        assert orchestrator.last_compose_status == "fallback"
+        assert orchestrator.last_policy_digest == EVAL_POLICY_DIGEST
+        started = [
+            e for e in scope.events if e.get("event_type") == "eval.case_started"
+        ]
+        assert started
+        assert started[0]["payload"]["compose_status"] == "fallback"

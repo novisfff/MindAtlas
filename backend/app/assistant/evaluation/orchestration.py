@@ -318,11 +318,14 @@ class EvaluationOrchestrator:
     repositories, production CapabilityCall writers, or production memory /
     Artifact / event writers. Isolation ports are injected.
 
-    Full ``compose_main_agent_policy_runtime`` requires a live DB session and
-    production control handlers; this orchestrator implements the closest real
-    path that still routes skill selection through the Provider Loop tool
-    surface + isolation event recording. Gate eligibility is refused unless
-    safety/production observations come from installed probes.
+    When a live DB session (or session_factory) is available together with a
+    profile snapshot, the orchestrator attempts
+    ``compose_main_agent_policy_runtime`` with **eval-isolated** inject /
+    resource / artifact handlers (simulate-only; no production writers). On
+    compose success, ProviderLoopPorts from composition drive the loop (with a
+    ScriptedProvider). On failure, falls back to the hand-rolled eval ports and
+    records ``compose_status=fallback``. Gate eligibility still requires
+    probe-derived safety/production observations.
     """
 
     config: EvaluationOrchestratorConfig = field(
@@ -333,11 +336,20 @@ class EvaluationOrchestrator:
     candidate_closure: Any | None = None
     # Optional Profile snapshot fields (digest/key/version) injected by worker.
     profile_snapshot: Mapping[str, Any] | None = None
+    # Optional live DB session for compose_main_agent_policy_runtime.
+    db_session: Any | None = None
+    # Optional session factory (preferred over reusing a long-lived session).
+    session_factory: Callable[[], Any] | None = None
     # Required for gate-eligible observations. When missing, counters stay None.
     production_delta_probe: Callable[[], Mapping[str, int | None]] | None = None
     safety_counter_probe: Callable[[], Mapping[str, int | None]] | None = None
     # Optional event sink (owner-qualified eval events).
     event_sink: Callable[[dict[str, Any]], None] | None = None
+    # Last compose outcome for worker persistence (not part of ObservedEvalCaseOutcome).
+    last_compose_status: str | None = field(default=None, init=False)
+    last_policy_digest: str | None = field(default=None, init=False)
+    last_runtime_digest: str | None = field(default=None, init=False)
+    last_compose_error: str | None = field(default=None, init=False)
 
     def execute_case(
         self,
@@ -386,6 +398,38 @@ class EvaluationOrchestrator:
         require_active_eval_scope()
         assert_not_production_scope_for_eval()
 
+        scripted_skills = tuple(
+            str(s) for s in fixture.activates_skills if str(s).strip()
+        )
+        compose_attempt = self._try_compose_ports(
+            scope=scope,
+            case=case,
+            fixture=fixture,
+            scripted_skills=scripted_skills,
+        )
+        if compose_attempt is not None:
+            ports, request, tracker, compose_meta = compose_attempt
+            compose_status = "composed"
+            self.last_compose_status = compose_status
+            self.last_policy_digest = compose_meta.get("policy_digest")
+            self.last_runtime_digest = compose_meta.get("runtime_digest")
+            self.last_compose_error = None
+            dispatcher_for_count: Any = tracker
+        else:
+            ports, request, dispatcher_for_count, compose_meta = (
+                self._build_fallback_ports(
+                    scope=scope,
+                    case=case,
+                    fixture=fixture,
+                    scripted_skills=scripted_skills,
+                )
+            )
+            compose_status = str(compose_meta.get("compose_status") or "fallback")
+            self.last_compose_status = compose_status
+            self.last_policy_digest = compose_meta.get("policy_digest")
+            self.last_runtime_digest = compose_meta.get("runtime_digest")
+            self.last_compose_error = compose_meta.get("compose_error")
+
         scope.record_event(
             "eval.case_started",
             {
@@ -394,23 +438,125 @@ class EvaluationOrchestrator:
                 "orchestrator_contract_version": self.config.contract_version,
                 "candidate_closure_present": self.candidate_closure is not None,
                 "safety_probe_installed": self.safety_counter_probe is not None,
-                "production_delta_probe_installed": self.production_delta_probe is not None,
+                "production_delta_probe_installed": self.production_delta_probe
+                is not None,
+                "compose_status": compose_status,
+                "policy_digest": self.last_policy_digest,
+                "runtime_digest": self.last_runtime_digest,
+                "compose_error": self.last_compose_error,
             },
         )
 
-        run_id = scope.identity.eval_run_id
-        conversation_id = uuid4()
-        model_ref = self._eval_model_ref()
-        provider_ref = create_provider_ref(
-            provider_protocol=EVAL_PROVIDER_PROTOCOL,
-            provider_config_id=uuid4(),
-            provider_runtime_revision=1,
-            provider_config_digest=EVAL_MODEL_CONFIG_DIGEST,
-            adapter_key=EVAL_ADAPTER_KEY,
-            adapter_revision=EVAL_ADAPTER_REVISION,
-            protocol_revision="1",
-            app_build_revision=self.config.app_build_revision,
+        stop_reason = fixture.stop_reason
+        completed = bool(fixture.completes)
+        # Skills start empty; only loop-observed activations count.
+        active_skill_names: tuple[str, ...] = ()
+        observed_capability_path: tuple[str, ...] = ()
+        try:
+            result = run_provider_agent_loop(request, ports)
+            stop_reason = str(result.stop_reason or stop_reason)
+            completed = result.status == "completed" and bool(fixture.completes)
+            if result.manifest is not None and result.manifest.active_skills:
+                active_skill_names = tuple(
+                    s.canonical_name for s in result.manifest.active_skills
+                )
+            tracked = list(getattr(dispatcher_for_count, "activated_skills", None) or [])
+            if tracked:
+                ordered: list[str] = []
+                seen: set[str] = set()
+                for name in list(tracked) + list(active_skill_names):
+                    if name and name not in seen:
+                        seen.add(name)
+                        ordered.append(name)
+                active_skill_names = tuple(ordered)
+                observed_capability_path = (
+                    EVAL_SKILL_SEARCH_DOMAIN,
+                    EVAL_SKILL_INJECT_DOMAIN,
+                )
+            elif fixture.capability_path and active_skill_names:
+                # Only accept fixture capability_path when skills were actually
+                # observed on the resulting manifest (never invent path alone).
+                observed_capability_path = tuple(fixture.capability_path)
+            # Prefer composed digests post-loop when available (policy may advance).
+            composed_runtime = compose_meta.get("runtime")
+            if composed_runtime is not None:
+                try:
+                    snap = getattr(composed_runtime, "policy_snapshot", None)
+                    if snap is not None and getattr(snap, "effective_policy_digest", None):
+                        self.last_policy_digest = str(snap.effective_policy_digest)
+                    manifest_now = (
+                        result.manifest
+                        if result.manifest is not None
+                        else getattr(composed_runtime, "manifest", None)
+                    )
+                    if manifest_now is not None and getattr(
+                        manifest_now, "manifest_digest", None
+                    ):
+                        self.last_runtime_digest = str(manifest_now.manifest_digest)
+                except Exception:  # noqa: BLE001 — digests are best-effort
+                    pass
+        except IsolationError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — convert to observed failure
+            logger.exception("eval orchestrator provider loop failed")
+            stop_reason = f"orchestrator_error:{type(exc).__name__}"
+            completed = False
+            scope.record_event(
+                "eval.case_failed",
+                {"stop_reason": stop_reason, "safe_message": type(exc).__name__},
+            )
+
+        dispatch_count = len(
+            list(getattr(dispatcher_for_count, "dispatch_requests", None) or [])
         )
+        scope.record_event(
+            "eval.skill_activation",
+            {
+                "actual_active_skills": list(active_skill_names),
+                "capability_path": list(observed_capability_path),
+                "completed": completed,
+                "stop_reason": stop_reason,
+                "dispatch_count": dispatch_count,
+                "compose_status": compose_status,
+            },
+        )
+        if completed:
+            scope.record_event(
+                "eval.case_completed",
+                {
+                    "actual_active_skills": list(active_skill_names),
+                    "stop_reason": stop_reason,
+                    "compose_status": compose_status,
+                    "policy_digest": self.last_policy_digest,
+                    "runtime_digest": self.last_runtime_digest,
+                },
+            )
+        else:
+            scope.record_event(
+                "eval.case_failed",
+                {
+                    "actual_active_skills": list(active_skill_names),
+                    "stop_reason": stop_reason,
+                    "compose_status": compose_status,
+                },
+            )
+
+        production_delta = self._observe_production_delta()
+        safety_counters = self._observe_safety_counters()
+
+        return fold_observed_outcome(
+            eval_case_id=self._case_id(case),
+            events=list(scope.events),
+            active_skills=active_skill_names,
+            capability_path=observed_capability_path,
+            completed=completed,
+            stop_reason=stop_reason,
+            obligations_pending=0,
+            production_delta=production_delta,
+            safety_counters=safety_counters,
+        )
+
+    def _profile_fields(self) -> dict[str, Any]:
         profile = dict(self.profile_snapshot or {})
         profile_key = str(profile.get("profile_key") or self.config.profile_key)
         profile_version_id = profile.get("profile_version_id") or uuid4()
@@ -428,14 +574,66 @@ class EvaluationOrchestrator:
             )
         else:
             profile_id = uuid4()
-        main_agent = ResolvedMainAgentRef(
-            profile_id=profile_id,
-            version_id=profile_version_id,
-            profile_key=profile_key,
-            sequence=1,
-            content_digest=profile_digest,
+        return {
+            "profile_key": profile_key,
+            "profile_version_id": profile_version_id,
+            "profile_digest": profile_digest,
+            "profile_id": profile_id,
+        }
+
+    def _try_compose_ports(
+        self,
+        *,
+        scope: EvalExecutionScope,
+        case: Any,
+        fixture: ProviderFixtureScript,
+        scripted_skills: tuple[str, ...],
+    ) -> tuple[ProviderLoopPorts, ProviderLoopRequest, Any, dict[str, Any]] | None:
+        """Attempt Main Agent policy runtime composition with isolated handlers.
+
+        Returns ``None`` when prerequisites are missing or composition fails —
+        caller falls back to hand-rolled eval ports.
+        """
+        session = self.db_session
+        factory = self.session_factory
+        if session is None and factory is None:
+            return None
+        profile = self._profile_fields()
+        # Require a real profile snapshot (not pure defaults) for compose attempt
+        # so unit harnesses without sessions keep the fallback path.
+        if self.profile_snapshot is None and session is None:
+            return None
+
+        try:
+            from app.assistant.main_agent.policy_runtime import (
+                compose_main_agent_policy_runtime,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.info("compose import failed: %s", type(exc).__name__)
+            self.last_compose_error = type(exc).__name__
+            return None
+
+        run_id = scope.identity.eval_run_id
+        conversation_id = uuid4()
+        model_ref = self._eval_model_ref()
+        provider_ref = create_provider_ref(
+            provider_protocol=EVAL_PROVIDER_PROTOCOL,
+            provider_config_id=uuid4(),
+            provider_runtime_revision=1,
+            provider_config_digest=EVAL_MODEL_CONFIG_DIGEST,
+            adapter_key=EVAL_ADAPTER_KEY,
+            adapter_revision=EVAL_ADAPTER_REVISION,
+            protocol_revision="1",
+            app_build_revision=self.config.app_build_revision,
         )
-        # Base manifest only — skills must arrive via loop tool dispatch.
+        main_agent = ResolvedMainAgentRef(
+            profile_id=profile["profile_id"],
+            version_id=profile["profile_version_id"],
+            profile_key=profile["profile_key"],
+            sequence=1,
+            content_digest=profile["profile_digest"],
+        )
+        # Placeholder digest; compose aligns Manifest.effective_policy_digest.
         manifest = create_base_run_manifest(
             run_id=run_id,
             main_agent=main_agent,
@@ -444,9 +642,197 @@ class EvaluationOrchestrator:
             effective_policy_digest=EVAL_POLICY_DIGEST,
         )
 
-        user_text = self._user_text(case)
-        user_msg = ProviderUserMessage(content=user_text)
+        provider = ScriptedProvider(
+            provider_protocol=EVAL_PROVIDER_PROTOCOL,
+            adapter_key=EVAL_ADAPTER_KEY,
+            adapter_revision=EVAL_ADAPTER_REVISION,
+            model_config_digest=EVAL_MODEL_CONFIG_DIGEST,
+            expected_model_ref=model_ref,
+            relax_model_ref=True,
+        )
+        # Prefer skill_inject alias (Main Agent Gateway surface) for compose path.
+        rounds = self._build_rounds(
+            fixture=fixture,
+            scripted_skills=scripted_skills,
+            inject_alias="skill_inject",
+        )
+        provider.enqueue(*rounds)
 
+        tracker = _EvalComposeActivationTracker(
+            scope=scope,
+            candidate_closure=self.candidate_closure,
+        )
+        inject_handler = _build_eval_isolated_inject_handler(
+            scope=scope,
+            candidate_closure=self.candidate_closure,
+            tracker=tracker,
+        )
+        resource_handler = _build_eval_isolated_read_handler(scope=scope, kind="resource")
+        artifact_handler = _build_eval_isolated_read_handler(scope=scope, kind="artifact")
+        events = _EvalEventSink(scope=scope, sink=self.event_sink)
+
+        def _session_factory() -> Any:
+            if factory is not None:
+                return factory()
+            return session
+
+        compose_db = session
+        if compose_db is None and factory is not None:
+            compose_db = factory()
+
+        try:
+            runtime, ports = compose_main_agent_policy_runtime(
+                db=compose_db,
+                run_id=run_id,
+                conversation_id=conversation_id,
+                manifest=manifest,
+                profile_key=profile["profile_key"],
+                profile_version_id=profile["profile_version_id"],
+                profile_content_digest=profile["profile_digest"],
+                app_build_revision=self.config.app_build_revision,
+                provider=provider,
+                events=events,
+                locale=str(getattr(case, "locale", None) or self.config.locale or "en"),
+                inject_handler=inject_handler,
+                resource_handler=resource_handler,
+                artifact_handler=artifact_handler,
+                session_factory=_session_factory if factory is not None else None,
+                capability_ledger_mode="legacy_read_only",
+                policy_contract_version=2,
+            )
+        except Exception as exc:  # noqa: BLE001 — fall back cleanly
+            logger.info(
+                "compose_main_agent_policy_runtime failed: %s",
+                type(exc).__name__,
+                exc_info=True,
+            )
+            self.last_compose_error = type(exc).__name__
+            scope.record_event(
+                "eval.compose_fallback",
+                {
+                    "compose_status": "fallback",
+                    "compose_error": type(exc).__name__,
+                },
+            )
+            return None
+
+        # Swap in ScriptedProvider (compose already bound it, but keep explicit).
+        ports = ProviderLoopPorts(
+            provider=provider,
+            tools_provider=ports.tools_provider,
+            current_descriptors=ports.current_descriptors,
+            authorization_evidence=ports.authorization_evidence,
+            tool_dispatcher=ports.tool_dispatcher,
+            sibling_executor=ports.sibling_executor,
+            cancellation=ports.cancellation,
+            events=events,
+            capability_ledger=ports.capability_ledger,
+            round_context_provider=ports.round_context_provider,
+            manifest_effect_lifecycle=ports.manifest_effect_lifecycle,
+            round_budget_guard=ports.round_budget_guard,
+            call_reservation=ports.call_reservation,
+            call_owner_resolver=ports.call_owner_resolver,
+            dispatch_guard=ports.dispatch_guard,
+            call_frames=ports.call_frames,
+            completion_guard=ports.completion_guard,
+        )
+
+        policy_digest = str(
+            getattr(runtime.policy_snapshot, "effective_policy_digest", None)
+            or EVAL_POLICY_DIGEST
+        )
+        runtime_digest = str(
+            getattr(runtime.manifest, "manifest_digest", None) or ("0" * 64)
+        )
+        # Production writers must not be installed; inject_handler is ours.
+        control = getattr(runtime, "control_runtime", None)
+        if control is not None and getattr(control, "_inject_handler", None) is not inject_handler:
+            # Force isolated handler even if compose overwrote it.
+            control._inject_handler = inject_handler  # noqa: SLF001
+
+        # Use the compose-built execution scope so principal matches skill_policy auth.
+        auth_factory = getattr(runtime, "authorization_factory", None)
+        scope_exec = getattr(auth_factory, "scope", None)
+        if scope_exec is None:
+            from app.assistant.main_agent.authorization import LOCAL_ASSISTANT_PRINCIPAL
+
+            scope_exec = create_execution_scope(
+                run_id=run_id,
+                conversation_id=conversation_id,
+                principal=LOCAL_ASSISTANT_PRINCIPAL,
+                tenant_scope_id=None,
+            )
+        generation = ProviderGenerationOptions(
+            tool_choice=ProviderToolChoice(
+                mode="auto" if scripted_skills else "none"
+            ),
+        )
+        max_rounds = 2 if scripted_skills else max(2, int(self.config.max_rounds))
+        request = ProviderLoopRequest(
+            manifest=runtime.manifest,
+            initial_messages=(ProviderUserMessage(content=self._user_text(case)),),
+            model_ref=model_ref,
+            execution_scope=scope_exec,
+            max_rounds=max_rounds,
+            locale=str(getattr(case, "locale", None) or self.config.locale or "en"),
+            generation=generation,
+        )
+        meta = {
+            "compose_status": "composed",
+            "policy_digest": policy_digest,
+            "runtime_digest": runtime_digest,
+            "runtime": runtime,
+        }
+        scope.record_event(
+            "eval.compose_succeeded",
+            {
+                "compose_status": "composed",
+                "policy_digest": policy_digest,
+                "runtime_digest": runtime_digest,
+                "isolated_handlers": True,
+            },
+        )
+        return ports, request, tracker, meta
+
+    def _build_fallback_ports(
+        self,
+        *,
+        scope: EvalExecutionScope,
+        case: Any,
+        fixture: ProviderFixtureScript,
+        scripted_skills: tuple[str, ...],
+    ) -> tuple[ProviderLoopPorts, ProviderLoopRequest, Any, dict[str, Any]]:
+        """Hand-rolled eval ports (pre-compose path). Always simulate_only."""
+        run_id = scope.identity.eval_run_id
+        conversation_id = uuid4()
+        model_ref = self._eval_model_ref()
+        provider_ref = create_provider_ref(
+            provider_protocol=EVAL_PROVIDER_PROTOCOL,
+            provider_config_id=uuid4(),
+            provider_runtime_revision=1,
+            provider_config_digest=EVAL_MODEL_CONFIG_DIGEST,
+            adapter_key=EVAL_ADAPTER_KEY,
+            adapter_revision=EVAL_ADAPTER_REVISION,
+            protocol_revision="1",
+            app_build_revision=self.config.app_build_revision,
+        )
+        profile = self._profile_fields()
+        main_agent = ResolvedMainAgentRef(
+            profile_id=profile["profile_id"],
+            version_id=profile["profile_version_id"],
+            profile_key=profile["profile_key"],
+            sequence=1,
+            content_digest=profile["profile_digest"],
+        )
+        manifest = create_base_run_manifest(
+            run_id=run_id,
+            main_agent=main_agent,
+            provider=provider_ref,
+            model=model_ref,
+            effective_policy_digest=EVAL_POLICY_DIGEST,
+        )
+
+        user_msg = ProviderUserMessage(content=self._user_text(case))
         principal = CapabilityPrincipal(
             principal_type="test",
             principal_id=f"eval-{scope.identity.namespace_id}",
@@ -459,7 +845,6 @@ class EvaluationOrchestrator:
             tenant_scope_id=None,
         )
 
-        scripted_skills = tuple(str(s) for s in fixture.activates_skills if str(s).strip())
         inject_binding, inject_descriptor = _eval_skill_inject_binding()
         tools = _EvalSkillToolsProvider(
             provider_protocol=EVAL_PROVIDER_PROTOCOL,
@@ -489,7 +874,11 @@ class EvaluationOrchestrator:
             expected_model_ref=model_ref,
             relax_model_ref=True,
         )
-        rounds = self._build_rounds(fixture=fixture, scripted_skills=scripted_skills)
+        rounds = self._build_rounds(
+            fixture=fixture,
+            scripted_skills=scripted_skills,
+            inject_alias="skill_inject",
+        )
         provider.enqueue(*rounds)
 
         ports = ProviderLoopPorts(
@@ -502,16 +891,11 @@ class EvaluationOrchestrator:
             cancellation=_EvalCancellation(),
             events=events,
         )
-        # Tools enabled when skill activation is scripted so the Provider may
-        # emit skill.inject; otherwise direct-answer path (tools still resolved
-        # but empty surface is fine with auto choice + no calls).
         generation = ProviderGenerationOptions(
             tool_choice=ProviderToolChoice(
                 mode="auto" if scripted_skills else "none"
             ),
         )
-        # When skill.inject is scripted, reserve exactly two Provider rounds so the
-        # second is the tools-disabled finalization slot after the tool call.
         max_rounds = 2 if scripted_skills else max(2, int(self.config.max_rounds))
         request = ProviderLoopRequest(
             manifest=manifest,
@@ -519,101 +903,25 @@ class EvaluationOrchestrator:
             model_ref=model_ref,
             execution_scope=scope_exec,
             max_rounds=max_rounds,
-            locale=str(
-                getattr(case, "locale", None) or self.config.locale or "en"
-            ),
+            locale=str(getattr(case, "locale", None) or self.config.locale or "en"),
             generation=generation,
         )
-
-        stop_reason = fixture.stop_reason
-        completed = bool(fixture.completes)
-        # Skills start empty; only loop-observed activations count.
-        active_skill_names: tuple[str, ...] = ()
-        observed_capability_path: tuple[str, ...] = ()
-        try:
-            result = run_provider_agent_loop(request, ports)
-            stop_reason = str(result.stop_reason or stop_reason)
-            completed = result.status == "completed" and bool(fixture.completes)
-            if result.manifest is not None and result.manifest.active_skills:
-                active_skill_names = tuple(
-                    s.canonical_name for s in result.manifest.active_skills
-                )
-            # Prefer dispatcher-recorded path when inject ran.
-            if dispatcher.activated_skills:
-                # Merge order-preserving: dispatcher first, then residual manifest.
-                ordered: list[str] = []
-                seen: set[str] = set()
-                for name in list(dispatcher.activated_skills) + list(active_skill_names):
-                    if name and name not in seen:
-                        seen.add(name)
-                        ordered.append(name)
-                active_skill_names = tuple(ordered)
-                observed_capability_path = (
-                    EVAL_SKILL_SEARCH_DOMAIN,
-                    EVAL_SKILL_INJECT_DOMAIN,
-                )
-            elif fixture.capability_path and active_skill_names:
-                # Only accept fixture capability_path when skills were actually
-                # observed on the resulting manifest (never invent path alone).
-                observed_capability_path = tuple(fixture.capability_path)
-        except IsolationError:
-            raise
-        except Exception as exc:  # noqa: BLE001 — convert to observed failure
-            logger.exception("eval orchestrator provider loop failed")
-            stop_reason = f"orchestrator_error:{type(exc).__name__}"
-            completed = False
-            scope.record_event(
-                "eval.case_failed",
-                {"stop_reason": stop_reason, "safe_message": type(exc).__name__},
-            )
-
-        scope.record_event(
-            "eval.skill_activation",
-            {
-                "actual_active_skills": list(active_skill_names),
-                "capability_path": list(observed_capability_path),
-                "completed": completed,
-                "stop_reason": stop_reason,
-                "dispatch_count": len(dispatcher.dispatch_requests),
-            },
-        )
-        if completed:
-            scope.record_event(
-                "eval.case_completed",
-                {
-                    "actual_active_skills": list(active_skill_names),
-                    "stop_reason": stop_reason,
-                },
-            )
-        else:
-            scope.record_event(
-                "eval.case_failed",
-                {
-                    "actual_active_skills": list(active_skill_names),
-                    "stop_reason": stop_reason,
-                },
-            )
-
-        production_delta = self._observe_production_delta()
-        safety_counters = self._observe_safety_counters()
-
-        return fold_observed_outcome(
-            eval_case_id=self._case_id(case),
-            events=list(scope.events),
-            active_skills=active_skill_names,
-            capability_path=observed_capability_path,
-            completed=completed,
-            stop_reason=stop_reason,
-            obligations_pending=0,
-            production_delta=production_delta,
-            safety_counters=safety_counters,
-        )
+        # Fallback still pins the placeholder EVAL_POLICY_DIGEST so gates can
+        # detect environment identity when digests are later required.
+        meta = {
+            "compose_status": "fallback",
+            "policy_digest": EVAL_POLICY_DIGEST,
+            "runtime_digest": str(getattr(manifest, "manifest_digest", None) or None),
+            "compose_error": self.last_compose_error,
+        }
+        return ports, request, dispatcher, meta
 
     def _build_rounds(
         self,
         *,
         fixture: ProviderFixtureScript,
         scripted_skills: tuple[str, ...],
+        inject_alias: str = "skill_inject",
     ) -> list[ScriptedRoundScript]:
         """Build Provider rounds. Prefer fixture.rounds when supplied; otherwise
         synthesize tool-call (skill.inject) + finalization text from activates_skills.
@@ -652,7 +960,7 @@ class EvaluationOrchestrator:
             return [
                 eval_tool_call_round_script(
                     call_id=f"eval-inject-{fixture.script_key}",
-                    provider_alias="skill_inject",
+                    provider_alias=inject_alias,
                     arguments_json=args,
                     round_index=0,
                     tools_enabled=True,
@@ -1040,6 +1348,259 @@ class _EvalAuthFactory:
             grant_source_digest=_EVAL_DIGEST_E,
             evidence_digest=_EVAL_DIGEST_F,
         )
+
+
+class _EvalComposeActivationTracker:
+    """Tracks skill activations performed by the isolated compose inject handler."""
+
+    def __init__(
+        self,
+        *,
+        scope: EvalExecutionScope,
+        candidate_closure: Any | None = None,
+    ) -> None:
+        self._scope = scope
+        self._candidate_closure = candidate_closure
+        self.activated_skills: list[str] = []
+        self.dispatch_requests: list[Any] = []
+
+    def note(self, skill_name: str, skill: ResolvedSkillRef, *, call_id: str) -> None:
+        self.activated_skills.append(skill_name)
+        self._scope.record_event(
+            "eval.skill_inject_dispatched",
+            {
+                "skill_key": skill_name,
+                "call_id": call_id,
+                "domain_key": EVAL_SKILL_INJECT_DOMAIN,
+                "package_id": str(skill.package_id),
+                "version_id": str(skill.version_id),
+                "content_digest": skill.content_digest,
+                "version_digest": skill.version_digest,
+                "candidate_closure_bound": self._candidate_closure is not None,
+                "compose_path": True,
+            },
+        )
+
+
+def _resolved_skill_ref_for_eval(
+    skill_name: str,
+    *,
+    candidate_closure: Any | None,
+) -> ResolvedSkillRef:
+    if candidate_closure is not None:
+        package_id = getattr(candidate_closure, "package_id", None)
+        version_id = getattr(candidate_closure, "version_id", None)
+        content_digest = getattr(candidate_closure, "content_digest", None)
+        version_digest = getattr(candidate_closure, "version_digest", None)
+        if (
+            package_id is not None
+            and version_id is not None
+            and content_digest
+            and version_digest
+        ):
+            if not isinstance(package_id, UUID):
+                package_id = UUID(str(package_id))
+            if not isinstance(version_id, UUID):
+                version_id = UUID(str(version_id))
+            return ResolvedSkillRef(
+                package_id=package_id,
+                version_id=version_id,
+                canonical_name=skill_name,
+                sequence=1,
+                content_digest=str(content_digest),
+                version_digest=str(version_digest),
+                requested_name_normalized=skill_name,
+                resolved_via_alias_id=None,
+            )
+    return ResolvedSkillRef(
+        package_id=uuid4(),
+        version_id=uuid4(),
+        canonical_name=skill_name,
+        sequence=1,
+        content_digest=sha256_canonical_json({"skill": skill_name}),
+        version_digest=sha256_canonical_json({"skill": skill_name, "v": 1}),
+        requested_name_normalized=skill_name,
+        resolved_via_alias_id=None,
+    )
+
+
+def _build_eval_isolated_inject_handler(
+    *,
+    scope: EvalExecutionScope,
+    candidate_closure: Any | None,
+    tracker: _EvalComposeActivationTracker,
+) -> Callable[..., Any]:
+    """Eval-isolated skill.inject handler: stages Manifest child, no production writers.
+
+    Never calls production inject wiring, EntryService, or durable capability
+    ledgers. Activation digests prefer candidate_closure when present.
+    """
+
+    def _handler(
+        call_id: str,
+        validated_input: Mapping[str, Any],
+        current_manifest: Any,
+    ) -> tuple[Any, Any]:
+        from app.assistant.main_agent.control_runtime import PendingManifestEffect
+        from app.assistant.domain.contracts import compute_manifest_digest
+
+        skills_raw = validated_input.get("skills") or ()
+        skill_names: list[str] = []
+        for item in skills_raw if isinstance(skills_raw, (list, tuple)) else ():
+            if isinstance(item, str) and item.strip():
+                skill_names.append(item.strip())
+            elif isinstance(item, Mapping):
+                name = item.get("name") or item.get("canonicalName") or item.get("canonical_name")
+                if name and str(name).strip():
+                    skill_names.append(str(name).strip())
+
+        next_manifest = current_manifest
+        activated: list[str] = []
+        for skill_name in skill_names:
+            skill = _resolved_skill_ref_for_eval(
+                skill_name, candidate_closure=candidate_closure
+            )
+            next_manifest = append_skill_activation(
+                next_manifest, skill=skill, capabilities=()
+            )
+            tracker.note(skill_name, skill, call_id=call_id)
+            activated.append(skill_name)
+
+        if not activated or next_manifest is current_manifest:
+            return (
+                completed_result(
+                    user_text="eval inject noop",
+                    structured_output={"status": "noop", "activated": []},
+                    metrics=CapabilityMetrics(
+                        duration_ms=0.0, input_bytes=0, output_bytes=0
+                    ),
+                    terminal_output=False,
+                    needs_followup=True,
+                ),
+                None,
+            )
+
+        # Ensure parent/child lineage fields are consistent for lifecycle accept.
+        if getattr(next_manifest, "revision", 0) == getattr(current_manifest, "revision", 0):
+            # append_skill_activation should have bumped revision; if not, recompute.
+            from app.assistant.domain.contracts import ResolvedRunManifestRevision as RMR
+
+            aligned = compute_manifest_digest(
+                run_id=next_manifest.run_id,
+                revision=int(current_manifest.revision) + 1,
+                parent_digest=current_manifest.manifest_digest,
+                main_agent=next_manifest.main_agent,
+                active_skills=next_manifest.active_skills,
+                capabilities=next_manifest.capabilities,
+                provider=next_manifest.provider,
+                model=next_manifest.model,
+                provider_aliases=next_manifest.provider_aliases,
+                effective_policy_digest=next_manifest.effective_policy_digest,
+            )
+            next_manifest = RMR(
+                run_id=next_manifest.run_id,
+                revision=int(current_manifest.revision) + 1,
+                parent_digest=current_manifest.manifest_digest,
+                main_agent=next_manifest.main_agent,
+                active_skills=next_manifest.active_skills,
+                capabilities=next_manifest.capabilities,
+                provider=next_manifest.provider,
+                model=next_manifest.model,
+                provider_aliases=next_manifest.provider_aliases,
+                effective_policy_digest=next_manifest.effective_policy_digest,
+                manifest_digest=aligned,
+            )
+
+        effect_digest = sha256_canonical_json(
+            {
+                "callId": call_id,
+                "parentRevision": int(current_manifest.revision),
+                "parentDigest": current_manifest.manifest_digest,
+                "proposedRevision": int(next_manifest.revision),
+                "proposedDigest": next_manifest.manifest_digest,
+                "activeSkillVersionIds": [
+                    str(s.version_id) for s in next_manifest.active_skills
+                ],
+                "effectivePolicyDigest": next_manifest.effective_policy_digest,
+            }
+        )
+        effect = PendingManifestEffect(
+            call_id=call_id,
+            expected_parent_revision=int(current_manifest.revision),
+            expected_parent_digest=str(current_manifest.manifest_digest),
+            proposed_manifest=next_manifest,
+            effect_digest=effect_digest,
+            activation_payload={
+                "status": "activated",
+                "activated": activated,
+                "composePath": True,
+                "isolated": True,
+            },
+        )
+        scope.record_event(
+            "eval.compose_inject_staged",
+            {
+                "call_id": call_id,
+                "activated": activated,
+                "isolated": True,
+            },
+        )
+        return (
+            completed_result(
+                user_text=f"activated {','.join(activated)}",
+                structured_output={
+                    "status": "activated",
+                    "activated": activated,
+                    "proposedManifestRevision": int(next_manifest.revision),
+                    "proposedManifestDigest": next_manifest.manifest_digest,
+                    "effectivePolicyDigest": next_manifest.effective_policy_digest,
+                },
+                metrics=CapabilityMetrics(
+                    duration_ms=1.0, input_bytes=0, output_bytes=0
+                ),
+                terminal_output=False,
+                needs_followup=True,
+            ),
+            effect,
+        )
+
+    return _handler
+
+
+def _build_eval_isolated_read_handler(
+    *,
+    scope: EvalExecutionScope,
+    kind: str,
+) -> Callable[..., Any]:
+    """Simulate-only resource/artifact read — never production storage."""
+
+    def _handler(call_id: str, validated_input: Mapping[str, Any]) -> Any:
+        scope.record_event(
+            "eval.compose_read_simulated",
+            {
+                "call_id": call_id,
+                "kind": kind,
+                "keys": sorted(str(k) for k in validated_input.keys()),
+                "isolated": True,
+            },
+        )
+        return completed_result(
+            user_text=None,
+            structured_output={
+                "status": "simulated",
+                "kind": kind,
+                "content": "",
+                "eof": True,
+                "returnedBytes": 0,
+            },
+            metrics=CapabilityMetrics(
+                duration_ms=0.0, input_bytes=0, output_bytes=0
+            ),
+            terminal_output=False,
+            needs_followup=False,
+        )
+
+    return _handler
 
 
 class _EvalSkillInjectDispatcher:

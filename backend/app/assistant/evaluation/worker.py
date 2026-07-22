@@ -512,12 +512,18 @@ class EvaluationWorker:
         safety_probe, delta_probe = install_isolated_eval_observation_probes()
         candidate_closure = self._resolve_candidate_closure(repo, run)
         profile_snapshot = self._resolve_profile_snapshot(repo, run)
+
+        def _session_factory():
+            return self.session_factory()
+
         orchestrator = EvaluationOrchestrator(
             config=EvaluationOrchestratorConfig(
                 app_build_revision=self.cfg.identity.app_build_revision,
             ),
             candidate_closure=candidate_closure,
             profile_snapshot=profile_snapshot,
+            db_session=repo.session,
+            session_factory=_session_factory,
             safety_counter_probe=safety_probe,
             production_delta_probe=delta_probe,
         )
@@ -531,6 +537,9 @@ class EvaluationWorker:
             "assistant_memory": None,
             "artifact": None,
         }
+        compose_statuses: list[str] = []
+        policy_digests: list[str] = []
+        runtime_digests: list[str] = []
         for vid in list(run.dataset_version_ids or []):
             try:
                 cases = repo.list_cases(UUID(str(vid)))
@@ -554,6 +563,16 @@ class EvaluationWorker:
                     identity=case_identity,
                 )
                 mapping = observed_to_case_outcome_mapping(observed, case=case)
+                # Surface compose digests for gate environment closure.
+                if orchestrator.last_compose_status:
+                    compose_statuses.append(str(orchestrator.last_compose_status))
+                    mapping["compose_status"] = orchestrator.last_compose_status
+                if orchestrator.last_policy_digest:
+                    policy_digests.append(str(orchestrator.last_policy_digest))
+                    mapping["policy_digest"] = orchestrator.last_policy_digest
+                if orchestrator.last_runtime_digest:
+                    runtime_digests.append(str(orchestrator.last_runtime_digest))
+                    mapping["runtime_digest"] = orchestrator.last_runtime_digest
                 outcomes.append(mapping)
                 for key, value in (observed.safety_counters or {}).items():
                     if key not in merged_safety or merged_safety[key] is None:
@@ -565,6 +584,22 @@ class EvaluationWorker:
                         merged_delta[key] = value
                     elif value is not None:
                         merged_delta[key] = int(merged_delta[key] or 0) + int(value)
+        # Stash last-known digests on the orchestrator for _persist_dataset_outcome.
+        if policy_digests:
+            orchestrator.last_policy_digest = policy_digests[-1]
+        if runtime_digests:
+            orchestrator.last_runtime_digest = runtime_digests[-1]
+        if compose_statuses:
+            # Prefer "composed" if any case composed successfully.
+            orchestrator.last_compose_status = (
+                "composed" if "composed" in compose_statuses else compose_statuses[-1]
+            )
+        # Attach for later persistence via outcome metrics merge.
+        self._last_orchestrator_digests = {
+            "compose_status": orchestrator.last_compose_status,
+            "policy_digest": orchestrator.last_policy_digest,
+            "runtime_digest": orchestrator.last_runtime_digest,
+        }
         return outcomes, merged_safety, merged_delta
 
     def _resolve_candidate_closure(
@@ -572,9 +607,8 @@ class EvaluationWorker:
     ) -> Any | None:
         """Resolve skill candidate_closure for skill subjects; None otherwise.
 
-        Partial compose: full ``compose_main_agent_policy_runtime`` still requires
-        a live session + production control handlers. Binding real digests from
-        the pure candidate-closure resolver is enough for skill.inject identity.
+        Closure digests feed both the isolated inject handler and (when session
+        is available) ``compose_main_agent_policy_runtime`` skill identity.
         """
         subject_kind = str(getattr(run, "subject_kind", "") or "")
         if subject_kind not in {"skill_draft", "skill_version"}:
@@ -686,6 +720,22 @@ class EvaluationWorker:
         metrics["case_count"] = int(outcome.case_count)
         metrics["zero_production_mutation"] = bool(outcome.zero_production_mutation)
         metrics["mode"] = str(outcome.mode)
+        # Compose / policy / runtime digests from real_orchestration path.
+        digests = dict(getattr(self, "_last_orchestrator_digests", None) or {})
+        if digests.get("compose_status"):
+            metrics["compose_status"] = digests["compose_status"]
+        if digests.get("policy_digest"):
+            metrics["policy_digest"] = digests["policy_digest"]
+        if digests.get("runtime_digest"):
+            metrics["runtime_digest"] = digests["runtime_digest"]
+        # Prefer digests observed on case outcomes when present.
+        for raw in case_outcomes:
+            if raw.get("policy_digest") and not metrics.get("policy_digest"):
+                metrics["policy_digest"] = raw["policy_digest"]
+            if raw.get("runtime_digest") and not metrics.get("runtime_digest"):
+                metrics["runtime_digest"] = raw["runtime_digest"]
+            if raw.get("compose_status") and not metrics.get("compose_status"):
+                metrics["compose_status"] = raw["compose_status"]
         for raw in case_outcomes:
             case_raw = raw.get("eval_case_id")
             if not case_raw:
@@ -747,6 +797,16 @@ class EvaluationWorker:
             gate_eligible=gate_eligible,
             aggregate_metrics=metrics,
         )
+        # Pin digests onto run columns when present (no migration — columns exist).
+        pinned = repo.get_run(run_id)
+        if pinned is not None:
+            pd = metrics.get("policy_digest")
+            rd = metrics.get("runtime_digest")
+            if isinstance(pd, str) and len(pd) == 64:
+                pinned.policy_digest = pd
+            if isinstance(rd, str) and len(rd) == 64:
+                pinned.runtime_digest = rd
+            repo.session.flush()
 
     def _materialize_run(
         self, run: Any
