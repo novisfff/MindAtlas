@@ -9,6 +9,16 @@ from typing import Any
 JsonPrimitive = None | bool | int | float | str
 JsonValue = JsonPrimitive | list["JsonValue"] | tuple["JsonValue", ...] | dict[str, "JsonValue"]
 
+# Re-export typing helper used by profile binding callers without a circular import.
+__all__ = (
+    "JsonPrimitive",
+    "JsonValue",
+    "canonical_json_bytes",
+    "profile_binding_digest",
+    "sha256_bytes",
+    "sha256_canonical_json",
+)
+
 
 def _reject_non_finite_float(value: float) -> float:
     if math.isnan(value) or math.isinf(value):
@@ -64,3 +74,25 @@ def sha256_bytes(value: bytes) -> str:
 
 def sha256_canonical_json(value: JsonValue) -> str:
     return sha256_bytes(canonical_json_bytes(value))
+
+
+def profile_binding_digest(
+    *,
+    profile_id: Any,
+    version_id: Any,
+    content_digest: str,
+) -> str:
+    """Deterministic profile subject binding pin shared by eval admission and gates.
+
+    Profiles have no capability binding set. Evaluation admission, gate
+    authoritative subject rebuild, and profile publish/enable consume paths must
+    pin the same digest so subject_binding_digest never drifts across the chain.
+    """
+    return sha256_canonical_json(
+        {
+            "kind": "main_agent_profile",
+            "profile_id": str(profile_id),
+            "version_id": str(version_id),
+            "content_digest": content_digest,
+        }
+    )

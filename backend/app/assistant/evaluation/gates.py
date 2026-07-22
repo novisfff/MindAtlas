@@ -48,6 +48,7 @@ from app.assistant.evaluation.assertions import (
     evaluate_dataset_assertions,
     is_hard_safety_code,
 )
+from app.assistant.domain.digests import profile_binding_digest
 from app.assistant.evaluation.contracts import (
     CreatePublishGateRequest,
     PublishGateAction,
@@ -664,7 +665,11 @@ class PublishGateService:
                     },
                 )
             content_digest = str(version.content_digest or ("0" * 64))
-            binding_digest = "0" * 64
+            binding_digest = profile_binding_digest(
+                profile_id=profile.id,
+                version_id=version.id,
+                content_digest=content_digest,
+            )
             if profile_digest is None:
                 profile_digest = content_digest
             if catalog_digest is None:
@@ -1540,6 +1545,7 @@ __all__ = [
     "gate_required_for_enable",
     "gate_required_for_publish",
     "make_create_gate_request",
+    "profile_binding_digest",
     "profile_catalog_pin_digest",
     "publish_gate_mode",
     "skill_catalog_pin_digest",

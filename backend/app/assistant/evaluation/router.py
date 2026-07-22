@@ -17,7 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.assistant.capability_calls.approval import redact_mapping
-from app.assistant.domain.digests import sha256_canonical_json
+from app.assistant.domain.digests import profile_binding_digest, sha256_canonical_json
 from app.assistant.evaluation.assertions import THRESHOLD_POLICY_VERSION
 from app.assistant.evaluation.gates import (
     DEFAULT_POLICY_VERSION,
@@ -270,14 +270,11 @@ def _resolve_subject_digests(
                 message=f"profile version not found: {subject_version_id}",
             )
         content = str(version.content_digest)
-        # Profile has no capability binding set; pin a deterministic placeholder.
-        binding = sha256_canonical_json(
-            {
-                "kind": "main_agent_profile",
-                "profile_id": str(subject_aggregate_id),
-                "version_id": str(subject_version_id),
-                "content_digest": content,
-            }
+        # Profile has no capability binding set; pin the shared deterministic digest.
+        binding = profile_binding_digest(
+            profile_id=subject_aggregate_id,
+            version_id=subject_version_id,
+            content_digest=content,
         )
         return content, binding
 

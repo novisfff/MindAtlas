@@ -2317,7 +2317,8 @@ class MainAgentProfileService:
 
             gate_svc = PublishGateService(self.db)
             mode = publish_gate_mode()
-            placeholder = "0" * 64
+            from app.assistant.domain.digests import profile_binding_digest
+
             subject_kind = "main_agent_profile_draft"
             subject_version_id = draft.id
             dataset_ids = None
@@ -2334,12 +2335,17 @@ class MainAgentProfileService:
                 catalog_digest=catalog_digest,
                 dataset_version_ids=dataset_ids,
             )
+            binding_digest = profile_binding_digest(
+                profile_id=profile.id,
+                version_id=subject_version_id,
+                content_digest=str(digest),
+            )
             subject = build_publish_gate_subject(
                 kind=subject_kind,
                 aggregate_id=profile.id,
                 version_id=subject_version_id,
                 content_digest=str(digest),
-                binding_digest=placeholder,
+                binding_digest=binding_digest,
                 profile_digest=pins.profile_digest,
                 catalog_digest=pins.catalog_digest,
                 dataset_version_ids=pins.dataset_version_ids,
@@ -2530,8 +2536,9 @@ class MainAgentProfileService:
                     )
 
                 gate_svc = PublishGateService(self.db)
-                placeholder = "0" * 64
-                content_digest = str(version.content_digest or placeholder)
+                from app.assistant.domain.digests import profile_binding_digest
+
+                content_digest = str(version.content_digest or ("0" * 64))
                 dataset_ids = None
                 if gate_id is not None:
                     dataset_ids = self._dataset_ids_from_gate_evidence(gate_svc, gate_id)
@@ -2545,12 +2552,17 @@ class MainAgentProfileService:
                     catalog_digest=catalog_digest,
                     dataset_version_ids=dataset_ids,
                 )
+                binding_digest = profile_binding_digest(
+                    profile_id=profile.id,
+                    version_id=profile.published_version_id,
+                    content_digest=content_digest,
+                )
                 subject = build_publish_gate_subject(
                     kind="main_agent_profile_version",
                     aggregate_id=profile.id,
                     version_id=profile.published_version_id,
                     content_digest=content_digest,
-                    binding_digest=placeholder,
+                    binding_digest=binding_digest,
                     profile_digest=pins.profile_digest,
                     catalog_digest=pins.catalog_digest,
                     dataset_version_ids=pins.dataset_version_ids,
