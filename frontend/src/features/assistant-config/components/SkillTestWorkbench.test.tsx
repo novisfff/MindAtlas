@@ -564,7 +564,7 @@ describe('SkillTestWorkbench', () => {
     }
   })
 
-  it('populates aggregate metrics from terminal case results', async () => {
+  it('prefers server aggregate metrics over client-derived counts', async () => {
     vi.mocked(skillEvaluations.createEvalRun).mockResolvedValue({
       id: 'run-metrics',
       subjectKind: 'skill_draft',
@@ -586,6 +586,14 @@ describe('SkillTestWorkbench', () => {
       stateRevision: 2,
       lastEventSeq: 1,
       gateEligible: false,
+      aggregateMetrics: {
+        caseCount: 7,
+        passedCount: 5,
+        tokens: 999,
+        calls: 42,
+        zeroProductionMutation: true,
+        source: 'server',
+      },
     })
     vi.mocked(skillEvaluations.listEvalRunCaseResults).mockResolvedValue({
       items: [
@@ -626,6 +634,79 @@ describe('SkillTestWorkbench', () => {
     await vi.waitFor(() => {
       expect(skillEvaluations.createEvalRun).toHaveBeenCalled()
     })
+    await vi.waitFor(() => {
+      const metrics = useSkillTestRunStore.getState().metrics
+      // Server aggregate_metrics win after terminal evidence loads.
+      expect(metrics.caseCount).toBe(7)
+      expect(metrics.passedCount).toBe(5)
+      expect(metrics.tokens).toBe(999)
+      expect(metrics.calls).toBe(42)
+      expect(metrics.zeroProductionMutation).toBe(true)
+      expect(metrics.source).toBe('server')
+      // Client-derived chrome must not overwrite server values.
+      expect(metrics.tokens).not.toBe(11)
+    })
+  })
+
+  it('uses client-derived metrics only when server aggregate metrics are absent', async () => {
+    vi.mocked(skillEvaluations.createEvalRun).mockResolvedValue({
+      id: 'run-metrics-fallback',
+      subjectKind: 'skill_draft',
+      subjectAggregateId: 'pkg-1',
+      subjectVersionId: 'ver-1',
+      mode: 'interactive_scripted',
+      status: 'queued',
+      stateRevision: 0,
+      lastEventSeq: 0,
+    })
+    vi.mocked(skillEvaluations.streamEvalRunEvents).mockResolvedValue('closed')
+    vi.mocked(skillEvaluations.getEvalRun).mockResolvedValue({
+      id: 'run-metrics-fallback',
+      subjectKind: 'skill_draft',
+      subjectAggregateId: 'pkg-1',
+      subjectVersionId: 'ver-1',
+      mode: 'interactive_scripted',
+      status: 'completed',
+      stateRevision: 2,
+      lastEventSeq: 1,
+      gateEligible: false,
+    })
+    vi.mocked(skillEvaluations.listEvalRunCaseResults).mockResolvedValue({
+      items: [
+        {
+          id: 'cr-1',
+          evalRunId: 'run-metrics-fallback',
+          evalCaseId: 'case-1',
+          resultState: 'passed',
+          assertionDetails: {},
+          actualActiveSkills: ['skill.a'],
+          stopReason: 'completed',
+          outputArtifactIds: [],
+          evidenceArtifactIds: [],
+          rounds: 2,
+          calls: 3,
+          tokens: 11,
+          latencyMs: 40,
+          resultDigest: 'd'.repeat(64),
+        },
+      ],
+      total: 1,
+    })
+    vi.mocked(skillEvaluations.listEvalRunEvidence).mockResolvedValue({
+      runId: 'run-metrics-fallback',
+      gateEligible: false,
+      evidenceProvenance: 'structural_synthetic',
+      artifacts: [],
+      capabilityCalls: [],
+    })
+
+    renderWorkbench()
+    await screen.findByLabelText('Profile version')
+    await vi.waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Start evaluation' })).toBeEnabled()
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Start evaluation' }))
+
     await vi.waitFor(() => {
       const metrics = useSkillTestRunStore.getState().metrics
       expect(metrics.caseCount).toBe(1)

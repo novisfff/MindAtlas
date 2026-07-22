@@ -210,7 +210,42 @@ class RealEvalHarness:
 
 @pytest.fixture
 def real_eval_harness() -> RealEvalHarness:
-    return RealEvalHarness(install_probes=True)
+    # Explicit zero probes — defaults are honest-missing Nones, not proven zeros.
+    return RealEvalHarness(
+        install_probes=False,
+        safety_probe=zero_safety_counter_probe,
+        production_delta_probe=zero_production_delta_probe,
+    )
+
+
+def test_default_isolation_probes_return_none_for_unobserved_keys() -> None:
+    """Default probes must not manufacture proven zeros for missing observations."""
+    safety_probe, delta_probe = install_default_isolation_probes()
+    safety = safety_probe()
+    delta = delta_probe()
+    assert safety
+    assert delta
+    assert all(v is None for v in safety.values())
+    assert all(v is None for v in delta.values())
+    # Explicit zero helpers still return proven zeros for tests that need them.
+    assert all(v == 0 for v in zero_safety_counter_probe().values())
+    assert all(v == 0 for v in zero_production_delta_probe().values())
+
+
+def test_default_probes_make_matching_skills_not_gate_eligible() -> None:
+    """install_default_isolation_probes alone cannot invent hard-safety pass."""
+    harness = RealEvalHarness(install_probes=True)
+    case = harness.case(
+        expected_mode="golden_skill",
+        acceptable_skill_keys=["skill-b"],
+        fixture_key="provider-selects-skill-b",
+    )
+    outcome = harness.execute(case)
+    assert outcome.actual_active_skills == ("skill-b",)
+    assert outcome.assertions.skill_recall is True
+    assert all(v is None for v in outcome.safety_counters.values())
+    assert all(v is None for v in outcome.production_delta.values())
+    assert outcome.gate_eligible is False
 
 
 def test_expected_skill_never_rewrites_actual_skill(
@@ -339,7 +374,11 @@ def test_provider_fixture_registry_resolves_skill_b() -> None:
 
 def test_structural_materializer_never_gate_eligible_for_mismatch() -> None:
     """Structural path copies expected→actual (legacy); gate path must not use it."""
-    harness = RealEvalHarness(install_probes=True)
+    harness = RealEvalHarness(
+        install_probes=False,
+        safety_probe=zero_safety_counter_probe,
+        production_delta_probe=zero_production_delta_probe,
+    )
     case = harness.case(
         expected_mode="golden_skill",
         acceptable_skill_keys=["skill-a"],
@@ -361,14 +400,18 @@ def test_matching_fixture_and_expected_can_be_gate_eligible(
     outcome = real_eval_harness.execute(case)
     assert outcome.actual_active_skills == ("skill-b",)
     assert outcome.assertions.skill_recall is True
-    # Full probe-derived safety counters + zero production delta → gate-eligible.
+    # Explicit zero probes + matching skills → gate-eligible.
     assert outcome.gate_eligible is True
     assert all(v is not None for v in outcome.safety_counters.values())
 
 
 def test_skill_activation_goes_through_loop_dispatch() -> None:
     """Skill activations are applied only after Provider tool-call dispatch."""
-    harness = RealEvalHarness(install_probes=True)
+    harness = RealEvalHarness(
+        install_probes=False,
+        safety_probe=zero_safety_counter_probe,
+        production_delta_probe=zero_production_delta_probe,
+    )
     case = harness.case(
         expected_mode="golden_skill",
         acceptable_skill_keys=["skill-b"],

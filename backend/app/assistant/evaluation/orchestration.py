@@ -264,14 +264,20 @@ def install_default_isolation_probes(
 ]:
     """Build installed probe callables for the worker/orchestrator.
 
-    Default is proven zeros (isolation-owned, simulate_only path). Callers may
-    supply partial maps; missing required keys stay None.
+    Default is honest-missing Nones for unobserved keys — never manufacture
+    proven zeros. Callers may supply partial maps; unspecified required keys
+    stay None. Use ``zero_safety_counter_probe`` /
+    ``zero_production_delta_probe`` only when a test explicitly needs zeros.
     """
-    safety_base = {k: 0 for k in REQUIRED_SAFETY_COUNTER_KEYS}
+    safety_base: dict[str, int | None] = {
+        k: None for k in REQUIRED_SAFETY_COUNTER_KEYS
+    }
     if safety is not None:
         for key, value in safety.items():
             safety_base[str(key)] = None if value is None else int(value)
-    delta_base = {k: 0 for k in DEFAULT_PRODUCTION_DELTA_KEYS}
+    delta_base: dict[str, int | None] = {
+        k: None for k in DEFAULT_PRODUCTION_DELTA_KEYS
+    }
     if production_delta is not None:
         for key, value in production_delta.items():
             delta_base[str(key)] = None if value is None else int(value)

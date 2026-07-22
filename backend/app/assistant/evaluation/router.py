@@ -145,6 +145,9 @@ def _run_summary(row: Any) -> EvalRunSummary:
         failureCode=row.failure_code,
         gateEligible=bool(getattr(row, "gate_eligible", False)),
         evidenceProvenance=getattr(row, "evidence_provenance", None),
+        aggregateMetrics=_redact_event_payload(
+            dict(getattr(row, "aggregate_metrics", None) or {})
+        ),
         createdAt=getattr(row, "created_at", None),
         startedAt=row.started_at,
         endedAt=row.ended_at,

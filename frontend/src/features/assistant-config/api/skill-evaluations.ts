@@ -55,6 +55,8 @@ export interface EvalRunSummary {
   failureCode?: string | null
   gateEligible?: boolean
   evidenceProvenance?: string | null
+  /** Server-authoritative aggregate metrics when present on the run row. */
+  aggregateMetrics?: Record<string, unknown>
   createdAt?: string | null
   startedAt?: string | null
   endedAt?: string | null

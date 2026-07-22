@@ -67,6 +67,7 @@ function deriveAggregateMetrics(input: {
   evidence: EvalRunEvidence | null
   existing?: Record<string, unknown>
 }): Record<string, unknown> {
+  // Non-authoritative client chrome only — used when server metrics are absent.
   const metrics: Record<string, unknown> = { ...(input.existing || {}) }
   const cases = input.caseResults
   if (cases.length > 0) {
@@ -103,6 +104,12 @@ function deriveAggregateMetrics(input: {
     metrics.evidenceProvenance = input.evidence.evidenceProvenance
   }
   return metrics
+}
+
+function hasServerAggregateMetrics(
+  metrics: Record<string, unknown> | null | undefined,
+): metrics is Record<string, unknown> {
+  return !!metrics && typeof metrics === 'object' && Object.keys(metrics).length > 0
 }
 
 export function SkillTestWorkbench({
@@ -293,12 +300,19 @@ export function SkillTestWorkbench({
         reconcileRun(latest)
         setCaseResults(cases.items)
         setEvidence(ev)
-        const derived = deriveAggregateMetrics({
-          caseResults: cases.items,
-          evidence: ev,
-          existing: useSkillTestRunStore.getState().metrics,
-        })
-        setMetrics(derived)
+        // Prefer server aggregate_metrics after terminal evidence arrives.
+        // Client deriveAggregateMetrics is non-authoritative chrome only when
+        // the run row has no server metrics yet.
+        if (hasServerAggregateMetrics(latest.aggregateMetrics)) {
+          setMetrics({ ...latest.aggregateMetrics })
+        } else {
+          const derived = deriveAggregateMetrics({
+            caseResults: cases.items,
+            evidence: ev,
+            existing: useSkillTestRunStore.getState().metrics,
+          })
+          setMetrics(derived)
+        }
       } catch (error) {
         if (generation !== generationRef.current) return
         markError(mapSkillPackageError(error).message)

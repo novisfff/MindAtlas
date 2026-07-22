@@ -159,6 +159,9 @@ class EvalRunSummary(CamelModel):
     failure_code: str | None = Field(default=None, alias="failureCode")
     gate_eligible: bool = Field(default=False, alias="gateEligible")
     evidence_provenance: str | None = Field(default=None, alias="evidenceProvenance")
+    aggregate_metrics: dict[str, Any] = Field(
+        default_factory=dict, alias="aggregateMetrics"
+    )
     created_at: datetime | None = Field(default=None, alias="createdAt")
     started_at: datetime | None = Field(default=None, alias="startedAt")
     ended_at: datetime | None = Field(default=None, alias="endedAt")

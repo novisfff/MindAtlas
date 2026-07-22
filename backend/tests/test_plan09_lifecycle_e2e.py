@@ -662,6 +662,7 @@ class Plan09LifecycleE2ETests(unittest.TestCase):
             EvaluationOrchestratorConfig,
             install_default_isolation_probes,
             zero_production_delta_probe,
+            zero_safety_counter_probe,
         )
         from app.assistant.evaluation.assertions import evaluate_dataset_assertions
         from app.assistant.evaluation.contracts import EVAL_OWNER_KIND, EvalExecutionIdentity
@@ -726,12 +727,28 @@ class Plan09LifecycleE2ETests(unittest.TestCase):
         self.assertTrue(missing)
         self.assertFalse(bool(summary.gate_eligible and not missing))
 
-        # With default probes + matching skill → gate may be true.
-        safety, prod = install_default_isolation_probes()
+        # Default probes are honest-missing (None) — cannot invent hard-safety pass.
+        safety_default, prod_default = install_default_isolation_probes()
+        orch_default = EvaluationOrchestrator(
+            config=EvaluationOrchestratorConfig(app_build_revision="test"),
+            safety_counter_probe=safety_default,
+            production_delta_probe=prod_default,
+        )
+        observed_default = orch_default.execute_case(
+            isolation, case, None, identity=identity
+        )
+        self.assertTrue(
+            all(v is None for v in observed_default.safety_counters.values())
+        )
+        self.assertTrue(
+            all(v is None for v in observed_default.production_delta.values())
+        )
+
+        # Explicit zero probes + matching skill → gate may be true.
         orch = EvaluationOrchestrator(
             config=EvaluationOrchestratorConfig(app_build_revision="test"),
-            safety_counter_probe=safety,
-            production_delta_probe=prod,
+            safety_counter_probe=zero_safety_counter_probe,
+            production_delta_probe=zero_production_delta_probe,
         )
         observed2 = orch.execute_case(isolation, case, None, identity=identity)
         mapping2 = observed_to_case_outcome_mapping(observed2, case=case)

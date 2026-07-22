@@ -504,8 +504,9 @@ class EvaluationWorker:
             install_default_isolation_probes,
         )
 
-        # Isolation probes measure safety counters / production deltas. Without
-        # installed probes, observations stay None and gate_eligible is False.
+        # Default probes are honest-missing (None). They never manufacture
+        # proven-zero hard-safety counters; missing observations stay None and
+        # keep the run not gate-eligible until real probes observe values.
         safety_probe, delta_probe = install_default_isolation_probes()
         orchestrator = EvaluationOrchestrator(
             config=EvaluationOrchestratorConfig(

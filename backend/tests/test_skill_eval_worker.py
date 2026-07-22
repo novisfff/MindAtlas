@@ -525,6 +525,78 @@ class EvalWorkerExecuteTests(unittest.TestCase):
         finally:
             s.close()
 
+    def test_real_orchestration_default_probes_not_gate_eligible(self) -> None:
+        """Worker real path installs honest-missing probes; cannot invent hard-safety pass."""
+        dataset = self.repo.create_dataset(
+            stable_key=f"ds-{uuid.uuid4().hex[:8]}",
+            display_name="real-orch",
+            ownership="custom",
+        )
+        snapshot = [
+            {
+                "case_key": "c1",
+                "ordinal": 0,
+                "locale": "en",
+                "input_messages": [{"role": "user", "content": "hi"}],
+                "expected_mode": "golden_skill",
+                "acceptable_skill_keys": ["skill-b"],
+                "fixture_refs": [
+                    {
+                        "kind": "provider_script",
+                        "script_key": "provider-selects-skill-b",
+                        "revision": "eval-v1",
+                    }
+                ],
+                "case_digest": DIGEST_A,
+            }
+        ]
+        self.repo.get_or_create_draft(dataset_id=dataset.id, cases_snapshot=snapshot)
+        published = self.repo.publish_dataset_version(
+            dataset_id=dataset.id,
+            expected_aggregate_revision=0,
+            expected_draft_revision=0,
+            version_name="v1",
+        )
+        run = self.repo.create_run(
+            subject_kind="skill_draft",
+            subject_aggregate_id=uuid.uuid4(),
+            subject_version_id=uuid.uuid4(),
+            subject_content_digest=DIGEST_A,
+            subject_binding_digest=DIGEST_A,
+            dataset_version_ids=[published.version_id],
+            threshold_policy_version="t1",
+            mode="dataset_scripted",
+            isolation_namespace_id=uuid.uuid4(),
+            runtime_contract_version=1,
+            required_build_revision="development",
+            isolation_digest=DIGEST_A,
+            evidence_provenance="real_orchestration",
+            provider_fixture_revision="eval-v1",
+            provider_fixture_digest=DIGEST_A,
+        )
+        self.db.commit()
+        outcome = self.worker.execute_run(run.id)
+        self.assertIsNone(outcome)
+        s = self._session()
+        try:
+            from app.assistant.evaluation.repository import EvaluationRepository
+
+            repo = EvaluationRepository(s)
+            stored = repo.get_run(run.id)
+            assert stored is not None
+            self.assertIn(stored.status, {"completed", "failed"})
+            self.assertFalse(stored.gate_eligible)
+            metrics = dict(stored.aggregate_metrics or {})
+            counters = dict(metrics.get("safety_counters") or {})
+            # Honest missing: either no counters map or at least one None value.
+            if counters:
+                self.assertTrue(any(v is None for v in counters.values()))
+            delta = dict(metrics.get("production_delta") or {})
+            if delta:
+                self.assertTrue(any(v is None for v in delta.values()))
+        finally:
+            s.close()
+
     def test_dataset_scripted_empty_cases_fails_missing(self) -> None:
         """Empty materialization must fail as dataset_cases_missing (not mode_not_supported)."""
         from unittest.mock import patch
