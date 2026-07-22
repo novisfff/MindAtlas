@@ -628,6 +628,109 @@ class PublishGateServiceUnitTests(unittest.TestCase):
             )
         self.assertEqual(ctx3.exception.code, "gate_subject_drift")
 
+    def test_env_pin_fixture_drift_rejects_qualifying_run(self) -> None:
+        """Provider fixture pins from qualifying runs must match every run."""
+        from app.assistant.evaluation.gates import (
+            PublishGateError,
+            PublishGateService,
+            compare_run_to_subject,
+            environment_pins_from_runs,
+            make_create_gate_request,
+        )
+
+        run, ds_id, _, _ = self._seed_completed_run()
+        # Seeded real_orchestration runs pin DIGEST_D / test-provider-v1.
+        env = environment_pins_from_runs([run])
+        self.assertEqual(env["isolation_digest"], DIGEST_C)
+        self.assertEqual(env["provider_fixture_digest"], DIGEST_D)
+        self.assertEqual(env["provider_fixture_revision"], "test-provider-v1")
+
+        subject = self._subject(
+            run,
+            ds_id,
+            isolation_digest=DIGEST_C,
+            provider_fixture_digest=DIGEST_D,
+            provider_fixture_revision="test-provider-v1",
+        )
+        drifts = compare_run_to_subject(run, subject)
+        self.assertEqual(drifts, [])
+
+        # Drift fixture digest on the subject → run no longer qualifies.
+        drifted = self._subject(
+            run,
+            ds_id,
+            isolation_digest=DIGEST_C,
+            provider_fixture_digest=DIGEST_F,
+            provider_fixture_revision="test-provider-v1",
+        )
+        drifts = compare_run_to_subject(run, drifted)
+        self.assertIn("provider_fixture_digest", drifts)
+
+        svc = PublishGateService(self.db)
+        with self.assertRaises(PublishGateError) as ctx:
+            svc.create_gate(
+                make_create_gate_request(
+                    subject=drifted, qualifying_eval_run_ids=(run.id,)
+                ),
+                actor_principal="op",
+                subject=drifted,
+                _allow_prebuilt_subject=True,
+            )
+        self.assertIn(
+            ctx.exception.code,
+            {"eval_run_subject_drift", "eval_run_env_pin_drift"},
+        )
+
+        # Cross-run disagreement on isolation_digest fails closed.
+        run2, _, _, _ = self._seed_completed_run()
+        run2.isolation_digest = DIGEST_F
+        self.db.flush()
+        with self.assertRaises(PublishGateError) as ctx2:
+            environment_pins_from_runs([run, run2])
+        self.assertEqual(ctx2.exception.code, "eval_run_env_pin_drift")
+        self.assertEqual(ctx2.exception.details.get("field"), "isolation_digest")
+
+    def test_create_gate_persists_environment_pins_snapshot(self) -> None:
+        """Gate assertion_snapshot carries server-derived env pins for consume."""
+        from app.assistant.evaluation.gates import (
+            PublishGateService,
+            make_create_gate_request,
+        )
+
+        run, ds_id, _, _ = self._seed_completed_run()
+        subject = self._subject(run, ds_id)
+        svc = PublishGateService(self.db)
+        result = svc.create_gate(
+            make_create_gate_request(
+                subject=subject, qualifying_eval_run_ids=(run.id,)
+            ),
+            actor_principal="op",
+            subject=subject,
+            _allow_prebuilt_subject=True,
+        )
+        self.db.commit()
+        pins = dict((result.gate.assertion_snapshot or {}).get("environment_pins") or {})
+        self.assertEqual(pins.get("isolation_digest"), DIGEST_C)
+        self.assertEqual(pins.get("provider_fixture_digest"), DIGEST_D)
+        self.assertEqual(pins.get("provider_fixture_revision"), "test-provider-v1")
+        # Consume re-verify with a subject missing env pins still works because
+        # stored pins are merged back from assertion_snapshot.
+        bare = self._subject(run, ds_id)
+        # Explicitly clear optional pins if helper ever starts forwarding them.
+        bare = bare.model_copy(
+            update={
+                "isolation_digest": None,
+                "policy_digest": None,
+                "runtime_digest": None,
+                "provider_fixture_digest": None,
+                "provider_fixture_revision": None,
+            }
+        )
+        verified = svc.recompute_and_verify(
+            result.gate.id, subject=bare, action="skill_publish"
+        )
+        self.assertEqual(str(verified.id), str(result.gate.id))
+
     def test_expired_gate_rejected(self) -> None:
         from app.assistant.evaluation.gates import (
             PublishGateError,

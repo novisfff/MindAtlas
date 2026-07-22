@@ -397,7 +397,13 @@ def compare_run_to_subject(
     run: AssistantSkillEvalRun,
     subject: PublishGateSubject,
 ) -> list[str]:
-    """Drift fields between a qualifying eval run and the gate subject."""
+    """Drift fields between a qualifying eval run and the gate subject.
+
+    When the subject carries optional evaluation-environment pins (isolation /
+    policy / runtime / provider fixture), each run must match them. Pins are
+    server-derived from qualifying runs at gate create; this check enforces
+    cross-run consistency and rejects drifted evidence.
+    """
     drifts: list[str] = []
     sub = subject.subject
     if str(run.subject_kind) != str(sub.kind):
@@ -420,7 +426,95 @@ def compare_run_to_subject(
     sub_ds = _sorted_uuid_strs(subject.dataset_version_ids)
     if run_ds != sub_ds:
         drifts.append("dataset_version_ids")
+
+    # Optional environment pins — compare only when the subject carries them.
+    if subject.isolation_digest is not None:
+        if not _digest_eq(getattr(run, "isolation_digest", None), subject.isolation_digest):
+            drifts.append("isolation_digest")
+    if subject.policy_digest is not None:
+        run_pd = getattr(run, "policy_digest", None)
+        if run_pd is None or not _digest_eq(run_pd, subject.policy_digest):
+            drifts.append("policy_digest")
+    if subject.runtime_digest is not None:
+        run_rd = getattr(run, "runtime_digest", None)
+        if run_rd is None or not _digest_eq(run_rd, subject.runtime_digest):
+            drifts.append("runtime_digest")
+    if subject.provider_fixture_digest is not None:
+        run_fd = getattr(run, "provider_fixture_digest", None)
+        if run_fd is None or not _digest_eq(run_fd, subject.provider_fixture_digest):
+            drifts.append("provider_fixture_digest")
+    if subject.provider_fixture_revision is not None:
+        run_fr = str(getattr(run, "provider_fixture_revision", None) or "").strip()
+        if run_fr != str(subject.provider_fixture_revision).strip():
+            drifts.append("provider_fixture_revision")
     return drifts
+
+
+def environment_pins_from_runs(
+    runs: Sequence[AssistantSkillEvalRun],
+) -> dict[str, str | None]:
+    """Derive shared evaluation-environment pins from qualifying runs.
+
+    Returns a dict with isolation_digest, policy_digest, runtime_digest,
+    provider_fixture_revision, provider_fixture_digest. Values are None when
+    no run supplies them. Raises PublishGateError when runs disagree on a pin.
+    """
+    if not runs:
+        return {
+            "isolation_digest": None,
+            "policy_digest": None,
+            "runtime_digest": None,
+            "provider_fixture_revision": None,
+            "provider_fixture_digest": None,
+        }
+
+    def _agree(values: list[str], field: str) -> str | None:
+        if not values:
+            return None
+        first = values[0]
+        for other in values[1:]:
+            if other != first:
+                raise PublishGateError(
+                    "eval_run_env_pin_drift",
+                    f"qualifying runs disagree on {field}",
+                    http_status=409,
+                    http_code=CODE_GATE_DRIFT,
+                    details={"field": field, "values": sorted(set(values))},
+                )
+        return first
+
+    isolation_vals = [
+        str(r.isolation_digest).strip().lower()
+        for r in runs
+        if getattr(r, "isolation_digest", None)
+    ]
+    policy_vals = [
+        str(r.policy_digest).strip().lower()
+        for r in runs
+        if getattr(r, "policy_digest", None)
+    ]
+    runtime_vals = [
+        str(r.runtime_digest).strip().lower()
+        for r in runs
+        if getattr(r, "runtime_digest", None)
+    ]
+    fixture_dig_vals = [
+        str(r.provider_fixture_digest).strip().lower()
+        for r in runs
+        if getattr(r, "provider_fixture_digest", None)
+    ]
+    fixture_rev_vals = [
+        str(r.provider_fixture_revision).strip()
+        for r in runs
+        if getattr(r, "provider_fixture_revision", None)
+    ]
+    return {
+        "isolation_digest": _agree(isolation_vals, "isolation_digest"),
+        "policy_digest": _agree(policy_vals, "policy_digest"),
+        "runtime_digest": _agree(runtime_vals, "runtime_digest"),
+        "provider_fixture_revision": _agree(fixture_rev_vals, "provider_fixture_revision"),
+        "provider_fixture_digest": _agree(fixture_dig_vals, "provider_fixture_digest"),
+    }
 
 
 def _metrics_from_run(run: AssistantSkillEvalRun) -> dict[str, float | int]:
@@ -769,6 +863,10 @@ class PublishGateService:
             dataset_version_ids=dataset_ids,
             build_revision=current_build_revision(),
         )
+        # Evaluation-environment pins from qualifying real_orchestration runs
+        # (isolation / policy / runtime / provider fixture). Cross-run disagreement
+        # fails closed via environment_pins_from_runs.
+        env_pins = environment_pins_from_runs(runs)
         return build_publish_gate_subject(
             kind=kind,
             aggregate_id=aggregate_id,
@@ -782,6 +880,11 @@ class PublishGateService:
             policy_version=pins.policy_version,
             threshold_version=pins.threshold_version,
             build_revision=pins.build_revision,
+            isolation_digest=env_pins.get("isolation_digest"),
+            policy_digest=env_pins.get("policy_digest"),
+            runtime_digest=env_pins.get("runtime_digest"),
+            provider_fixture_revision=env_pins.get("provider_fixture_revision"),
+            provider_fixture_digest=env_pins.get("provider_fixture_digest"),
         )
 
     def create_gate(
@@ -917,6 +1020,46 @@ class PublishGateService:
             request.qualifying_eval_run_ids,
             subject=subject,
         )
+        # Enrich subject with evaluation-environment pins from qualifying runs
+        # when the caller/prebuilt subject omitted them. Re-check each run so
+        # cross-run env disagreement fails closed.
+        env_pins = environment_pins_from_runs(runs)
+        enrich: dict[str, str] = {}
+        for key, value in env_pins.items():
+            if value is None:
+                continue
+            current = getattr(subject, key, None)
+            if current is None:
+                enrich[key] = value
+            elif str(current).strip().lower() != str(value).strip().lower() and key != "provider_fixture_revision":
+                raise PublishGateError(
+                    "eval_run_env_pin_drift",
+                    f"subject {key} disagrees with qualifying runs",
+                    http_status=409,
+                    http_code=CODE_GATE_DRIFT,
+                    details={"field": key, "subject": current, "runs": value},
+                )
+            elif key == "provider_fixture_revision" and str(current).strip() != str(value).strip():
+                raise PublishGateError(
+                    "eval_run_env_pin_drift",
+                    f"subject {key} disagrees with qualifying runs",
+                    http_status=409,
+                    http_code=CODE_GATE_DRIFT,
+                    details={"field": key, "subject": current, "runs": value},
+                )
+        if enrich:
+            subject = subject.model_copy(update=enrich)
+            for run in runs:
+                drifts = compare_run_to_subject(run, subject)
+                if drifts:
+                    raise PublishGateError(
+                        "eval_run_subject_drift",
+                        f"eval run subject closure drifted: {drifts}",
+                        http_status=409,
+                        http_code=CODE_GATE_DRIFT,
+                        details={"eval_run_id": str(run.id), "drifts": drifts},
+                    )
+
         summary = summarize_qualifying_runs(self.repo, runs, subject=subject)
         decision, accepted, err = derive_gate_decision(
             summary,
@@ -942,6 +1085,18 @@ class PublishGateService:
                 )
 
         assertion_snapshot = summary.as_dict()
+        # Persist environment pins for consume-time re-verify without migration.
+        assertion_snapshot["environment_pins"] = {
+            key: value
+            for key, value in {
+                "isolation_digest": subject.isolation_digest,
+                "policy_digest": subject.policy_digest,
+                "runtime_digest": subject.runtime_digest,
+                "provider_fixture_revision": subject.provider_fixture_revision,
+                "provider_fixture_digest": subject.provider_fixture_digest,
+            }.items()
+            if value is not None
+        }
         metric_snapshot = dict(summary.metrics)
         expires_at = self._utcnow() + timedelta(days=self.ttl_days)
 
@@ -1292,6 +1447,38 @@ class PublishGateService:
                 details={"gate_id": str(gate.id), "drifts": drifts},
             )
 
+    @staticmethod
+    def _subject_with_stored_env_pins(
+        gate: AssistantSkillPublishGate,
+        subject: PublishGateSubject,
+    ) -> PublishGateSubject:
+        """Merge create-time environment pins from gate.assertion_snapshot.
+
+        Consume callers rebuild the current subject without re-deriving run
+        env pins; stored pins keep isolation/policy/runtime/fixture closure
+        stable for re-verify without a schema migration.
+        """
+        stored = dict((gate.assertion_snapshot or {}).get("environment_pins") or {})
+        if not stored:
+            return subject
+        enrich: dict[str, str] = {}
+        for key in (
+            "isolation_digest",
+            "policy_digest",
+            "runtime_digest",
+            "provider_fixture_revision",
+            "provider_fixture_digest",
+        ):
+            value = stored.get(key)
+            if value is None:
+                continue
+            current = getattr(subject, key, None)
+            if current is None:
+                enrich[key] = str(value)
+        if not enrich:
+            return subject
+        return subject.model_copy(update=enrich)
+
     def recompute_and_verify(
         self,
         gate_id: UUID,
@@ -1301,8 +1488,9 @@ class PublishGateService:
     ) -> AssistantSkillPublishGate:
         """Load gate and re-verify exact closure under caller's transaction."""
         gate = self.require_gate(gate_id)
+        subject = self._subject_with_stored_env_pins(gate, subject)
         self.assert_gate_usable(gate, subject=subject, action=action)
-        # Re-check qualifying runs still match (dataset/build/policy drift).
+        # Re-check qualifying runs still match (dataset/build/policy/env drift).
         for rid in gate.qualifying_eval_run_ids or []:
             run = self.repo.get_run(_as_uuid(rid))
             if run is None or str(run.status) != "completed" or not bool(run.gate_eligible):
@@ -1555,6 +1743,11 @@ def build_publish_gate_subject(
     policy_version: str = "plan09-policy-v1",
     threshold_version: str = THRESHOLD_POLICY_VERSION,
     build_revision: str = "development",
+    isolation_digest: str | None = None,
+    policy_digest: str | None = None,
+    runtime_digest: str | None = None,
+    provider_fixture_revision: str | None = None,
+    provider_fixture_digest: str | None = None,
 ) -> PublishGateSubject:
     """Helper to construct a PublishGateSubject from raw fields."""
     from app.assistant.evaluation.contracts import EvalSubjectRef
@@ -1574,6 +1767,11 @@ def build_publish_gate_subject(
         threshold_version=threshold_version,
         dataset_version_ids=tuple(dataset_version_ids),
         build_revision=build_revision,
+        isolation_digest=isolation_digest,
+        policy_digest=policy_digest,
+        runtime_digest=runtime_digest,
+        provider_fixture_revision=provider_fixture_revision,
+        provider_fixture_digest=provider_fixture_digest,
     )
 
 
@@ -1646,6 +1844,7 @@ __all__ = [
     "compare_subject_closure",
     "current_build_revision",
     "current_gate_environment_pins",
+    "environment_pins_from_runs",
     "existing_gate_request_digest",
     "gate_request_digest",
     "gate_required_for_enable",

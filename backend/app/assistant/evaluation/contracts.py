@@ -100,7 +100,13 @@ class EvalSubjectRef(FrozenContract):
 
 
 class PublishGateSubject(FrozenContract):
-    """Exact subject closure a publish gate must recompute against."""
+    """Exact subject closure a publish gate must recompute against.
+
+    Optional evaluation-environment pins (isolation/policy/runtime/fixture)
+    are derived from qualifying real_orchestration runs at gate create time
+    and re-checked against every run via ``compare_run_to_subject``. They are
+    not client-authored.
+    """
 
     schema_version: Literal[1] = 1
     subject: EvalSubjectRef
@@ -111,10 +117,28 @@ class PublishGateSubject(FrozenContract):
     threshold_version: str
     dataset_version_ids: tuple[UUID, ...]
     build_revision: str
+    # Optional env pins from qualifying eval runs (server-derived).
+    isolation_digest: str | None = None
+    policy_digest: str | None = None
+    runtime_digest: str | None = None
+    provider_fixture_revision: str | None = None
+    provider_fixture_digest: str | None = None
 
     @field_validator("profile_digest", "catalog_digest")
     @classmethod
     def _digest(cls, value: str, info) -> str:  # noqa: ANN001
+        return _require_sha256(value, field_name=info.field_name)
+
+    @field_validator(
+        "isolation_digest",
+        "policy_digest",
+        "runtime_digest",
+        "provider_fixture_digest",
+    )
+    @classmethod
+    def _optional_digest(cls, value: str | None, info) -> str | None:  # noqa: ANN001
+        if value is None:
+            return None
         return _require_sha256(value, field_name=info.field_name)
 
     @field_validator("runtime_contract_version")
@@ -130,6 +154,16 @@ class PublishGateSubject(FrozenContract):
         if not value:
             raise ValueError("dataset_version_ids must be non-empty")
         return tuple(value)
+
+    @field_validator("provider_fixture_revision")
+    @classmethod
+    def _fixture_revision(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text or len(text) > 160:
+            raise ValueError("provider_fixture_revision must be 1..160 chars")
+        return text
 
 
 class EvalExecutionIdentity(FrozenContract):
