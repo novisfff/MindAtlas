@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -29,6 +30,28 @@ vi.mock('../api/main-agent-profiles', async () => {
     publishProtectedDefaultMainAgent: vi.fn(),
     enableProtectedDefaultMainAgentRuntime: vi.fn(),
     disableProtectedDefaultMainAgentRuntime: vi.fn(),
+    // Workbench uses the unprotected default profile helpers for profile pin lists.
+    getDefaultMainAgentProfile: vi.fn(async () => ({
+      id: 'profile-1111-2222-3333',
+      profileKey: 'default',
+      displayName: 'Default',
+      draftVersion: { id: 'draft-aaaa-bbbb-cccc' },
+      publishedVersion: null,
+    })),
+    listDefaultMainAgentVersions: vi.fn(async () => ({
+      items: [
+        {
+          id: 'draft-aaaa-bbbb-cccc',
+          profileId: 'profile-1111-2222-3333',
+          sequenceNo: 1,
+          versionName: 'draft',
+          versionSource: 'save',
+          origin: 'ui',
+          contentDigest: 'a'.repeat(64),
+        },
+      ],
+      total: 1,
+    })),
   }
 })
 
@@ -40,6 +63,15 @@ vi.mock('../api/skill-evaluations', async () => {
     ...actual,
     createPublishGate: vi.fn(),
     listQualifyingEvidence: vi.fn(),
+    createEvalRun: vi.fn(),
+    listEvalDatasets: vi.fn(async () => ({ items: [], total: 0 })),
+    listDatasetVersions: vi.fn(async () => ({ items: [], total: 0 })),
+    listEvalRunEvents: vi.fn(async () => ({ items: [], lastSequence: 0 })),
+    listEvalRunCaseResults: vi.fn(async () => ({ items: [], total: 0 })),
+    listEvalRunEvidence: vi.fn(async () => null),
+    streamEvalRunEvents: vi.fn(() => ({ close: () => undefined })),
+    getEvalRun: vi.fn(),
+    cancelEvalRun: vi.fn(),
   }
 })
 
@@ -68,6 +100,7 @@ vi.mock('react-i18next', () => ({
           'Disable Main Agent Profile runtime?',
         'settings.universalSkills.promotionGateId': 'Promotion gate ID',
         'settings.universalSkills.versionHistory': 'Version history',
+        'settings.universalSkills.evaluationWorkbench': 'Evaluation workbench',
         'settings.universalSkills.noVersions': 'No versions yet.',
         'settings.universalSkills.noDraftVersion': 'No draft version selected.',
         'settings.universalSkills.dirty': 'Unsaved changes',
@@ -95,6 +128,23 @@ vi.mock('react-i18next', () => ({
         'settings.universalSkills.openPromotionGateDialog': 'Open promotion gate dialog',
         'settings.universalSkills.evaluatePublishedBeforeEnable':
           'Evaluate the published version before enabling',
+        'settings.universalSkills.evalPrompt': 'Prompt',
+        'settings.universalSkills.evalLocale': 'Locale',
+        'settings.universalSkills.evalMode': 'Evaluation mode',
+        'settings.universalSkills.profileVersion': 'Profile version',
+        'settings.universalSkills.datasetVersion': 'Dataset version',
+        'settings.universalSkills.providerFixture': 'Provider fixture',
+        'settings.universalSkills.providerFixtureStructuralDefault':
+          'Structural synthetic (no fixture pin)',
+        'settings.universalSkills.liveModelId': 'Live model ID',
+        'settings.universalSkills.startEval': 'Start evaluation',
+        'settings.universalSkills.cancelEval': 'Cancel evaluation',
+        'settings.universalSkills.loadingProfiles': 'Loading profiles…',
+        'settings.universalSkills.selectDatasetVersion': 'Select dataset version',
+        'settings.universalSkills.workbenchNeedsDraft':
+          'A draft version is required to start evaluation.',
+        'settings.universalSkills.workbenchInvalidInputs':
+          'Complete required workbench inputs for the selected mode.',
         'messages.loading': 'Loading…',
         'common.back': 'Back',
         'common.cancel': 'Cancel',
@@ -185,12 +235,17 @@ function snapshot() {
 }
 
 function renderPage() {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  })
   return render(
-    <MemoryRouter initialEntries={['/settings/main-agent-profile']}>
-      <Routes>
-        <Route path="/settings/main-agent-profile" element={<MainAgentProfileEditorPage />} />
-      </Routes>
-    </MemoryRouter>,
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter initialEntries={['/settings/main-agent-profile']}>
+        <Routes>
+          <Route path="/settings/main-agent-profile" element={<MainAgentProfileEditorPage />} />
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
   )
 }
 
@@ -469,5 +524,50 @@ describe('MainAgentProfileEditorPage two-gate lifecycle', () => {
     await waitFor(() => {
       expect(screen.getByText(/runtime=enabled/)).toBeInTheDocument()
     })
+  })
+
+  it('renders evaluation workbench for profile draft subject', async () => {
+    renderPage()
+    const workbench = await screen.findByTestId('profile-eval-workbench')
+    expect(workbench).toBeInTheDocument()
+    expect(screen.getByText('Evaluation workbench')).toBeInTheDocument()
+    const inner = await screen.findByTestId('skill-test-workbench')
+    expect(inner).toHaveAttribute('data-subject-kind', 'main_agent_profile_draft')
+  })
+
+  it('can start a profile draft eval run via workbench (mocked API)', async () => {
+    const createEvalRun = vi.mocked(skillEvaluations.createEvalRun)
+    createEvalRun.mockResolvedValue({
+      id: 'run-new-profile-eval',
+      status: 'queued',
+      mode: 'interactive_scripted',
+      subjectKind: 'main_agent_profile_draft',
+      subjectAggregateId: PROFILE_ID,
+      subjectVersionId: DRAFT_ID,
+      stateRevision: 0,
+      gateEligible: false,
+      evidenceProvenance: 'structural_synthetic',
+      aggregateMetrics: {},
+    } as never)
+
+    renderPage()
+    await screen.findByTestId('skill-test-workbench')
+    // Wait for profile pin list so start becomes enabled.
+    await screen.findByLabelText('Profile version')
+    await waitFor(() => {
+      const select = screen.getByLabelText('Profile version') as HTMLSelectElement
+      expect(select.value).toBeTruthy()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Start evaluation' }))
+    await waitFor(() => {
+      expect(createEvalRun).toHaveBeenCalled()
+    })
+    const body = createEvalRun.mock.calls[0][0]
+    expect(body.subjectKind).toBe('main_agent_profile_draft')
+    expect(body.subjectAggregateId).toBe(PROFILE_ID)
+    expect(body.subjectVersionId).toBe(DRAFT_ID)
+    // Profile subject pins the evaluated version when no separate pin selected.
+    expect(body.profileVersionId).toBeTruthy()
   })
 })

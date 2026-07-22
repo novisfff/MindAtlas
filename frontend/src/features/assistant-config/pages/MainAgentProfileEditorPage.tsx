@@ -41,6 +41,7 @@ import {
 } from '../api/skill-evaluations'
 import { mapSkillPackageError, newRequestId } from '../api/skill-packages'
 import { SkillPublishGateDialog } from '../components/SkillPublishGateDialog'
+import { SkillTestWorkbench } from '../components/SkillTestWorkbench'
 
 const DEFAULT_SNAPSHOT: MainAgentProfileSnapshot = {
   schemaVersion: 1,
@@ -542,6 +543,23 @@ function ProfileEditorBody() {
             setPromotionGate(gateUiStateFromResponse(result, 'profile_runtime_enable'))
           }}
         />
+
+        {profileId && (draftVersionId || publishedVersionId) ? (
+          <div className="space-y-2" data-testid="profile-eval-workbench">
+            <h3 className="text-sm font-medium">
+              {t('settings.universalSkills.evaluationWorkbench')}
+            </h3>
+            <SkillTestWorkbench
+              packageId={profileId}
+              versionId={draftVersionId ?? publishedVersionId}
+              subjectKind={
+                draftVersionId
+                  ? 'main_agent_profile_draft'
+                  : 'main_agent_profile_version'
+              }
+            />
+          </div>
+        ) : null}
 
         <div className="space-y-2">
           <h3 className="text-sm font-medium">{t('settings.universalSkills.versionHistory')}</h3>

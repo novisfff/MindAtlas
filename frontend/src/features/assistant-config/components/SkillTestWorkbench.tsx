@@ -38,10 +38,17 @@ import { useSkillTestRunStore } from '../stores/skill-test-run-store'
 import { SkillEvaluationEvidence } from './SkillEvaluationEvidence'
 import { SkillEvaluationRun } from './SkillEvaluationRun'
 
+export type WorkbenchSubjectKind =
+  | 'skill_draft'
+  | 'skill_version'
+  | 'main_agent_profile_draft'
+  | 'main_agent_profile_version'
+
 export interface SkillTestWorkbenchProps {
+  /** Subject aggregate id: skill package id or main-agent profile id. */
   packageId: string
   versionId: string | null
-  subjectKind?: 'skill_draft' | 'skill_version'
+  subjectKind?: WorkbenchSubjectKind
   className?: string
 }
 
@@ -503,6 +510,14 @@ export function SkillTestWorkbench({
           : mode === 'interactive_scripted'
             ? providerFixtureRevision.trim() || null
             : null
+      // Profile subjects pin the evaluated version as the Profile admission pin
+      // when the operator has not selected a different profileVersionId.
+      const isProfileSubject =
+        subjectKind === 'main_agent_profile_draft' ||
+        subjectKind === 'main_agent_profile_version'
+      const resolvedProfileVersionId =
+        profileVersionId.trim() ||
+        (isProfileSubject && versionId ? versionId : profileVersionId)
       const request: CreateEvalRunRequest = {
         requestId: newRequestId('eval'),
         subjectKind,
@@ -510,7 +525,7 @@ export function SkillTestWorkbench({
         subjectVersionId: versionId,
         prompt: prompt.trim(),
         locale: locale.trim(),
-        profileVersionId,
+        profileVersionId: resolvedProfileVersionId,
         mode,
         datasetVersionIds: needsDataset && datasetVersionId ? [datasetVersionId] : [],
         providerFixtureRevision: fixturePin,
@@ -598,7 +613,11 @@ export function SkillTestWorkbench({
   const datasetOptions = datasetVersionsQuery.data ?? []
 
   return (
-    <div className={cn('space-y-4', className)}>
+    <div
+      className={cn('space-y-4', className)}
+      data-testid="skill-test-workbench"
+      data-subject-kind={subjectKind}
+    >
       <div className="grid gap-3 sm:grid-cols-2">
         <label className="space-y-1 text-sm">
           <span>{t('settings.universalSkills.evalPrompt')}</span>

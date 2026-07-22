@@ -2082,6 +2082,7 @@
       },
       "noVersions": "暂无版本。",
       "versionHistory": "版本历史",
+      "evaluationWorkbench": "评估工作台",
       "compare": "对比",
       "restoreIsNewDraft": "恢复会复制为新草稿，不会回退已发布指针。",
       "draftMarker": "草稿",

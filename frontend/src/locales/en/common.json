@@ -2092,6 +2092,7 @@
       },
       "noVersions": "No versions yet.",
       "versionHistory": "Version history",
+      "evaluationWorkbench": "Evaluation workbench",
       "compare": "Compare",
       "restoreIsNewDraft": "Restore copies this version into a new draft. It never rewinds the published pointer.",
       "draftMarker": "Draft",
