@@ -545,3 +545,150 @@ def test_isolated_eval_probes_with_matching_skills_can_be_gate_eligible() -> Non
     assert all(v == 0 for v in outcome.safety_counters.values())
     assert all(v == 0 for v in outcome.production_delta.values())
     assert outcome.gate_eligible is True
+
+
+def test_orchestrator_with_candidate_closure_uses_closure_digests() -> None:
+    """skill.inject must bind package/version/content digests from candidate_closure."""
+    from app.assistant.evaluation.isolation import eval_execution_scope
+    from app.assistant.skills.candidate_closure import SkillCandidateClosure
+
+    package_id = uuid4()
+    version_id = uuid4()
+    content_digest = "c" * 64
+    version_digest = "d" * 64
+    binding_digest = "e" * 64
+    closure = SkillCandidateClosure(
+        subject_kind="skill_draft",
+        package_id=package_id,
+        version_id=version_id,
+        content_digest=content_digest,
+        binding_set_digest=binding_digest,
+        version_digest=version_digest,
+        bindings=(),
+    )
+    namespace_id = uuid4()
+    isolation = build_isolation_context(
+        namespace_id=namespace_id,
+        subject_digest=DIGEST_A,
+        dataset_version_ids=(uuid4(),),
+        memory_mode="empty",
+        data_mode="fixture",
+    )
+    orchestrator = EvaluationOrchestrator(
+        config=EvaluationOrchestratorConfig(app_build_revision="test"),
+        candidate_closure=closure,
+        safety_counter_probe=zero_safety_counter_probe,
+        production_delta_probe=zero_production_delta_probe,
+    )
+    case = _HarnessCase(
+        expected_mode="golden_skill",
+        acceptable_skill_keys=["skill-b"],
+        fixture_refs=[
+            {
+                "kind": "provider_script",
+                "script_key": "provider-selects-skill-b",
+                "revision": "eval-v1",
+            }
+        ],
+        input_messages=[{"role": "user", "content": "activate skill-b"}],
+    )
+    identity = EvalExecutionIdentity(
+        eval_run_id=uuid4(),
+        eval_case_id=case.id,
+        namespace_id=namespace_id,
+        owner_kind=EVAL_OWNER_KIND,
+        subject_kind="skill_draft",
+        subject_aggregate_id=package_id,
+        subject_version_id=version_id,
+    )
+    with eval_execution_scope(
+        isolation=isolation,
+        identity=identity,
+        fixture_store={},
+    ) as scope:
+        observed = orchestrator.execute_case(
+            isolation,
+            case,
+            None,
+            identity=identity,
+            scope=scope,
+        )
+        assert observed.actual_active_skills == ("skill-b",)
+        inject_events = [
+            e
+            for e in scope.events
+            if e.get("event_type") == "eval.skill_inject_dispatched"
+        ]
+        assert inject_events
+        payload = inject_events[0]["payload"]
+        assert payload["package_id"] == str(package_id)
+        assert payload["version_id"] == str(version_id)
+        assert payload["content_digest"] == content_digest
+        assert payload["version_digest"] == version_digest
+        assert payload["candidate_closure_bound"] is True
+
+
+def test_orchestrator_without_closure_still_activates_with_synthetic_ids() -> None:
+    """Without candidate_closure, inject still works with name-derived digests."""
+    from app.assistant.evaluation.isolation import eval_execution_scope
+
+    namespace_id = uuid4()
+    isolation = build_isolation_context(
+        namespace_id=namespace_id,
+        subject_digest=DIGEST_A,
+        dataset_version_ids=(uuid4(),),
+        memory_mode="empty",
+        data_mode="fixture",
+    )
+    orchestrator = EvaluationOrchestrator(
+        config=EvaluationOrchestratorConfig(app_build_revision="test"),
+        candidate_closure=None,
+        safety_counter_probe=zero_safety_counter_probe,
+        production_delta_probe=zero_production_delta_probe,
+    )
+    case = _HarnessCase(
+        expected_mode="golden_skill",
+        acceptable_skill_keys=["skill-b"],
+        fixture_refs=[
+            {
+                "kind": "provider_script",
+                "script_key": "provider-selects-skill-b",
+                "revision": "eval-v1",
+            }
+        ],
+    )
+    identity = EvalExecutionIdentity(
+        eval_run_id=uuid4(),
+        eval_case_id=case.id,
+        namespace_id=namespace_id,
+        owner_kind=EVAL_OWNER_KIND,
+        subject_kind="skill_draft",
+        subject_aggregate_id=uuid4(),
+        subject_version_id=uuid4(),
+    )
+    with eval_execution_scope(
+        isolation=isolation,
+        identity=identity,
+        fixture_store={},
+    ) as scope:
+        observed = orchestrator.execute_case(
+            isolation,
+            case,
+            None,
+            identity=identity,
+            scope=scope,
+        )
+        assert observed.actual_active_skills == ("skill-b",)
+        inject_events = [
+            e
+            for e in scope.events
+            if e.get("event_type") == "eval.skill_inject_dispatched"
+        ]
+        assert inject_events
+        assert inject_events[0]["payload"]["candidate_closure_bound"] is False
+        # Synthetic digests are name-derived, not random opaque values for content.
+        from app.assistant.domain.digests import sha256_canonical_json
+
+        assert inject_events[0]["payload"]["content_digest"] == sha256_canonical_json(
+            {"skill": "skill-b"}
+        )

@@ -510,10 +510,14 @@ class EvaluationWorker:
         # Static install_default_isolation_probes remains the honest-missing
         # helper for tests that intentionally leave observations unobserved.
         safety_probe, delta_probe = install_isolated_eval_observation_probes()
+        candidate_closure = self._resolve_candidate_closure(repo, run)
+        profile_snapshot = self._resolve_profile_snapshot(repo, run)
         orchestrator = EvaluationOrchestrator(
             config=EvaluationOrchestratorConfig(
                 app_build_revision=self.cfg.identity.app_build_revision,
             ),
+            candidate_closure=candidate_closure,
+            profile_snapshot=profile_snapshot,
             safety_counter_probe=safety_probe,
             production_delta_probe=delta_probe,
         )
@@ -562,6 +566,108 @@ class EvaluationWorker:
                     elif value is not None:
                         merged_delta[key] = int(merged_delta[key] or 0) + int(value)
         return outcomes, merged_safety, merged_delta
+
+    def _resolve_candidate_closure(
+        self, repo: EvaluationRepository, run: Any
+    ) -> Any | None:
+        """Resolve skill candidate_closure for skill subjects; None otherwise.
+
+        Partial compose: full ``compose_main_agent_policy_runtime`` still requires
+        a live session + production control handlers. Binding real digests from
+        the pure candidate-closure resolver is enough for skill.inject identity.
+        """
+        subject_kind = str(getattr(run, "subject_kind", "") or "")
+        if subject_kind not in {"skill_draft", "skill_version"}:
+            return None
+        try:
+            from app.assistant.skills.candidate_closure import (
+                resolve_skill_candidate_closure,
+            )
+
+            return resolve_skill_candidate_closure(
+                repo.session,
+                package_id=UUID(str(run.subject_aggregate_id)),
+                version_id=UUID(str(run.subject_version_id)),
+                subject_kind=subject_kind,  # type: ignore[arg-type]
+            )
+        except Exception as exc:  # noqa: BLE001 — keep orchestration running
+            # Missing package/version in tests without seeded skills is expected;
+            # orchestrator falls back to synthetic name-derived digests.
+            logger.info(
+                "candidate_closure unresolved for run subject=%s/%s: %s",
+                subject_kind,
+                getattr(run, "subject_version_id", None),
+                type(exc).__name__,
+            )
+            return None
+
+    def _resolve_profile_snapshot(
+        self, repo: EvaluationRepository, run: Any
+    ) -> dict[str, Any] | None:
+        """Build profile_snapshot from admission pin or profile subject digests."""
+        metrics = dict(getattr(run, "aggregate_metrics", None) or {})
+        admission = dict(metrics.get("admission") or {})
+        profile_version_raw = (
+            admission.get("profileVersionId")
+            or admission.get("profile_version_id")
+            or None
+        )
+        subject_kind = str(getattr(run, "subject_kind", "") or "")
+        # Profile subjects use the subject version as the Profile pin.
+        if subject_kind in {
+            "main_agent_profile_draft",
+            "main_agent_profile_version",
+        }:
+            profile_version_raw = profile_version_raw or str(run.subject_version_id)
+
+        if not profile_version_raw:
+            # Still surface subject digests when present so orchestrator does not
+            # invent random profile UUIDs for the manifest pin fields it can know.
+            content = getattr(run, "subject_content_digest", None)
+            if content and subject_kind.startswith("main_agent_profile"):
+                return {
+                    "profile_key": "eval-profile",
+                    "profile_version_id": str(run.subject_version_id),
+                    "content_digest": str(content),
+                    "profile_id": str(run.subject_aggregate_id),
+                }
+            return None
+
+        try:
+            from app.assistant.skills.models import (
+                AssistantMainAgentProfile,
+                AssistantMainAgentProfileVersion,
+            )
+
+            version_id = UUID(str(profile_version_raw))
+            version = repo.session.get(AssistantMainAgentProfileVersion, version_id)
+            if version is None:
+                return {
+                    "profile_version_id": str(version_id),
+                    "content_digest": str(
+                        getattr(run, "subject_content_digest", "") or ""
+                    )
+                    or None,
+                }
+            profile = repo.session.get(AssistantMainAgentProfile, version.profile_id)
+            profile_key = (
+                str(getattr(profile, "profile_key", None) or "eval-profile")
+                if profile is not None
+                else "eval-profile"
+            )
+            return {
+                "profile_key": profile_key,
+                "profile_id": str(version.profile_id),
+                "profile_version_id": str(version.id),
+                "content_digest": str(version.content_digest),
+            }
+        except Exception as exc:  # noqa: BLE001
+            logger.info(
+                "profile_snapshot unresolved for run: %s", type(exc).__name__
+            )
+            return {
+                "profile_version_id": str(profile_version_raw),
+            }
 
     def _persist_dataset_outcome(
         self,

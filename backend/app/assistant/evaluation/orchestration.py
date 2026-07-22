@@ -419,8 +419,17 @@ class EvaluationOrchestrator:
         profile_digest = str(
             profile.get("content_digest") or self.config.profile_content_digest
         )
+        profile_id_raw = profile.get("profile_id")
+        if profile_id_raw is not None:
+            profile_id = (
+                profile_id_raw
+                if isinstance(profile_id_raw, UUID)
+                else UUID(str(profile_id_raw))
+            )
+        else:
+            profile_id = uuid4()
         main_agent = ResolvedMainAgentRef(
-            profile_id=uuid4(),
+            profile_id=profile_id,
             version_id=profile_version_id,
             profile_key=profile_key,
             sequence=1,
@@ -463,6 +472,7 @@ class EvaluationOrchestrator:
             inject_binding=inject_binding,
             inject_descriptor=inject_descriptor,
             scope=scope,
+            candidate_closure=self.candidate_closure,
         )
         auth = _EvalAuthFactory()
         verifier = _EvalDescriptorVerifier(
@@ -1037,6 +1047,10 @@ class _EvalSkillInjectDispatcher:
 
     This is the only path that materializes fixture-declared skills onto the
     runtime manifest — driven by Provider tool-call events through the loop.
+
+    When ``candidate_closure`` is bound, package/version/content/version digests
+    come from the closure (never random UUIDs). Without a closure, digests stay
+    name-derived synthetic values for structural/fixture-only runs.
     """
 
     def __init__(
@@ -1045,13 +1059,54 @@ class _EvalSkillInjectDispatcher:
         inject_binding: Any,
         inject_descriptor: CapabilityDescriptor,
         scope: EvalExecutionScope,
+        candidate_closure: Any | None = None,
     ) -> None:
         self._inject_binding = inject_binding
         self._inject_descriptor = inject_descriptor
         self._scope = scope
+        self._candidate_closure = candidate_closure
         self.activated_skills: list[str] = []
         self.dispatch_requests: list[ProviderDispatchRequest] = []
         self.capability_path: list[str] = []
+
+    def _resolved_skill_ref(self, skill_name: str) -> ResolvedSkillRef:
+        """Build ResolvedSkillRef; prefer candidate_closure digests when present."""
+        closure = self._candidate_closure
+        if closure is not None:
+            package_id = getattr(closure, "package_id", None)
+            version_id = getattr(closure, "version_id", None)
+            content_digest = getattr(closure, "content_digest", None)
+            version_digest = getattr(closure, "version_digest", None)
+            if (
+                package_id is not None
+                and version_id is not None
+                and content_digest
+                and version_digest
+            ):
+                if not isinstance(package_id, UUID):
+                    package_id = UUID(str(package_id))
+                if not isinstance(version_id, UUID):
+                    version_id = UUID(str(version_id))
+                return ResolvedSkillRef(
+                    package_id=package_id,
+                    version_id=version_id,
+                    canonical_name=skill_name,
+                    sequence=1,
+                    content_digest=str(content_digest),
+                    version_digest=str(version_digest),
+                    requested_name_normalized=skill_name,
+                    resolved_via_alias_id=None,
+                )
+        return ResolvedSkillRef(
+            package_id=uuid4(),
+            version_id=uuid4(),
+            canonical_name=skill_name,
+            sequence=1,
+            content_digest=sha256_canonical_json({"skill": skill_name}),
+            version_digest=sha256_canonical_json({"skill": skill_name, "v": 1}),
+            requested_name_normalized=skill_name,
+            resolved_via_alias_id=None,
+        )
 
     def dispatch(self, request: ProviderDispatchRequest, *, cancellation: Any) -> Any:
         del cancellation
@@ -1078,16 +1133,7 @@ class _EvalSkillInjectDispatcher:
         skill_names = [str(s).strip() for s in skills_raw if str(s).strip()]
         next_manifest = current
         for skill_name in skill_names:
-            skill = ResolvedSkillRef(
-                package_id=uuid4(),
-                version_id=uuid4(),
-                canonical_name=skill_name,
-                sequence=1,
-                content_digest=sha256_canonical_json({"skill": skill_name}),
-                version_digest=sha256_canonical_json({"skill": skill_name, "v": 1}),
-                requested_name_normalized=skill_name,
-                resolved_via_alias_id=None,
-            )
+            skill = self._resolved_skill_ref(skill_name)
             next_manifest = append_skill_activation(
                 next_manifest, skill=skill, capabilities=()
             )
@@ -1098,6 +1144,11 @@ class _EvalSkillInjectDispatcher:
                     "skill_key": skill_name,
                     "call_id": request.call.call_id,
                     "domain_key": domain,
+                    "package_id": str(skill.package_id),
+                    "version_id": str(skill.version_id),
+                    "content_digest": skill.content_digest,
+                    "version_digest": skill.version_digest,
+                    "candidate_closure_bound": self._candidate_closure is not None,
                 },
             )
         if skill_names:
