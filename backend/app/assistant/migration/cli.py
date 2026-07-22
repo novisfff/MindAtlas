@@ -107,9 +107,40 @@ def _build_parser() -> argparse.ArgumentParser:
     resume_p.add_argument("--operator-principal", default=None)
     resume_p.add_argument("--fixture-json", default=None)
 
-    # Mutation groups — stubs until later tasks.
+    # Packages migrate/verify (Task 2).
+    pkg = sub.add_parser("packages", help="Skill package / profile migration commands")
+    pkg_sub = pkg.add_subparsers(dest="cmd", required=True)
+    for cmd, help_text in (
+        ("migrate", "Migrate legacy skills to native packages / Main Agent Profile"),
+        ("verify", "Independent verify pass for migrated packages/profile"),
+    ):
+        cmd_p = pkg_sub.add_parser(cmd, help=help_text)
+        _add_safety_flags(cmd_p)
+        cmd_p.add_argument(
+            "--operator-principal",
+            default=None,
+            help="Operator principal id (required for --apply)",
+        )
+        cmd_p.add_argument(
+            "--skill-id",
+            action="append",
+            default=None,
+            help="Limit to one or more legacy skill UUIDs (repeatable)",
+        )
+        if cmd == "migrate":
+            cmd_p.add_argument(
+                "--with-verify",
+                action="store_true",
+                help="Run independent verify pass after migrate",
+            )
+            cmd_p.add_argument(
+                "--write-branches-json",
+                default=None,
+                help="Optional JSON file with write_branches inventory records",
+            )
+
+    # Remaining mutation groups — stubs until later tasks.
     for group_name, commands in (
-        ("packages", ("migrate", "verify")),
         ("l2", ("backfill", "verify")),
         ("approvals", ("archive", "verify")),
         ("rollout", ("prepare", "activate", "rollback")),
@@ -807,6 +838,169 @@ def _run_stub(args: argparse.Namespace) -> int:
     return CLI_EXIT_PRECONDITION_FAILED
 
 
+def _parse_skill_ids(raw: list[str] | None) -> list[UUID] | None:
+    if not raw:
+        return None
+    out: list[UUID] = []
+    for value in raw:
+        try:
+            out.append(UUID(str(value)))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"invalid skill-id: {value}") from exc
+    return out
+
+
+def _run_packages_command(
+    args: argparse.Namespace,
+    *,
+    session_factory: Callable[[], Any] | None = None,
+) -> int:
+    """packages migrate / packages verify."""
+    from app.assistant.migration.packages import migrate_packages, verify_packages
+    from app.assistant.migration.repository import RuntimeMigrationRepositoryError
+
+    dry_run = bool(args.dry_run)
+    apply = bool(args.apply)
+    if dry_run == apply:
+        _emit(
+            {
+                "ok": False,
+                "error": "precondition_failed",
+                "reason": "exactly_one_of_dry_run_or_apply",
+            }
+        )
+        return CLI_EXIT_PRECONDITION_FAILED
+
+    operator = _resolve_operator_principal(getattr(args, "operator_principal", None))
+    if apply and not operator:
+        _emit(
+            {
+                "ok": False,
+                "error": "precondition_failed",
+                "reason": "operator_principal_required_for_apply",
+            }
+        )
+        return CLI_EXIT_PRECONDITION_FAILED
+
+    if apply and _is_wildcard_source_digest(str(args.source_snapshot_digest)):
+        _emit(
+            {
+                "ok": False,
+                "error": "conflict_or_drift",
+                "reason": "wildcard_source_snapshot_digest_not_allowed_on_apply",
+                "expected": str(args.source_snapshot_digest),
+            }
+        )
+        return CLI_EXIT_CONFLICT_OR_DRIFT
+
+    try:
+        skill_ids = _parse_skill_ids(getattr(args, "skill_id", None))
+    except ValueError as exc:
+        _emit(
+            {
+                "ok": False,
+                "error": "precondition_failed",
+                "reason": "skill_id_invalid",
+                "message": str(exc)[:200],
+            }
+        )
+        return CLI_EXIT_PRECONDITION_FAILED
+
+    write_branches: list[dict[str, Any]] | None = None
+    wb_path = getattr(args, "write_branches_json", None)
+    if wb_path:
+        loaded = _load_fixture(wb_path)
+        if isinstance(loaded, dict) and isinstance(loaded.get("write_branches"), list):
+            write_branches = list(loaded["write_branches"])
+        elif isinstance(loaded, list):
+            write_branches = list(loaded)
+        else:
+            _emit(
+                {
+                    "ok": False,
+                    "error": "precondition_failed",
+                    "reason": "write_branches_json_invalid",
+                }
+            )
+            return CLI_EXIT_PRECONDITION_FAILED
+
+    resolved_factory = _resolve_session_factory(session_factory, require=True)
+    assert resolved_factory is not None
+    session = resolved_factory()
+    try:
+        common = dict(
+            request_id=str(args.request_id),
+            actor_principal=operator,
+            build_revision=str(args.expected_build_revision),
+            environment=str(args.environment),
+            database_fingerprint=str(args.database_fingerprint),
+            schema_head=str(args.expected_schema_head),
+            dry_run=dry_run,
+            skill_ids=skill_ids,
+            batch_size=int(args.batch_size),
+            source_snapshot_digest=str(args.source_snapshot_digest),
+        )
+        if args.cmd == "migrate":
+            report = migrate_packages(
+                session,
+                write_branches=write_branches,
+                verify=bool(getattr(args, "with_verify", False)) and not dry_run,
+                **common,
+            )
+        else:
+            report = verify_packages(session, **common)
+        if not dry_run:
+            session.commit()
+        else:
+            session.rollback()
+    except RuntimeMigrationRepositoryError as exc:
+        session.rollback()
+        code = (
+            CLI_EXIT_CONFLICT_OR_DRIFT
+            if exc.code in {"conflict", "drift", "stale_revision", "immutable"}
+            else CLI_EXIT_PRECONDITION_FAILED
+        )
+        _emit({"ok": False, "error": exc.code, "reason": exc.message[:200]})
+        return code
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        close = getattr(session, "close", None)
+        if callable(close):
+            # Injected test sessions may be shared; only close default factories.
+            if session_factory is None:
+                close()
+
+    payload = report.to_dict()
+    payload["environment"] = str(args.environment)
+    payload["databaseFingerprint"] = str(args.database_fingerprint)
+    payload["schemaHead"] = str(args.expected_schema_head)
+    payload["buildRevision"] = str(args.expected_build_revision)
+    payload["sourceSnapshotDigest"] = str(args.source_snapshot_digest)
+    _write_report(args.report_json, payload)
+    _emit(
+        {
+            "ok": payload.get("ok", True),
+            "command": payload.get("command"),
+            "dryRun": dry_run,
+            "processed": payload.get("processed"),
+            "succeeded": payload.get("succeeded"),
+            "blocked": payload.get("blocked"),
+            "failed": payload.get("failed"),
+            "archived": payload.get("archived"),
+            "batchId": payload.get("batchId"),
+            "reportDigest": payload.get("reportDigest"),
+            "reportJson": str(args.report_json),
+        }
+    )
+    if int(payload.get("failed") or 0) > 0:
+        return CLI_EXIT_UNEXPECTED_FAILURE
+    if int(payload.get("blocked") or 0) > 0:
+        return CLI_EXIT_COMPLETED_WITH_BLOCKERS
+    return CLI_EXIT_COMPLETED
+
+
 def main(
     argv: list[str] | None = None,
     *,
@@ -836,6 +1030,8 @@ def main(
                 records_loader=records_loader,
                 session_factory=session_factory,
             )
+        if args.group == "packages" and args.cmd in {"migrate", "verify"}:
+            return _run_packages_command(args, session_factory=session_factory)
         return _run_stub(args)
     except Exception as exc:  # pragma: no cover - unexpected path
         _emit(

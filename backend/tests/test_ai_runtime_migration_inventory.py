@@ -352,10 +352,11 @@ class CliInventoryScanTests(unittest.TestCase):
     def test_cli_mutation_stub_exits_precondition_failed(self) -> None:
         from app.assistant.migration import cli as migration_cli
 
+        # packages migrate/verify are implemented in Task 2; remaining groups stay stubs.
         code = migration_cli.main(
             [
-                "packages",
-                "migrate",
+                "l2",
+                "backfill",
                 "--environment",
                 "test",
                 "--database-fingerprint",
