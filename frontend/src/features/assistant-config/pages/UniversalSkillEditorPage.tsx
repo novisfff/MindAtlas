@@ -4,7 +4,7 @@
  * Client never authors digests/decisions/metrics; gates are action+subject-version keyed.
  */
 import { useEffect, useMemo, useState } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { useNavigate, useParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 
 import { Button } from '@/components/ui/button'
@@ -520,9 +520,6 @@ export function UniversalSkillEditorPage() {
           evalSubjectKind={workbenchSubjectKind}
           evalVersionId={workbenchVersionId}
         />
-        <p className="text-xs text-muted-foreground">
-          <Link to="/settings/assistant-skills" className="underline">{t('settings.universalSkills.openLegacy')}</Link>
-        </p>
         {!surface.data.adminMounted ? (
           <p className="text-xs text-amber-700 dark:text-amber-300">{t('settings.universalSkills.adminUnmountedHint')}</p>
         ) : null}

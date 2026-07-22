@@ -497,10 +497,11 @@ class AssistantService:
         self.db.commit()
         self.db.refresh(assistant_msg)
 
-        # Plan 06 Task 6 / Plan 10 Task 6: admit + select immutable runtime_kind
-        # immediately before Run insertion. A permitted Legacy fallback happens
-        # only before the durable row exists; once main_agent is inserted, never
-        # fall back. When an active rollout revision exists, freeze assignment.
+        # Plan 06 Task 6 / Plan 10 Task 9 (Deploy B1): admit + select immutable
+        # runtime_kind immediately before Run insertion. New production chat is
+        # Main Agent only — do not create or daemon-spawn legacy Supervisor runs.
+        # Pre-insert Legacy fallback is fail-closed for new traffic; in-flight
+        # legacy recovery (if any rows already exist) stays on the drain path.
         from app.assistant.durable.admission import admit_and_select_runtime
 
         runtime_kind, admit_reason, create_kwargs = admit_and_select_runtime(
@@ -511,44 +512,35 @@ class AssistantService:
         # Strip internal Plan 10 metadata before create_run kwargs.
         preinsert_fallback = create_kwargs.pop("_preinsert_fallback", None)
         create_kwargs.pop("_rollout_decision", None)
-        if preinsert_fallback is not None and getattr(
-            preinsert_fallback, "resulting_legacy_run_id", None
-        ):
-            create_kwargs["run_id"] = preinsert_fallback.resulting_legacy_run_id
-        is_main_agent = str(create_kwargs.get("runtime_kind") or runtime_kind) == "main_agent"
+        selected_kind = str(create_kwargs.get("runtime_kind") or runtime_kind or "")
+        if selected_kind != "main_agent" or preinsert_fallback is not None:
+            try:
+                self.db.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+            raise ApiException(
+                status_code=503,
+                code=50310,
+                message=(
+                    "Main Agent runtime is required for new chat. "
+                    "Legacy assistant runtime (IntentRouter/Supervisor) is disabled."
+                ),
+                details={
+                    "runtimeKind": selected_kind or "legacy",
+                    "admissionReason": admit_reason,
+                    "legacyRuntimeDisabled": True,
+                },
+            )
         try:
             # Main Agent: create Run + initial public event in ONE transaction so a
             # worker cannot claim a half-initialized queued row (Plan 06 §3/§9).
-            # Legacy keeps the historical two-step commit for compatibility.
-            # Pre-insert fallback: insert Legacy Run then record fallback event
-            # atomically before commit.
             run = run_svc.create_run(
                 conversation=conversation,
                 user_message=user_msg,
                 assistant_message=assistant_msg,
-                commit=not is_main_agent and preinsert_fallback is None,
+                commit=False,
                 **create_kwargs,
             )
-            if preinsert_fallback is not None:
-                try:
-                    from app.assistant.migration.rollout import record_preinsert_fallback
-                    from app.config import get_settings
-
-                    record_preinsert_fallback(
-                        self.db,
-                        decision=preinsert_fallback,
-                        resulting_legacy_run_id=run.id,
-                        build_revision=getattr(
-                            get_settings(), "app_build_revision", None
-                        ),
-                    )
-                except Exception:  # noqa: BLE001
-                    # Fallback evidence failure must not invent a second Run; the
-                    # Legacy Run already exists — continue without remapping.
-                    logger = __import__("logging").getLogger(__name__)
-                    logger.exception(
-                        "preinsert fallback evidence write failed run=%s", run.id
-                    )
             run_svc.append_event(
                 run_id=run.id,
                 event_name="run_status",
@@ -558,22 +550,27 @@ class AssistantService:
                     "runtimeKind": str(run.runtime_kind or runtime_kind),
                     **({"admissionReason": admit_reason} if admit_reason else {}),
                 },
-                commit=not is_main_agent and preinsert_fallback is None,
+                commit=False,
             )
-            if is_main_agent or preinsert_fallback is not None:
-                self.db.commit()
-                self.db.refresh(run)
+            self.db.commit()
+            self.db.refresh(run)
         except ValueError as exc:
             try:
                 self.db.rollback()
             except Exception:  # noqa: BLE001
                 pass
             raise ApiException(status_code=409, code=42260, message=str(exc)) from exc
-        # Main Agent Runs are claimed by the durable worker — never spawn the
-        # Legacy daemon thread path for runtime_kind=main_agent.
+        # Deploy B1: never spawn the Legacy IntentRouter/Supervisor daemon for new
+        # chat. Main Agent Runs are claimed exclusively by the durable worker.
         if str(run.runtime_kind or "") != "main_agent":
-            self._start_background_run(
-                run_id=run.id, stream_output=stream_output, locale=locale
+            raise ApiException(
+                status_code=503,
+                code=50310,
+                message=(
+                    "Main Agent runtime is required for new chat. "
+                    "Legacy assistant runtime is disabled."
+                ),
+                details={"runtimeKind": str(run.runtime_kind or "legacy")},
             )
         yield from self.stream_run(conversation.id, run_id=run.id, after_seq=0)
 
@@ -824,18 +821,17 @@ class AssistantService:
             _update_run_status(status=RUN_STATUS_RUNNING)
             _append_event("run_status", {"status": RUN_STATUS_RUNNING})
 
-            # Runtime selection once at Run start (Plan 04 §14.1).
-            # off / shadow production: Legacy only — never construct MainAgentService.
-            # read_only: admit Main Agent; safe pre-output fallback may use Legacy.
-            settings = get_settings()
-            main_agent_mode = str(getattr(settings, "assistant_main_agent_mode", "off") or "off")
-            used_main_agent = False
-            skip_l2 = False
-            skip_l1 = False
-            skip_title = False
+            # Deploy B1 drain path: this daemon is only for recovering pre-existing
+            # runtime_kind=legacy rows. New chat never admits Legacy (see chat_stream).
+            # Main Agent production execution is owned exclusively by the durable worker.
+            runtime_kind = str(getattr(run, "runtime_kind", None) or "legacy")
+            if runtime_kind == "main_agent":
+                raise RuntimeError(
+                    "legacy daemon refused main_agent run; use durable worker"
+                )
 
-            def _run_legacy_generate(agent_db: Session) -> None:
-                nonlocal pending_chars, checkpoint_force_requested
+            agent_db = SessionLocal()
+            try:
                 for delta in self._generate_response(
                     conversation.id,
                     message_id=assistant_msg.id,
@@ -869,106 +865,6 @@ class AssistantService:
                             checkpoint_force_requested = False
                             force_checkpoint = True
                     _persist_checkpoint(force=force_checkpoint)
-
-            agent_db = SessionLocal()
-            try:
-                if main_agent_mode == "read_only":
-                    from app.assistant.main_agent.events import MainAgentEventAdapter
-                    from app.assistant.main_agent.service import (
-                        AssistantRuntimeRequest,
-                        MainAgentService,
-                        chunk_text,
-                        should_construct_main_agent,
-                    )
-                    from app.assistant.memory_service import AssistantMemoryService
-
-                    if should_construct_main_agent(
-                        mode=main_agent_mode, execution_kind="production"
-                    ):
-                        ma_events = MainAgentEventAdapter(_append_event)
-                        l1_text = ""
-                        l0_msgs: tuple = ()
-                        try:
-                            with SessionLocal() as mem_db:
-                                l1_text = AssistantMemoryService(mem_db).get_l1_summary(
-                                    conversation.id
-                                ) or ""
-                            # L0 window is best-effort; empty history is valid.
-                            history_rows = self._build_llm_messages(
-                                conversation.id, db=agent_db, locale=resolved_locale
-                            )
-                            # Drop the current user turn from history if present.
-                            if history_rows and history_rows[-1].get("role") == "user":
-                                history_rows = history_rows[:-1]
-                            l0_msgs = tuple(history_rows[-12:])
-                        except Exception:
-                            logger.debug(
-                                "main agent memory snapshot failed run_id=%s",
-                                run_id,
-                                exc_info=True,
-                            )
-
-                        ma_service = MainAgentService(
-                            agent_db,
-                            event_adapter=ma_events,
-                        )
-                        ma_result = ma_service.run(
-                            AssistantRuntimeRequest(
-                                run_id=run_id,
-                                conversation_id=conversation.id,
-                                user_text=str(user_msg.content or ""),
-                                locale=resolved_locale,
-                                stream_output=stream_output,
-                                l1_summary=l1_text,
-                                l0_messages=l0_msgs,
-                                execution_kind="production",
-                                cancel_checker=_cancel_checker,
-                            )
-                        )
-                        if ma_result.fallback_to_legacy:
-                            logger.info(
-                                "main agent fallback to legacy run_id=%s reason=%s",
-                                run_id,
-                                ma_result.reason_code,
-                            )
-                            _run_legacy_generate(agent_db)
-                        elif ma_result.status == "cancelled":
-                            raise AssistantRunCancelled()
-                        elif ma_result.status == "failed":
-                            raise RuntimeError(
-                                f"main_agent_failed:{ma_result.reason_code or 'unknown'}"
-                            )
-                        else:
-                            used_main_agent = True
-                            # New path: L2 always zero; L1/title only on successful MA completion.
-                            skip_l2 = True
-                            skip_l1 = not bool(ma_result.write_l1)
-                            skip_title = not bool(ma_result.write_title)
-                            final_text = ma_result.final_text or ""
-                            if final_text and ma_result.write_message:
-                                # Single ownership of user-visible stream: update
-                                # Message content first, then emit bounded deltas once.
-                                with state_lock:
-                                    if ma_result.skill_summaries:
-                                        assistant_msg.skill_calls = list(
-                                            ma_result.skill_summaries
-                                        )
-                                    if ma_result.tool_summaries:
-                                        assistant_msg.tool_calls = list(
-                                            ma_result.tool_summaries
-                                        )
-                                for chunk in chunk_text(final_text):
-                                    ensure_not_cancelled(_cancel_checker)
-                                    with state_lock:
-                                        content_parts.append(chunk)
-                                        pending_chars += len(chunk)
-                                    _append_event("content_delta", {"delta": chunk})
-                            _persist_checkpoint(force=True)
-                    else:
-                        _run_legacy_generate(agent_db)
-                else:
-                    # off / shadow: Legacy production path only.
-                    _run_legacy_generate(agent_db)
             finally:
                 try:
                     agent_db.close()
@@ -976,7 +872,7 @@ class AssistantService:
                     pass
 
             _persist_checkpoint(force=True)
-            if not skip_title and not conversation.title:
+            if not conversation.title:
                 title = self._generate_title(user_msg.content or "", assistant_msg.content or "", locale=locale)
                 if title:
                     conversation.title = title
@@ -987,27 +883,19 @@ class AssistantService:
             _append_event("run_status", {"status": RUN_STATUS_COMPLETED})
             _append_event("message_end", {"finishReason": "stop"})
             _update_checkpoint(checkpoint_seq=latest_event_seq)
-            if not skip_l1:
-                self._update_l1_summary_after_run(
-                    conversation_id=conversation.id,
-                    run_id=run_id,
-                    user_text=str(user_msg.content or ""),
-                    assistant_text=str(assistant_msg.content or ""),
-                )
-            if not skip_l2:
-                self._update_l2_memory_after_run(
-                    conversation_id=conversation.id,
-                    run_id=run_id,
-                    skill_name=self._resolve_selected_skill_for_l2(event_adapter.skill_calls_data),
-                    user_text=str(user_msg.content or ""),
-                    assistant_text=str(assistant_msg.content or ""),
-                )
-            if used_main_agent:
-                logger.info(
-                    "main agent run completed run_id=%s l1=%s l2=0",
-                    run_id,
-                    not skip_l1,
-                )
+            self._update_l1_summary_after_run(
+                conversation_id=conversation.id,
+                run_id=run_id,
+                user_text=str(user_msg.content or ""),
+                assistant_text=str(assistant_msg.content or ""),
+            )
+            self._update_l2_memory_after_run(
+                conversation_id=conversation.id,
+                run_id=run_id,
+                skill_name=self._resolve_selected_skill_for_l2(event_adapter.skill_calls_data),
+                user_text=str(user_msg.content or ""),
+                assistant_text=str(assistant_msg.content or ""),
+            )
         except AssistantRunCancelled:
             logger.info("assistant background run cancelled run_id=%s", run_id)
             _persist_checkpoint(force=True)

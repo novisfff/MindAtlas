@@ -4,10 +4,9 @@
  * Missing feature or principal never mounts protected package queries.
  */
 import type { ReactNode } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 
-import { Button } from '@/components/ui/button'
 import {
   SettingsPageHeader,
   SettingsPageShell,
@@ -60,13 +59,6 @@ export function Plan09RouteGate({
               {t('settings.universalSkills.unavailableDesc')}
             </p>
             <p className="mt-2">{t('settings.universalSkills.unavailableBody')}</p>
-            <div className="mt-4">
-              <Button asChild variant="outline">
-                <Link to="/settings/assistant-skills">
-                  {t('settings.universalSkills.openLegacy')}
-                </Link>
-              </Button>
-            </div>
           </div>
         </SettingsSection>
       </SettingsPageShell>

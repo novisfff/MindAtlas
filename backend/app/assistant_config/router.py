@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
+from app.common.exceptions import ApiException
 from app.assistant_config.schemas import (
     AgentPublishRequest,
     AgentVersionListResponse,
@@ -217,46 +218,43 @@ def get_skill(id: UUID, db: Session = Depends(get_db)) -> ApiResponse:
     )
 
 
-@router.post("/skills", response_model=ApiResponse)
-def create_skill(request: AssistantSkillCreateRequest, db: Session = Depends(get_db)) -> ApiResponse:
-    service = AssistantConfigService(db)
-    skill = service.create_skill(request)
-    return ApiResponse.ok(
-        AssistantSkillResponse.model_validate(service.serialize_skill(skill)).model_dump(by_alias=True)
+def _legacy_skill_mutation_gone() -> None:
+    """Deploy B1: legacy single-target Skill CRUD is retired; tables remain."""
+    raise ApiException(
+        status_code=410,
+        code=41010,
+        message=(
+            "Legacy assistant Skill admin mutations are gone. "
+            "Use Universal Skill packages under /api/assistant/skill-admin "
+            "or standalone Workflow/Agent APIs."
+        ),
+        details={"legacySkillAdmin": True, "replacement": "universal_skills"},
     )
+
+
+@router.post("/skills", response_model=ApiResponse)
+def create_skill() -> ApiResponse:
+    _legacy_skill_mutation_gone()
 
 
 @router.put("/skills/{id}", response_model=ApiResponse)
-def update_skill(id: UUID, request: AssistantSkillUpdateRequest, db: Session = Depends(get_db)) -> ApiResponse:
-    service = AssistantConfigService(db)
-    skill = service.update_skill(id, request)
-    return ApiResponse.ok(
-        AssistantSkillResponse.model_validate(service.serialize_skill(skill)).model_dump(by_alias=True)
-    )
+def update_skill(id: UUID) -> ApiResponse:
+    _legacy_skill_mutation_gone()
 
 
 @router.post("/skills/{id}/reset", response_model=ApiResponse)
-def reset_skill(id: UUID, request: ResetSkillRequest, db: Session = Depends(get_db)) -> ApiResponse:
-    service = AssistantConfigService(db)
-    skill = service.reset_skill(id, confirm=request.confirm)
-    return ApiResponse.ok(
-        AssistantSkillResponse.model_validate(service.serialize_skill(skill)).model_dump(by_alias=True)
-    )
+def reset_skill(id: UUID) -> ApiResponse:
+    _legacy_skill_mutation_gone()
 
 
 @router.post("/skills/reset-all", response_model=ApiResponse)
-def reset_all_skills(request: ResetSkillRequest, db: Session = Depends(get_db)) -> ApiResponse:
-    """重置所有系统技能到默认配置，并清理已下线的系统技能"""
-    service = AssistantConfigService(db)
-    result = service.reset_all_system_skills(confirm=request.confirm)
-    return ApiResponse.ok(result)
+def reset_all_skills() -> ApiResponse:
+    _legacy_skill_mutation_gone()
 
 
 @router.delete("/skills/{id}", response_model=ApiResponse)
-def delete_skill(id: UUID, db: Session = Depends(get_db)) -> ApiResponse:
-    service = AssistantConfigService(db)
-    service.delete_skill(id)
-    return ApiResponse.ok(None, "Skill deleted")
+def delete_skill(id: UUID) -> ApiResponse:
+    _legacy_skill_mutation_gone()
 
 
 # ==================== System AI Behaviors ====================
@@ -720,53 +718,24 @@ def submit_run_approval_decision(
     return ApiResponse.ok(payload)
 
 
-# ==================== Compatibility Skill Workflow Routes ====================
+# ==================== Compatibility Skill Workflow Routes (gone) ====================
 
 @router.put("/skills/{id}/workflow", response_model=ApiResponse)
-def update_workflow(
-    id: UUID,
-    request: WorkflowInput,
-    db: Session = Depends(get_db),
-) -> ApiResponse:
-    """仅更新 Skill 的工作流 DAG（nodes + edges + viewport）"""
-    service = AssistantConfigService(db)
-    skill = service.update_workflow(id, request)
-    return ApiResponse.ok(
-        AssistantSkillResponse.model_validate(service.serialize_skill(skill)).model_dump(by_alias=True)
-    )
+def update_workflow(id: UUID) -> ApiResponse:
+    """Legacy nested Skill workflow mutation — retired in Deploy B1."""
+    _legacy_skill_mutation_gone()
 
 
 @router.post("/skills/{id}/validate-workflow", response_model=ApiResponse)
-def validate_workflow(
-    id: UUID,
-    request: WorkflowInput,
-    db: Session = Depends(get_db),
-) -> ApiResponse:
-    """兼容路由：按 skill 绑定的 workflow 做验证。"""
-    service = AssistantConfigService(db)
-    workflow = service.get_skill_workflow(id)
-    resp = _validate_workflow_payload(db, request, workflow=workflow)
-    return ApiResponse.ok(resp.model_dump(by_alias=True))
+def validate_workflow(id: UUID) -> ApiResponse:
+    """Legacy nested Skill workflow validation — retired in Deploy B1."""
+    _legacy_skill_mutation_gone()
 
 
 @router.post("/skills/{id}/workflow/test-run")
-def test_run_workflow(
-    id: UUID,
-    request: WorkflowTestRunRequest,
-    db: Session = Depends(get_db),
-) -> StreamingResponse:
-    """在编辑器草稿上执行工作流测试运行（不持久化）。"""
-    service = WorkflowTestRunService(db)
-    prepared = service.prepare(id, request)
-    return StreamingResponse(
-        service.stream(prepared),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
+def test_run_workflow(id: UUID) -> StreamingResponse:
+    """Legacy nested Skill workflow test-run — retired in Deploy B1."""
+    _legacy_skill_mutation_gone()
 
 
 # Node type metadata
