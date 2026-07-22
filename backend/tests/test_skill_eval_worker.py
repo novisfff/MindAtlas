@@ -268,9 +268,14 @@ class EvalWorkerExecuteTests(unittest.TestCase):
         self.session_factory = lambda: self._session()
         self._sessions: list = []
 
+        from app.assistant.evaluation.gates import current_build_revision
+
+        # Match process build pin so claim_run succeeds even if earlier suites
+        # left APP_BUILD_REVISION polluted (full pytest order in CI).
+        self.worker_build_revision = current_build_revision()
         identity = EvalWorkerIdentity(
             worker_id="eval-test-worker",
-            app_build_revision="development",
+            app_build_revision=self.worker_build_revision,
             runtime_contract_version=1,
             runner_contract_version=1,
         )
@@ -336,7 +341,7 @@ class EvalWorkerExecuteTests(unittest.TestCase):
             mode="interactive_scripted",
             isolation_namespace_id=uuid.uuid4(),
             runtime_contract_version=1,
-            required_build_revision="development",
+            required_build_revision=self.worker_build_revision,
             isolation_digest=DIGEST_A,
             runner_contract_version=1,
         )
@@ -503,7 +508,7 @@ class EvalWorkerExecuteTests(unittest.TestCase):
             mode="dataset_scripted",
             isolation_namespace_id=uuid.uuid4(),
             runtime_contract_version=1,
-            required_build_revision="development",
+            required_build_revision=self.worker_build_revision,
             isolation_digest=DIGEST_A,
         )
         self.db.commit()
@@ -568,7 +573,7 @@ class EvalWorkerExecuteTests(unittest.TestCase):
             mode="dataset_scripted",
             isolation_namespace_id=uuid.uuid4(),
             runtime_contract_version=1,
-            required_build_revision="development",
+            required_build_revision=self.worker_build_revision,
             isolation_digest=DIGEST_A,
             evidence_provenance="real_orchestration",
             provider_fixture_revision="eval-v1",
@@ -646,7 +651,7 @@ class EvalWorkerExecuteTests(unittest.TestCase):
             mode="dataset_scripted",
             isolation_namespace_id=uuid.uuid4(),
             runtime_contract_version=1,
-            required_build_revision="development",
+            required_build_revision=self.worker_build_revision,
             isolation_digest=DIGEST_A,
         )
         self.db.commit()
@@ -703,7 +708,7 @@ class EvalWorkerExecuteTests(unittest.TestCase):
             mode="dataset_live",
             isolation_namespace_id=uuid.uuid4(),
             runtime_contract_version=1,
-            required_build_revision="development",
+            required_build_revision=self.worker_build_revision,
             isolation_digest=DIGEST_A,
         )
         self.db.commit()

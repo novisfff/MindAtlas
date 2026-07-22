@@ -118,10 +118,15 @@ class Plan09System:
         self.gates = PublishGateService(self.db)
         self._name = f"plan09-life-{uuid.uuid4().hex[:8]}"
         self._sessions: list = []
+        # Pin worker identity to whatever build revision this process currently
+        # reports. Full-suite order can leave APP_BUILD_REVISION polluted by
+        # earlier modules; claim_run requires an exact match.
+        from app.assistant.evaluation.gates import current_build_revision
 
+        self.worker_build_revision = current_build_revision()
         identity = EvalWorkerIdentity(
             worker_id="plan09-e2e-worker",
-            app_build_revision="development",
+            app_build_revision=self.worker_build_revision,
             runtime_contract_version=1,
             runner_contract_version=1,
         )
@@ -228,8 +233,16 @@ class Plan09System:
         """
         del gate_eligible  # never seed eligibility; worker/repo decide
         from app.assistant.evaluation.assertions import THRESHOLD_POLICY_VERSION
-        from app.assistant.evaluation.gates import current_build_revision
         from app.assistant.skills.candidate_closure import resolve_skill_candidate_closure
+        from app.assistant.skills.service import MainAgentProfileService
+
+        # Ensure a default Profile exists so real_orchestration can compose
+        # (control-capable Manifest needs a real profile version digest).
+        try:
+            MainAgentProfileService(self.db).ensure_default()
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
 
         closure = resolve_skill_candidate_closure(
             self.db,
@@ -283,7 +296,8 @@ class Plan09System:
             "mode": "dataset_scripted",
             "isolation_namespace_id": _uuid(),
             "runtime_contract_version": 1,
-            "required_build_revision": current_build_revision(),
+            # Must match EvalWorkerIdentity.app_build_revision exactly.
+            "required_build_revision": self.worker_build_revision,
             "isolation_digest": DIGEST_C,
             "actor_principal": "plan09-e2e",
             "evidence_provenance": evidence_provenance,
@@ -298,11 +312,16 @@ class Plan09System:
 
         # In-process worker method call — process-level equivalent of claim/process.
         # Does not invent gate_eligible; observations come from isolation probes.
-        self.worker.execute_run(run.id)
-
+        claimed = self.worker.execute_run(run.id)
         self.db.expire_all()
         stored = self.repo.get_run(run.id)
         assert stored is not None
+        if evidence_provenance == "real_orchestration" and str(stored.status) == "queued":
+            raise AssertionError(
+                "worker failed to claim real_orchestration run "
+                f"(required_build_revision={stored.required_build_revision!r}, "
+                f"worker_build={self.worker_build_revision!r}, claimed={claimed!r})"
+            )
         return stored, published.version_id, closure
 
     def create_gate(

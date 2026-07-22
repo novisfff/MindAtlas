@@ -71,10 +71,14 @@ class TwoGateLifecycleTests(unittest.TestCase):
         self.repo = EvaluationRepository(self.db)
         self.gates = PublishGateService(self.db)
         self._sessions: list = []
+        # Align worker identity with process build pin (may be polluted by
+        # earlier suites that set APP_BUILD_REVISION without isolation).
+        from app.assistant.evaluation.gates import current_build_revision
 
+        self.worker_build_revision = current_build_revision()
         identity = EvalWorkerIdentity(
             worker_id="two-gate-worker",
-            app_build_revision="development",
+            app_build_revision=self.worker_build_revision,
             runtime_contract_version=1,
             runner_contract_version=1,
         )
@@ -153,8 +157,14 @@ class TwoGateLifecycleTests(unittest.TestCase):
     ):
         """Admit + execute via EvaluationWorker; never seeds gate_eligible."""
         from app.assistant.evaluation.assertions import THRESHOLD_POLICY_VERSION
-        from app.assistant.evaluation.gates import current_build_revision
         from app.assistant.skills.candidate_closure import resolve_skill_candidate_closure
+        from app.assistant.skills.service import MainAgentProfileService
+
+        try:
+            MainAgentProfileService(self.db).ensure_default()
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
 
         closure = resolve_skill_candidate_closure(
             self.db,
@@ -206,7 +216,8 @@ class TwoGateLifecycleTests(unittest.TestCase):
             "mode": "dataset_scripted",
             "isolation_namespace_id": _uuid(),
             "runtime_contract_version": 1,
-            "required_build_revision": current_build_revision(),
+            # Exact match with EvalWorkerIdentity.app_build_revision.
+            "required_build_revision": self.worker_build_revision,
             "isolation_digest": DIGEST_C,
             "actor_principal": "tester",
             "evidence_provenance": evidence_provenance,
@@ -218,10 +229,16 @@ class TwoGateLifecycleTests(unittest.TestCase):
             )
         run = self.repo.create_run(**create_kwargs)
         self.db.commit()
-        self.worker.execute_run(run.id)
+        claimed = self.worker.execute_run(run.id)
         self.db.expire_all()
         stored = self.repo.get_run(run.id)
         assert stored is not None
+        if evidence_provenance == "real_orchestration" and str(stored.status) == "queued":
+            raise AssertionError(
+                "worker failed to claim real_orchestration run "
+                f"(required_build_revision={stored.required_build_revision!r}, "
+                f"worker_build={self.worker_build_revision!r}, claimed={claimed!r})"
+            )
         return stored, published.version_id, closure
 
     def _create_gate(

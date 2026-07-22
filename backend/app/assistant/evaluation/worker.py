@@ -671,6 +671,26 @@ class EvaluationWorker:
                     "content_digest": str(content),
                     "profile_id": str(run.subject_aggregate_id),
                 }
+            # Skill subjects without an admission profile pin: bootstrap the
+            # default Main Agent Profile so compose can build control-capable
+            # Manifests (skill.search/inject must be on the Manifest).
+            try:
+                from app.assistant.skills.service import MainAgentProfileService
+
+                summary = MainAgentProfileService(repo.session).ensure_default()
+                draft = getattr(summary, "draft_version", None)
+                if draft is not None:
+                    return {
+                        "profile_key": str(summary.profile_key),
+                        "profile_id": str(summary.id),
+                        "profile_version_id": str(draft.id),
+                        "content_digest": str(draft.content_digest),
+                    }
+            except Exception as exc:  # noqa: BLE001
+                logger.info(
+                    "default profile bootstrap for eval compose failed: %s",
+                    type(exc).__name__,
+                )
             return None
 
         try:
