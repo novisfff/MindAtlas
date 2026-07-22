@@ -233,7 +233,8 @@ def decide_write_branch_action(
 ) -> WriteBranchDecision:
     """Never silent-drop write branches.
 
-    create_entry with Plan 08 evidence migrates; other write branches block or
+    Only create_entry with Plan 08 evidence migrates. Other supported write
+    branches block (even when plan08_evidence is true); unsupported branches
     archive explicitly.
     """
     del skill_name  # reserved for future per-skill policy
@@ -242,9 +243,13 @@ def decide_write_branch_action(
         return WriteBranchDecision(action="archive", reason_code="write_branch_unsupported")
     if branch_norm == "create_entry" and plan08_evidence:
         return WriteBranchDecision(action="migrate", reason_code="plan08_create_entry")
-    if plan08_evidence:
-        return WriteBranchDecision(action="migrate", reason_code="plan08_evidenced_branch")
-    # Supported but unevidenced → block (must not disappear silently).
+    # Supported non-create_entry (even with Plan 08 evidence) → block, never migrate.
+    if branch_norm != "create_entry":
+        return WriteBranchDecision(
+            action="block",
+            reason_code="non_create_write_branch",
+        )
+    # create_entry without Plan 08 evidence → block (must not disappear silently).
     return WriteBranchDecision(
         action="block",
         reason_code="unsupported_or_unevidenced_write_branch",
@@ -272,6 +277,29 @@ def _walk_for_secrets(value: Any, *, path: str = "root") -> str | None:
     return None
 
 
+def _reject_secrets_in_mapping(record: Mapping[str, Any]) -> None:
+    """Raise PackageMigrationError if portable fields carry credential-like data."""
+    for field_name in ("tools", "kb_config", "config", "metadata", "credentials"):
+        if field_name not in record:
+            continue
+        found = _walk_for_secrets(record.get(field_name), path=field_name)
+        if found:
+            raise PackageMigrationError(
+                "secret_or_credential_rejected",
+                f"legacy source contains credential-like field at {found}",
+            )
+
+
+def reject_secrets_in_legacy_skill(skill: AssistantSkill) -> None:
+    """Reject credentials/mutable secrets on an ORM legacy skill before publish."""
+    record: dict[str, Any] = {}
+    if skill.tools is not None:
+        record["tools"] = skill.tools
+    if skill.kb_config is not None:
+        record["kb_config"] = skill.kb_config
+    _reject_secrets_in_mapping(record)
+
+
 def portable_source_from_legacy_record(
     record: Mapping[str, Any],
 ) -> PortableLegacySource:
@@ -284,14 +312,7 @@ def portable_source_from_legacy_record(
         )
 
     # Reject secrets anywhere in portable fields (tools/kb_config/metadata/etc.).
-    for field_name in ("tools", "kb_config", "config", "metadata", "credentials"):
-        if field_name in record:
-            found = _walk_for_secrets(record.get(field_name), path=field_name)
-            if found:
-                raise PackageMigrationError(
-                    "secret_or_credential_rejected",
-                    f"legacy source contains credential-like field at {found}",
-                )
+    _reject_secrets_in_mapping(record)
     # System prompt is not a package secret but must not be copied into package
     # evidence; adapters only keep description/examples for package skills.
     source_id = str(record.get("id") or "")
@@ -927,6 +948,28 @@ def _migrate_general_chat_profile(
             migration_item_id=str(item.id),
         )
 
+    # Reject credentials/secrets before Plan 09 profile draft/publish.
+    try:
+        reject_secrets_in_legacy_skill(skill)
+    except PackageMigrationError as exc:
+        item = _block_item(
+            repo,
+            item,
+            reason_code=exc.reason_code,
+            actor_principal=actor_principal,
+            build_revision=build_revision,
+            evidence_json={"errorType": "PackageMigrationError"},
+        )
+        return PackageMigrationItemResult(
+            source_id=str(skill.id),
+            source_name_normalized="general_chat",
+            subject_kind="skill",
+            outcome="blocked",
+            state="blocked",
+            reason_code=exc.reason_code,
+            migration_item_id=str(item.id),
+        )
+
     main_snapshot = _main_agent_snapshot_from_agent(snapshot)
     current_rev = int(getattr(profile, "aggregate_revision", 0) or 0)
     draft = profile_svc.save_draft(
@@ -1216,6 +1259,29 @@ def _migrate_package_skill(
                 reason_code="alias_collision",
                 migration_item_id=str(item.id),
             )
+
+    # Reject credentials/secrets before render / Plan 09 publish.
+    try:
+        reject_secrets_in_legacy_skill(skill)
+    except PackageMigrationError as exc:
+        if not dry_run:
+            item = _block_item(
+                repo,
+                item,
+                reason_code=exc.reason_code,
+                actor_principal=actor_principal,
+                build_revision=build_revision,
+                evidence_json={"errorType": "PackageMigrationError"},
+            )
+        return PackageMigrationItemResult(
+            source_id=str(skill.id),
+            source_name_normalized=name_norm,
+            subject_kind="skill",
+            outcome="blocked",
+            state=str(item.state),
+            reason_code=exc.reason_code,
+            migration_item_id=str(item.id),
+        )
 
     try:
         canonical = (
@@ -2248,5 +2314,6 @@ __all__ = (
     "decide_write_branch_action",
     "migrate_packages",
     "portable_source_from_legacy_record",
+    "reject_secrets_in_legacy_skill",
     "verify_packages",
 )

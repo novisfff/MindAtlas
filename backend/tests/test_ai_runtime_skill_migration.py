@@ -125,6 +125,17 @@ class SourceAdapterUnitTests(unittest.TestCase):
             )
             self.assertIn(decision.action, {"block", "archive"})
             self.assertIsNotNone(decision.reason_code)
+        # Plan 08 evidence does not promote non-create_entry branches.
+        for branch in ("update_entry", "merge_entry", "relation_followup"):
+            decision = decide_write_branch_action(
+                skill_name="smart_capture",
+                branch=branch,
+                supported=True,
+                plan08_evidence=True,
+            )
+            self.assertIn(decision.action, {"block", "archive"})
+            self.assertNotEqual(decision.action, "migrate")
+            self.assertEqual(decision.reason_code, "non_create_write_branch")
 
 
 class SkillPackageMigrationServiceTests(unittest.TestCase):
@@ -467,6 +478,13 @@ class SkillPackageMigrationServiceTests(unittest.TestCase):
                 "supported": True,
                 "plan08_evidence": False,
             },
+            {
+                "id": "wb-update-entry-evidenced",
+                "skill_name": "smart_capture",
+                "branch": "update_entry",
+                "supported": True,
+                "plan08_evidence": True,
+            },
         ]
         report = migrate_packages(
             self.db,
@@ -498,14 +516,75 @@ class SkillPackageMigrationServiceTests(unittest.TestCase):
             source_type="legacy_write_branch",
             source_id="wb-merge-entry",
         )
+        evidenced_update = repo.get_item_by_source(
+            subject_kind="write_branch",
+            source_type="legacy_write_branch",
+            source_id="wb-update-entry-evidenced",
+        )
         assert create_item is not None
         assert update_item is not None
         assert merge_item is not None
+        assert evidenced_update is not None
         self.assertEqual(create_item.state, "migrated")
         self.assertIn(update_item.state, {"blocked", "archived"})
         self.assertIn(merge_item.state, {"blocked", "archived"})
+        self.assertIn(evidenced_update.state, {"blocked", "archived"})
+        self.assertNotEqual(evidenced_update.state, "migrated")
+        self.assertEqual(evidenced_update.reason_code, "non_create_write_branch")
         self.assertNotEqual(update_item.state, "discovered")
         self.assertNotEqual(merge_item.state, "discovered")
+
+    def test_migrate_blocks_secret_bearing_legacy_skill(self) -> None:
+        from app.assistant.migration.packages import migrate_packages
+        from app.assistant.migration.repository import RuntimeMigrationRepository
+        from app.assistant.skills.models import AssistantSkillPackage
+
+        skill, _wf, _v = self._create_legacy_skill(
+            name="secret_custom_skill",
+            is_system=False,
+            enabled=True,
+            description="Custom skill with credential-like tools config.",
+        )
+        skill.tools = [{"name": "http", "api_key": "sk-secret-value"}]
+        skill.kb_config = {"password": "hunter2"}
+        self.db.commit()
+
+        report = migrate_packages(
+            self.db,
+            request_id=f"pkg-migrate-secret-{uuid4()}",
+            actor_principal="operator:task2",
+            build_revision="test-build-plan10-task2",
+            environment="test",
+            database_fingerprint="sqlite-test",
+            schema_head="6417df0243be",
+            dry_run=False,
+            skill_ids=[skill.id],
+            verify=False,
+        )
+        self.assertGreaterEqual(report.blocked, 1)
+        repo = RuntimeMigrationRepository(self.db)
+        item = repo.get_item_by_source(
+            subject_kind="skill",
+            source_type="legacy_skill",
+            source_id=str(skill.id),
+        )
+        assert item is not None
+        self.assertEqual(item.state, "blocked")
+        self.assertEqual(item.reason_code, "secret_or_credential_rejected")
+        packages = (
+            self.db.query(AssistantSkillPackage)
+            .filter(AssistantSkillPackage.legacy_skill_id == skill.id)
+            .all()
+        )
+        self.assertEqual(packages, [])
+        published = (
+            self.db.query(AssistantSkillPackage)
+            .filter(AssistantSkillPackage.published_version_id.isnot(None))
+            .all()
+        )
+        # No package published for this secret-bearing skill (may have unrelated
+        # system packages from fixtures — scope by legacy_skill_id already empty).
+        self.assertTrue(all(p.legacy_skill_id != skill.id for p in published))
 
     def test_rerun_is_idempotent(self) -> None:
         from app.assistant.migration.packages import migrate_packages, verify_packages
