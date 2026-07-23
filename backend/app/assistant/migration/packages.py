@@ -32,7 +32,6 @@ from app.assistant.skills.contracts import (
 )
 from app.assistant.skills.legacy_adapter import (
     GENERAL_CHAT_NAME,
-    LegacySkillShadowAdapter,
     _bridge_source_ref,
     _load_published_agent_snapshot,
     _main_agent_snapshot_from_agent,
@@ -566,7 +565,6 @@ def _find_package_for_skill(
 ) -> AssistantSkillPackage | None:
     by_legacy = (
         session.query(AssistantSkillPackage)
-        .filter(AssistantSkillPackage.legacy_skill_id == skill.id)
         .one_or_none()
     )
     if by_legacy is not None:
@@ -624,7 +622,6 @@ def _publish_package_from_parsed(
         package = session.get(AssistantSkillPackage, _as_uuid(detail.id))
         if package is None:
             raise PackageMigrationError("package_create_failed", "native package missing after create")
-        package.legacy_skill_id = skill.id
         package.is_system = bool(skill.is_system)
         session.flush()
     else:
@@ -643,7 +640,6 @@ def _publish_package_from_parsed(
         package = session.get(AssistantSkillPackage, _as_uuid(package.id))
         if package is None:
             raise PackageMigrationError("package_missing", "package missing after draft")
-        package.legacy_skill_id = skill.id
         draft_id = _as_uuid(getattr(draft, "id", None))
         if package.draft_version_id is None and draft_id is not None:
             package.draft_version_id = draft_id
@@ -989,7 +985,6 @@ def _migrate_general_chat_profile(
     )
     profile = session.get(AssistantMainAgentProfile, profile.id)
     assert profile is not None
-    profile.legacy_skill_id = skill.id
     session.flush()
 
     rev = int(getattr(profile, "aggregate_revision", 0) or 0)
@@ -1004,7 +999,6 @@ def _migrate_general_chat_profile(
     )
     profile = session.get(AssistantMainAgentProfile, profile.id)
     assert profile is not None
-    profile.legacy_skill_id = skill.id
     profile.legacy_source_digest = bridge_digest
     session.flush()
 
@@ -1141,33 +1135,11 @@ def _migrate_package_skill(
     occupied = _occupied_canonical_names(session)
     if existing is not None:
         occupied.discard(existing.canonical_name)
-        # If package is owned by a different legacy skill, block.
-        if (
-            existing.legacy_skill_id is not None
-            and existing.legacy_skill_id != skill.id
-        ):
-            if not dry_run:
-                item = _block_item(
-                    repo,
-                    item,
-                    reason_code="package_legacy_skill_collision",
-                    actor_principal=actor_principal,
-                    build_revision=build_revision,
-                )
-            return PackageMigrationItemResult(
-                source_id=str(skill.id),
-                source_name_normalized=name_norm,
-                subject_kind="skill",
-                outcome="blocked",
-                state=str(item.state),
-                reason_code="package_legacy_skill_collision",
-                migration_item_id=str(item.id),
-            )
+        # legacy_skill_id ownership collision check removed with column drop.
         # Existing cutover package for this skill — idempotent.
         if (
             str(existing.migration_state) == "cutover"
             and existing.published_version_id is not None
-            and existing.legacy_skill_id == skill.id
         ):
             pub = session.get(AssistantSkillVersion, existing.published_version_id)
             target_digest = (
@@ -1207,9 +1179,9 @@ def _migrate_package_skill(
                 migration_item_id=str(item.id),
             )
 
-        # Existing package without our legacy_skill_id and not shadow → collision.
+        # Existing package collision checks no longer use legacy_skill_id.
         # Includes unpublished native packages that already occupy the name/alias.
-        if existing.legacy_skill_id is None and str(existing.migration_state) in {
+        if True and str(existing.migration_state) in {  # legacy_skill_id column removed; treat as unbound
             "native",
             "cutover",
         }:
@@ -1235,29 +1207,7 @@ def _migrate_package_skill(
                 migration_item_id=str(item.id),
             )
 
-        # Alias owned by a different package (including shadow packages for others).
-        if existing.legacy_skill_id not in {None, skill.id}:
-            if not dry_run:
-                item = _block_item(
-                    repo,
-                    item,
-                    reason_code="alias_collision",
-                    actor_principal=actor_principal,
-                    build_revision=build_revision,
-                    evidence_json={
-                        "packageId": str(existing.id),
-                        "ownerLegacySkillId": str(existing.legacy_skill_id),
-                    },
-                )
-            return PackageMigrationItemResult(
-                source_id=str(skill.id),
-                source_name_normalized=name_norm,
-                subject_kind="skill",
-                outcome="blocked",
-                state=str(item.state),
-                reason_code="alias_collision",
-                migration_item_id=str(item.id),
-            )
+        # alias ownership-by-legacy-skill-id check removed with column drop.
 
     # Reject credentials/secrets before render / Plan 09 publish.
     try:
@@ -1811,24 +1761,7 @@ def _verify_one_skill(
             reason_code="verify_package_not_cutover",
             migration_item_id=str(item.id),
         )
-    if package.legacy_skill_id not in {None, skill.id}:
-        if not dry_run:
-            item = _block_item(
-                repo,
-                item,
-                reason_code="verify_legacy_skill_mismatch",
-                actor_principal=actor_principal,
-                build_revision=build_revision,
-            )
-        return PackageMigrationItemResult(
-            source_id=str(skill.id),
-            source_name_normalized=name_norm,
-            subject_kind="skill",
-            outcome="blocked",
-            state=str(item.state),
-            reason_code="verify_legacy_skill_mismatch",
-            migration_item_id=str(item.id),
-        )
+    # verify_legacy_skill_mismatch removed with legacy_skill_id column.
     version = session.get(AssistantSkillVersion, package.published_version_id)
     if version is None or str(version.version_source) != "publish":
         if not dry_run:
@@ -1876,31 +1809,7 @@ def _verify_one_skill(
             migration_item_id=str(item.id),
         )
 
-    # Prove legacy adapter cannot mutate.
-    sync = LegacySkillShadowAdapter().sync_one(session, skill.id)
-    if sync.status != "unchanged" or not any(
-        d.reason_code == "shadow_sync_stopped_native" for d in sync.diagnostics
-    ):
-        # If status is unchanged without diagnostic (already matching shadow), still ok
-        # only when migration_state is cutover — which we already checked.
-        if sync.status not in {"unchanged", "published"}:
-            if not dry_run:
-                item = _block_item(
-                    repo,
-                    item,
-                    reason_code="verify_legacy_adapter_not_locked",
-                    actor_principal=actor_principal,
-                    build_revision=build_revision,
-                )
-            return PackageMigrationItemResult(
-                source_id=str(skill.id),
-                source_name_normalized=name_norm,
-                subject_kind="skill",
-                outcome="blocked",
-                state=str(item.state),
-                reason_code="verify_legacy_adapter_not_locked",
-                migration_item_id=str(item.id),
-            )
+    # Legacy shadow adapter removed with assistant_skill (Plan 10 B2).
 
     target_digest = str(version.version_digest or version.content_digest or "")
     if len(target_digest) != 64:

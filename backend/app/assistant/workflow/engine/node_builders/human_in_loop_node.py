@@ -37,7 +37,8 @@ def build_human_in_loop_node(
         runtime = metadata.get("human_loop_runtime")
         if not isinstance(runtime, HumanLoopRuntime):
             raise RuntimeError(
-                f"DAG human_in_loop node {node_id}: human loop runtime is unavailable"
+                f"DAG human_in_loop node {node_id}: human loop runtime is unavailable "
+                f"(legacy blocking HITL removed; use durable interrupts)"
             )
 
         node_outputs = dict(state.get("node_outputs", {}))

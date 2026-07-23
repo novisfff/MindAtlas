@@ -248,6 +248,7 @@ def _reset_to_parent(engine: Engine) -> str:
                 "MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK",
                 "MINDATLAS_PLAN10_B2_DOWNGRADE_ACK",
                 "MINDATLAS_PLAN10_B2_SKILL_DROP_DOWNGRADE_ACK",
+                "MINDATLAS_PLAN10_B2_LEGACY_ID_DROP_DOWNGRADE_ACK",
                 "MINDATLAS_PLAN10_B2_MAINTENANCE_ACK",
                 "MINDATLAS_PLAN10_B2_TEST_OVERRIDE",
             )

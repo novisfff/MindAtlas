@@ -165,17 +165,9 @@ class AssistantConfigService:
     def __init__(self, db: Session):
         self.db = db
 
-    def _best_effort_shadow_sync_one(self, legacy_skill_id: UUID | None) -> None:
-        """Post-commit shadow reconciliation; never fails the legacy operation."""
-        if legacy_skill_id is None:
-            return
-        try:
-            from app.assistant.skills.legacy_adapter import best_effort_sync_one
-
-            best_effort_sync_one(self.db, legacy_skill_id)
-        except Exception:
-            # Defense in depth: adapter already swallows errors.
-            pass
+    def _best_effort_shadow_sync_one(self, legacy_skill_id=None) -> None:
+        _ = legacy_skill_id  # assistant_skill + shadow sync removed
+        return
 
     def _best_effort_shadow_sync_for_workflow(self, workflow_id: UUID | None) -> None:
         _ = workflow_id  # assistant_skill dropped
@@ -186,12 +178,7 @@ class AssistantConfigService:
         return
 
     def _best_effort_shadow_sync_all(self) -> None:
-        try:
-            from app.assistant.skills.legacy_adapter import best_effort_sync_all
-
-            best_effort_sync_all(self.db)
-        except Exception:
-            pass
+        return
 
     def _current_locale(self, preferred_locale: str | None = None) -> str:
         return resolve_system_locale(self.db, preferred_locale=preferred_locale)
@@ -4334,36 +4321,9 @@ class AssistantConfigService:
     def delete_skill(self, id: UUID) -> None:
         self._legacy_skill_gone(action='delete_skill')
 
-    def _retire_shadow_packages_for_legacy_skill(self, skill: Any) -> None:
-        """Retire shadow packages tied to a legacy skill so package names can be reclaimed.
-
-        Clears the current published pointer (history rows stay), renames the package
-        to a retired unique canonical name, and detaches ``legacy_skill_id``.
-
-        Alias rows are append-only/immutable under Plan 01 PG guards, so they are
-        left in place as historical tombstones. The package rename frees
-        ``assistant_skill_package.canonical_name`` uniqueness for a future package.
-        """
-        from uuid import uuid4
-
-        from app.assistant.skills.models import AssistantSkillPackage
-
-        packages = (
-            self.db.query(AssistantSkillPackage)
-            .filter(AssistantSkillPackage.legacy_skill_id == skill.id)
-            .all()
-        )
-        for package in packages:
-            if package.published_version_id is not None:
-                package.published_version_id = None
-            # Free the package-table canonical name for future reclaim.
-            old_name = package.canonical_name or "skill"
-            token = uuid4().hex[:12]
-            prefix = f"retired-{token}-"
-            max_old = max(1, 64 - len(prefix))
-            package.canonical_name = f"{prefix}{old_name[:max_old]}"
-            package.catalog_enabled = False
-            package.legacy_skill_id = None
+    def _retire_shadow_packages_for_legacy_skill(self, skill) -> None:
+        _ = skill  # legacy_skill_id column removed
+        return
 
     def reset_all_system_skills(self, confirm: bool, *, commit: bool = True) -> dict:
         self._legacy_skill_gone(action='reset_all_system_skills')

@@ -71,13 +71,6 @@ class AssistantSkillPackage(UuidPrimaryKeyMixin, TimestampMixin, Base):
         nullable=True,
         index=True,
     )
-    # Provenance UUID only after Plan 10 B2 drop of assistant_skill (no FK).
-    legacy_skill_id = Column(
-        UUID(as_uuid=True),
-        nullable=True,
-        unique=True,
-        index=True,
-    )
     migration_state = Column(String(32), nullable=False)
     legacy_source_digest = Column(String(64), nullable=True)
     catalog_enabled = Column(Boolean, nullable=False, default=False, server_default=text("false"))
@@ -729,13 +722,6 @@ class AssistantMainAgentProfile(UuidPrimaryKeyMixin, TimestampMixin, Base):
         index=True,
     )
     migration_state = Column(String(32), nullable=False)
-    # Provenance UUID only after Plan 10 B2 drop of assistant_skill (no FK).
-    legacy_skill_id = Column(
-        UUID(as_uuid=True),
-        nullable=True,
-        unique=True,
-        index=True,
-    )
     legacy_source_digest = Column(String(64), nullable=True)
     runtime_enabled = Column(Boolean, nullable=False, default=False, server_default=text("false"))
     # Plan 09 aggregate CAS + durable last-mutation idempotency (mirrors packages).

@@ -150,9 +150,8 @@ class AiCredentialService:
         # Credential repair (base URL / API key) may unblock shadow publication.
         if runtime_sensitive_changed:
             try:
-                from app.assistant.skills.legacy_adapter import best_effort_sync_all
-
-                best_effort_sync_all(self.db)
+                # Plan 10 B2: legacy skill shadow sync removed with assistant_skill table.
+                pass
             except Exception:
                 pass
         return cred
@@ -340,9 +339,8 @@ class AiModelService:
         # Model repair (name / type) may unblock shadow publication.
         if runtime_sensitive_changed:
             try:
-                from app.assistant.skills.legacy_adapter import best_effort_sync_all
-
-                best_effort_sync_all(self.db)
+                # Plan 10 B2: legacy skill shadow sync removed with assistant_skill table.
+                pass
             except Exception:
                 pass
         return m
@@ -452,9 +450,8 @@ class AiBindingService:
         # Default-model binding repair: reconcile unresolved shadow publications.
         if component == "assistant":
             try:
-                from app.assistant.skills.legacy_adapter import best_effort_sync_all
-
-                best_effort_sync_all(self.db)
+                # Plan 10 B2: legacy skill shadow sync removed with assistant_skill table.
+                pass
             except Exception:
                 pass
         return row

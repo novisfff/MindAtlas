@@ -442,3 +442,35 @@ def test_skill_drop_removes_assistant_skill_table() -> None:
                     assert col is not None
         finally:
             _restore_env(prev)
+
+
+LEGACY_ID_DROP_REVISION = "d3a9fcac15c7"
+
+
+def test_legacy_skill_id_columns_dropped() -> None:
+    with _engine() as engine:
+        _reset_schema(engine)
+        prev = _set_env(**{B2_ACK_ENV: "1", B2_TEST_OVERRIDE_ENV: None})
+        try:
+            _upgrade_to(LEGACY_ID_DROP_REVISION)
+            assert _current_revision(engine) == LEGACY_ID_DROP_REVISION
+            with engine.connect() as conn:
+                for table in ("assistant_skill_package", "assistant_main_agent_profile"):
+                    col = conn.execute(
+                        text(
+                            "SELECT 1 FROM information_schema.columns "
+                            "WHERE table_name = :t AND column_name = 'legacy_skill_id' "
+                            "AND table_schema = current_schema()"
+                        ),
+                        {"t": table},
+                    ).fetchone()
+                    assert col is None, table
+                assert not conn.execute(
+                    text(
+                        "SELECT 1 FROM information_schema.tables "
+                        "WHERE table_name = 'assistant_skill' "
+                        "AND table_schema = current_schema()"
+                    )
+                ).fetchone()
+        finally:
+            _restore_env(prev)

@@ -15,7 +15,7 @@ os.environ.setdefault("APP_BUILD_REVISION", "test-build-plan10-task3")
 os.environ.setdefault("APP_ENV", "test")
 
 
-def _make_package(db, *, name: str, legacy_skill_id=None, aliases: list[str] | None = None):
+def _make_package(db, *, name: str, aliases: list[str] | None = None):
     from app.assistant.skills.contracts import normalize_skill_lookup_name
     from app.assistant.skills.models import AssistantSkillPackage, AssistantSkillPackageAlias
 
@@ -26,7 +26,6 @@ def _make_package(db, *, name: str, legacy_skill_id=None, aliases: list[str] | N
         migration_state="cutover",
         catalog_enabled=False,
         is_system=name in {"quick-stats", "smart-capture", "periodic-review"},
-        legacy_skill_id=legacy_skill_id,
     )
     db.add(pkg)
     db.flush()
@@ -203,7 +202,6 @@ class L2MappingUnitTests(unittest.TestCase):
         pkg = _make_package(
             self.db,
             name="quick-stats",
-            legacy_skill_id=skill.id,
             aliases=["quick_stats"],
         )
 
@@ -213,7 +211,7 @@ class L2MappingUnitTests(unittest.TestCase):
         self.assertEqual(mapping.memory_namespace, "default")
         self.assertEqual(mapping.mapping_source, "legacy_skill_id")
 
-    def test_alias_mapping_when_no_legacy_skill_id(self) -> None:
+    def test_alias_mapping(self) -> None:
         from app.assistant.migration.l2 import resolve_l2_package_mapping
 
         pkg = _make_package(self.db, name="smart-capture", aliases=["smart_capture"])
@@ -244,6 +242,7 @@ class L2MappingUnitTests(unittest.TestCase):
         self.assertEqual(ctx.exception.reason_code, "general_chat_not_a_skill_package")
 
     @unittest.skip("assistant_skill table removed; legacy_skill_id name join gone")
+    @unittest.skip("legacy_skill_id/assistant_skill removed")
     def test_ambiguous_packages_block(self) -> None:
         from app.assistant.migration.l2 import L2MigrationError, resolve_l2_package_mapping
         from app.assistant.skills.contracts import normalize_skill_lookup_name
@@ -278,20 +277,7 @@ class L2MappingUnitTests(unittest.TestCase):
         )
         self.db.add(workflow)
         self.db.flush()
-        skill = AssistantSkill(
-            name="dup_name",
-            description="d",
-            intent_examples=["d"],
-            tools=[],
-            mode="langgraph",
-            langgraph_pattern="workflow_dag",
-            is_system=False,
-            enabled=True,
-            workflow_id=workflow.id,
-        )
-        self.db.add(skill)
-        self.db.flush()
-        a.legacy_skill_id = skill.id
+        raise unittest.SkipTest("assistant_skill/legacy_skill_id removed")
         self.db.add(
             AssistantSkillPackageAlias(
                 skill_package_id=b.id,

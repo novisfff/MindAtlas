@@ -104,6 +104,7 @@ class HumanLoopRuntime:
         context: HumanLoopContext | None = None,
         *,
         coordinator: HumanLoopCoordinator | None = None,
+        **_kwargs: Any,
     ) -> None:
         self._session_factory = session_factory
         self._context = context or HumanLoopContext()
