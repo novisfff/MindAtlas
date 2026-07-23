@@ -1135,7 +1135,6 @@ def _migrate_package_skill(
     occupied = _occupied_canonical_names(session)
     if existing is not None:
         occupied.discard(existing.canonical_name)
-        # legacy_skill_id ownership collision check removed with column drop.
         # Existing cutover package for this skill — idempotent.
         if (
             str(existing.migration_state) == "cutover"
@@ -1179,9 +1178,8 @@ def _migrate_package_skill(
                 migration_item_id=str(item.id),
             )
 
-        # Existing package collision checks no longer use legacy_skill_id.
-        # Includes unpublished native packages that already occupy the name/alias.
-        if True and str(existing.migration_state) in {  # legacy_skill_id column removed; treat as unbound
+        # Includes native/cutover packages that already occupy the name/alias.
+        if str(existing.migration_state) in {
             "native",
             "cutover",
         }:
@@ -1761,7 +1759,6 @@ def _verify_one_skill(
             reason_code="verify_package_not_cutover",
             migration_item_id=str(item.id),
         )
-    # verify_legacy_skill_mismatch removed with legacy_skill_id column.
     version = session.get(AssistantSkillVersion, package.published_version_id)
     if version is None or str(version.version_source) != "publish":
         if not dry_run:

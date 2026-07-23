@@ -77,7 +77,7 @@ class L2PackageMapping:
     skill_package_id: UUID
     memory_namespace: str
     skill_name: str
-    mapping_source: str  # legacy_skill_id | alias | system_map | package_canonical
+    mapping_source: str  # alias | system_map | package_canonical
     package_canonical_name: str
     mapping_digest: str
 
@@ -308,7 +308,7 @@ def resolve_l2_package_mapping(
 
     pkg, src, ns = next(iter(by_pkg.values()))[0]
     # Prefer strongest mapping source among same package.
-    priority = {"legacy_skill_id": 0, "alias": 1, "system_map": 2, "package_canonical": 3}
+    priority = {"alias": 0, "system_map": 1, "package_canonical": 2}
     best = min(next(iter(by_pkg.values())), key=lambda t: priority.get(t[1], 99))
     pkg, src, ns = best
     ns = normalize_memory_namespace(ns)

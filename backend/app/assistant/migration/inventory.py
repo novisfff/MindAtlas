@@ -237,7 +237,6 @@ def _scan_packages(records: Mapping[str, Any]) -> list[InventoryItem]:
                 "published_version_id": published,
                 "catalog_enabled": bool(raw.get("catalog_enabled", False)),
                 "migration_state": raw.get("migration_state"),
-                "legacy_skill_id": _stable_str(raw.get("legacy_skill_id")) or None,
             },
         )
         items.append(
