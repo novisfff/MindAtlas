@@ -691,18 +691,11 @@ class AssistantConfigService:
         workflow_input: WorkflowInput,
         raise_error: bool = True,
     ) -> list[str]:
+        # Plan 10 B2: skill-reference constraint removed with assistant_skill.
+        _ = (workflow, raise_error)
         if self._resolve_start_input_mode(workflow_input) != "structured":
             return []
-        if True:  # assistant_skill dropped
-            return []
-        skill_names = ""  # assistant_skill dropped
-        message = (
-            "Structured-input workflow cannot be referenced by skills. "
-            f"Current referenced skills: {skill_names}"
-        )
-        if raise_error:
-            raise ApiException(status_code=409, code=40948, message=message)
-        return [message]
+        return []
 
     def collect_workflow_extra_validation_errors(
         self,
