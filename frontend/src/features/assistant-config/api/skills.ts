@@ -1,4 +1,9 @@
-import { apiClient } from '@/lib/api/client'
+/**
+ * Shared legacy skill shape types.
+ *
+ * HTTP clients for `/api/assistant-config/skills` are retired (410 Gone).
+ * Keep the deserialize/target option shapes for workflow preview + target keys.
+ */
 
 export interface SkillKBConfig {
   enabled?: boolean
@@ -59,65 +64,3 @@ export interface AssistantSkill {
   createdAt: string
   updatedAt: string
 }
-
-export interface CreateSkillRequest {
-  name: string
-  description: string
-  intentExamples?: string[]
-  tools?: string[]
-  targetType?: SkillTargetType
-  workflowId?: string
-  agentProfileId?: string
-  mode?: SkillMode
-  langgraphPattern?: LanggraphPattern
-  systemPrompt?: string
-  enabled?: boolean
-  kbConfig?: SkillKBConfig
-}
-
-export interface UpdateSkillRequest {
-  name?: string
-  description?: string
-  intentExamples?: string[]
-  tools?: string[]
-  targetType?: SkillTargetType
-  workflowId?: string
-  agentProfileId?: string
-  mode?: SkillMode
-  langgraphPattern?: LanggraphPattern
-  systemPrompt?: string
-  enabled?: boolean
-  kbConfig?: SkillKBConfig
-}
-
-export const getSkills = () =>
-  apiClient.get<AssistantSkill[]>('/api/assistant-config/skills')
-
-export const getSkill = (id: string) =>
-  apiClient.get<AssistantSkill>(`/api/assistant-config/skills/${id}`)
-
-export const createSkill = (data: CreateSkillRequest) =>
-  apiClient.post<AssistantSkill>('/api/assistant-config/skills', { body: data })
-
-export const updateSkill = (id: string, data: UpdateSkillRequest) =>
-  apiClient.put<AssistantSkill>(`/api/assistant-config/skills/${id}`, { body: data })
-
-export const deleteSkill = (id: string) =>
-  apiClient.delete(`/api/assistant-config/skills/${id}`)
-
-export const resetSkill = (id: string) =>
-  apiClient.post<AssistantSkill>(`/api/assistant-config/skills/${id}/reset`, {
-    body: { confirm: true },
-  })
-
-export interface ResetAllSkillsResponse {
-  resetCount: number
-  deletedCount: number
-  createdCount: number
-  affected: Array<{ name: string; id: string | null; action: string }>
-}
-
-export const resetAllSkills = () =>
-  apiClient.post<ResetAllSkillsResponse>('/api/assistant-config/skills/reset-all', {
-    body: { confirm: true },
-  })

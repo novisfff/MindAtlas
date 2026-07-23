@@ -1,7 +1,6 @@
 import { QueryClient, useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
 import * as toolsApi from './api/tools'
-import * as skillsApi from './api/skills'
 import * as workflowsApi from './api/workflows'
 import * as agentsApi from './api/agents'
 import * as systemBehaviorsApi from './api/system-behaviors'
@@ -62,18 +61,6 @@ function syncAgentCaches(qc: QueryClient, agent: agentsApi.AssistantAgentProfile
   qc.setQueryData(['assistant-agent-profile', agent.id], agent)
 }
 
-const invalidateAfterSkillReset = (qc: QueryClient) => {
-  qc.invalidateQueries({ queryKey: ['assistant-skills'] })
-  qc.invalidateQueries({ queryKey: ['assistant-workflows'] })
-  qc.invalidateQueries({ queryKey: ['assistant-agents'] })
-  qc.invalidateQueries({ queryKey: ['assistant-target-folders'] })
-  qc.invalidateQueries({ queryKey: ['assistant-system-behaviors'] })
-  qc.invalidateQueries({ queryKey: ['assistant-workflow'] })
-  qc.invalidateQueries({ queryKey: ['assistant-agent-profile'] })
-  qc.invalidateQueries({ queryKey: ['assistant-workflow-versions'] })
-  qc.invalidateQueries({ queryKey: ['assistant-agent-versions'] })
-}
-
 // ==================== Tools ====================
 
 export const useToolsQuery = () =>
@@ -127,55 +114,6 @@ export const useDeleteToolMutation = () => {
   return useMutation({
     mutationFn: toolsApi.deleteTool,
     onSuccess: () => qc.invalidateQueries({ queryKey: ['assistant-tools'] }),
-  })
-}
-
-// ==================== Skills ====================
-
-export const useSkillsQuery = () =>
-  useQuery({
-    queryKey: ['assistant-skills'],
-    queryFn: skillsApi.getSkills,
-  })
-
-export const useCreateSkillMutation = () => {
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: skillsApi.createSkill,
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['assistant-skills'] }),
-  })
-}
-
-export const useUpdateSkillMutation = () => {
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: ({ id, data }: { id: string; data: skillsApi.UpdateSkillRequest }) =>
-      skillsApi.updateSkill(id, data),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['assistant-skills'] }),
-  })
-}
-
-export const useDeleteSkillMutation = () => {
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: skillsApi.deleteSkill,
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['assistant-skills'] }),
-  })
-}
-
-export const useResetSkillMutation = () => {
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: skillsApi.resetSkill,
-    onSuccess: () => invalidateAfterSkillReset(qc),
-  })
-}
-
-export const useResetAllSkillsMutation = () => {
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: skillsApi.resetAllSkills,
-    onSuccess: () => invalidateAfterSkillReset(qc),
   })
 }
 
@@ -241,7 +179,6 @@ export const useDeleteWorkflowMutation = () => {
       qc.invalidateQueries({ queryKey: ['assistant-workflows'] })
       qc.invalidateQueries({ queryKey: ['assistant-target-folders'] })
       qc.invalidateQueries({ queryKey: ['assistant-callable-workflows'] })
-      qc.invalidateQueries({ queryKey: ['assistant-skills'] })
       qc.invalidateQueries({ queryKey: ['assistant-system-behaviors'] })
     },
   })
@@ -256,7 +193,6 @@ export const useCopyWorkflowMutation = () => {
       qc.invalidateQueries({ queryKey: ['assistant-workflows'] })
       qc.invalidateQueries({ queryKey: ['assistant-target-folders'] })
       qc.invalidateQueries({ queryKey: ['assistant-callable-workflows'] })
-      qc.invalidateQueries({ queryKey: ['assistant-skills'] })
       qc.invalidateQueries({ queryKey: ['assistant-system-behaviors'] })
     },
   })
@@ -297,7 +233,6 @@ export const useUpdateAgentProfileMutation = () => {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['assistant-agents'] })
       qc.invalidateQueries({ queryKey: ['assistant-target-folders'] })
-      qc.invalidateQueries({ queryKey: ['assistant-skills'] })
       qc.invalidateQueries({ queryKey: ['assistant-system-behaviors'] })
     },
   })
@@ -316,7 +251,6 @@ export const useDeleteAgentProfileMutation = () => {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['assistant-agents'] })
       qc.invalidateQueries({ queryKey: ['assistant-target-folders'] })
-      qc.invalidateQueries({ queryKey: ['assistant-skills'] })
       qc.invalidateQueries({ queryKey: ['assistant-system-behaviors'] })
     },
   })
@@ -330,7 +264,6 @@ export const useCopyAgentProfileMutation = () => {
       syncAgentCaches(qc, copied)
       qc.invalidateQueries({ queryKey: ['assistant-agents'] })
       qc.invalidateQueries({ queryKey: ['assistant-target-folders'] })
-      qc.invalidateQueries({ queryKey: ['assistant-skills'] })
       qc.invalidateQueries({ queryKey: ['assistant-system-behaviors'] })
     },
   })

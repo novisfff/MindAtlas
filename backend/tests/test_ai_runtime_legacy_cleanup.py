@@ -86,7 +86,7 @@ class LegacyCleanupArchitectureTests(unittest.TestCase):
         hit = forbidden.intersection(imports)
         self.assertFalse(hit, f"admission imports forbidden legacy symbols: {hit}")
 
-    def test_legacy_skill_mutations_return_410(self) -> None:
+    def test_legacy_skill_admin_routes_return_410(self) -> None:
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
 
@@ -111,6 +111,8 @@ class LegacyCleanupArchitectureTests(unittest.TestCase):
         client = TestClient(app)
 
         for method, path, body in (
+            ("get", "/api/assistant-config/skills", None),
+            ("get", "/api/assistant-config/skills/00000000-0000-0000-0000-000000000001", None),
             ("post", "/api/assistant-config/skills", {"name": "x", "description": "y"}),
             ("put", "/api/assistant-config/skills/00000000-0000-0000-0000-000000000001", {"name": "x"}),
             ("delete", "/api/assistant-config/skills/00000000-0000-0000-0000-000000000001", None),

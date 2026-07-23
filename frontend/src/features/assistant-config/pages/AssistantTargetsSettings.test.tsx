@@ -18,7 +18,6 @@ vi.mock('../queries', () => ({
   useDeleteWorkflowMutation: vi.fn(),
   useMoveTargetFolderMutation: vi.fn(),
   useMoveTargetToFolderMutation: vi.fn(),
-  useSkillsQuery: vi.fn(),
   useTargetFoldersQuery: vi.fn(),
   useUpdateTargetFolderMutation: vi.fn(),
   useWorkflowDetailQuery: vi.fn(),
@@ -81,7 +80,6 @@ describe('AssistantTargetsSettings', () => {
       isLoading: false,
     } as never)
     vi.mocked(queries.useAgentProfilesQuery).mockReturnValue({ data: [], isLoading: false } as never)
-    vi.mocked(queries.useSkillsQuery).mockReturnValue({ data: [] } as never)
     vi.mocked(queries.useTargetFoldersQuery).mockReturnValue({
       data: [{
         id: 'needle-folder',

@@ -49,10 +49,10 @@ OWNERSHIP_RULES: tuple[tuple[str, OwnerClass, str, str | None], ...] = (
         "AssistantSkill + AssistantHumanApproval ORM anchors",
     ),
     (
-        "features/assistant-config/pages/SkillSettings.tsx",
+        "features/assistant-config/api/skills.ts",
         "frontend_legacy",
         "ui",
-        "Legacy single-target Skill settings UI",
+        "Legacy skill shape types retained for workflow deserialize / target keys",
     ),
     (
         "assistant/main_agent/",

@@ -15,9 +15,6 @@ from app.assistant_config.schemas import (
     AssistantAgentProfileResponse,
     AssistantAgentProfileUpdateRequest,
     AssistantFolderMoveRequest,
-    AssistantSkillCreateRequest,
-    AssistantSkillResponse,
-    AssistantSkillUpdateRequest,
     AssistantTargetFolderCreateRequest,
     AssistantTargetFolderResponse,
     AssistantTargetFolderUpdateRequest,
@@ -195,36 +192,13 @@ def move_target_folder(request: AssistantFolderMoveRequest, db: Session = Depend
 
 # ==================== Skills ====================
 
-@router.get("/skills", response_model=ApiResponse)
-def list_skills(
-    sync_system: bool = Query(False),
-    include_disabled: bool = Query(True),
-    db: Session = Depends(get_db),
-) -> ApiResponse:
-    service = AssistantConfigService(db)
-    skills = service.list_skills(sync_system=sync_system, include_disabled=include_disabled)
-    return ApiResponse.ok([
-        AssistantSkillResponse.model_validate(service.serialize_skill(s)).model_dump(by_alias=True)
-        for s in skills
-    ])
-
-
-@router.get("/skills/{id}", response_model=ApiResponse)
-def get_skill(id: UUID, db: Session = Depends(get_db)) -> ApiResponse:
-    service = AssistantConfigService(db)
-    skill = service.get_skill(id)
-    return ApiResponse.ok(
-        AssistantSkillResponse.model_validate(service.serialize_skill(skill)).model_dump(by_alias=True)
-    )
-
-
-def _legacy_skill_mutation_gone() -> None:
-    """Deploy B1: legacy single-target Skill CRUD is retired; tables remain."""
+def _legacy_skill_admin_gone() -> None:
+    """Deploy residual: legacy single-target Skill admin surface is retired; tables remain."""
     raise ApiException(
         status_code=410,
         code=41010,
         message=(
-            "Legacy assistant Skill admin mutations are gone. "
+            "Legacy assistant Skill admin is gone. "
             "Use Universal Skill packages under /api/assistant/skill-admin "
             "or standalone Workflow/Agent APIs."
         ),
@@ -232,29 +206,42 @@ def _legacy_skill_mutation_gone() -> None:
     )
 
 
+@router.get("/skills", response_model=ApiResponse)
+def list_skills(
+    sync_system: bool = Query(False),
+    include_disabled: bool = Query(True),
+) -> ApiResponse:
+    _legacy_skill_admin_gone()
+
+
+@router.get("/skills/{id}", response_model=ApiResponse)
+def get_skill(id: UUID) -> ApiResponse:
+    _legacy_skill_admin_gone()
+
+
 @router.post("/skills", response_model=ApiResponse)
 def create_skill() -> ApiResponse:
-    _legacy_skill_mutation_gone()
+    _legacy_skill_admin_gone()
 
 
 @router.put("/skills/{id}", response_model=ApiResponse)
 def update_skill(id: UUID) -> ApiResponse:
-    _legacy_skill_mutation_gone()
+    _legacy_skill_admin_gone()
 
 
 @router.post("/skills/{id}/reset", response_model=ApiResponse)
 def reset_skill(id: UUID) -> ApiResponse:
-    _legacy_skill_mutation_gone()
+    _legacy_skill_admin_gone()
 
 
 @router.post("/skills/reset-all", response_model=ApiResponse)
 def reset_all_skills() -> ApiResponse:
-    _legacy_skill_mutation_gone()
+    _legacy_skill_admin_gone()
 
 
 @router.delete("/skills/{id}", response_model=ApiResponse)
 def delete_skill(id: UUID) -> ApiResponse:
-    _legacy_skill_mutation_gone()
+    _legacy_skill_admin_gone()
 
 
 # ==================== System AI Behaviors ====================
@@ -723,19 +710,19 @@ def submit_run_approval_decision(
 @router.put("/skills/{id}/workflow", response_model=ApiResponse)
 def update_workflow(id: UUID) -> ApiResponse:
     """Legacy nested Skill workflow mutation — retired in Deploy B1."""
-    _legacy_skill_mutation_gone()
+    _legacy_skill_admin_gone()
 
 
 @router.post("/skills/{id}/validate-workflow", response_model=ApiResponse)
 def validate_workflow(id: UUID) -> ApiResponse:
     """Legacy nested Skill workflow validation — retired in Deploy B1."""
-    _legacy_skill_mutation_gone()
+    _legacy_skill_admin_gone()
 
 
 @router.post("/skills/{id}/workflow/test-run")
 def test_run_workflow(id: UUID) -> StreamingResponse:
     """Legacy nested Skill workflow test-run — retired in Deploy B1."""
-    _legacy_skill_mutation_gone()
+    _legacy_skill_admin_gone()
 
 
 # Node type metadata
