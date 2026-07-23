@@ -435,7 +435,7 @@ class DurableMemoryFinalizer:
         conversation_id: UUID,
         skill_package_id: UUID,
         memory_namespace: str,
-        skill_name: str,
+        skill_name: str | None = None,
         facts_v2: Sequence[Mapping[str, Any]] | Sequence[Any],
         last_applied_run_id: UUID | None = None,
         expected_version: int | None = None,
@@ -447,7 +447,8 @@ class DurableMemoryFinalizer:
                 CODE_INVALID_NAMESPACE,
                 "native memory_namespace must be nonempty",
             )
-        display_name = str(skill_name or "").strip() or "skill"
+        # skill_name retained as a non-authoritative display hint for callers only.
+        _ = str(skill_name or "").strip() or "skill"
         normalized = normalize_facts_v2(facts_v2)
         legacy_facts = AssistantMemoryService.normalize_l2_facts(
             [item["text"] for item in normalized],
@@ -471,7 +472,6 @@ class DurableMemoryFinalizer:
                 )
             row = AssistantConversationSkillL2Memory(
                 conversation_id=conversation_id,
-                skill_name=display_name,
                 facts=legacy_facts,
                 version=1,
                 skill_package_id=skill_package_id,
@@ -491,11 +491,9 @@ class DurableMemoryFinalizer:
             changed = (
                 list(row.facts or []) != legacy_facts
                 or list(row.facts_v2 or []) != normalized
-                or str(row.skill_name or "") != display_name
             )
             if changed:
                 row.version = int(row.version or 1) + 1
-            row.skill_name = display_name
             row.facts = legacy_facts
             row.facts_v2 = normalized
             if last_applied_run_id is not None:

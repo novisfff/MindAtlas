@@ -2,8 +2,7 @@
 
 Not mounted as HTTP. Inventory scan is read-only; inventory prepare/apply/resume
 write discovered evidence under --apply with operator principal fail-closed.
-Packages, L2, approvals, and rollout prepare/activate/rollback are implemented;
-cleanup remains a stub until later tasks.
+Packages, L2, approvals, rollout, and cleanup evaluate/preflight are implemented.
 
 Safety flags are bindings, not authority. No flag can mint a principal.
 """
@@ -307,22 +306,45 @@ def _build_parser() -> argparse.ArgumentParser:
             help="Operator reason (bounded)",
         )
 
-    # Remaining mutation groups — stubs until later tasks.
-    for group_name, commands in (
-        ("cleanup", ("evaluate", "preflight")),
-    ):
-        grp = sub.add_parser(group_name, help=f"{group_name} commands (not yet implemented)")
-        grp_sub = grp.add_subparsers(dest="cmd", required=True)
-        for cmd in commands:
-            cmd_p = grp_sub.add_parser(cmd, help=f"{group_name} {cmd} (stub)")
-            _add_safety_flags(cmd_p)
-            if group_name == "cleanup":
-                cmd_p.add_argument(
-                    "--gate",
-                    choices=["deploy_b1", "deploy_b2"],
-                    required=False,
-                    default="deploy_b1",
-                )
+    cleanup = sub.add_parser("cleanup", help="Cleanup gate evaluate / B2 preflight")
+    cleanup_sub = cleanup.add_subparsers(dest="cmd", required=True)
+
+    cleanup_eval = cleanup_sub.add_parser(
+        "evaluate",
+        help="Recompute hard counts and append cleanup gate evidence",
+    )
+    _add_safety_flags(cleanup_eval)
+    cleanup_eval.add_argument(
+        "--gate",
+        choices=["deploy_b1", "deploy_b2"],
+        required=False,
+        default="deploy_b1",
+    )
+    cleanup_eval.add_argument("--operator-principal", default=None)
+    cleanup_eval.add_argument(
+        "--reason",
+        default=None,
+        help="Operator reason (bounded)",
+    )
+
+    cleanup_pre = cleanup_sub.add_parser(
+        "preflight",
+        help="Deploy B2 preflight (maintenance ack + live hard counts)",
+    )
+    _add_safety_flags(cleanup_pre)
+    cleanup_pre.add_argument(
+        "--gate",
+        choices=["deploy_b2"],
+        required=False,
+        default="deploy_b2",
+    )
+    cleanup_pre.add_argument("--operator-principal", default=None)
+    cleanup_pre.add_argument("--reason", default=None)
+    cleanup_pre.add_argument(
+        "--require-existing-passed-gate",
+        action="store_true",
+        help="Also require a non-expired passed deploy_b2 gate row",
+    )
 
     return p
 
@@ -1001,6 +1023,165 @@ def _run_stub(args: argparse.Namespace) -> int:
         }
     )
     return CLI_EXIT_PRECONDITION_FAILED
+
+
+def _run_cleanup_command(
+    args: argparse.Namespace,
+    *,
+    session_factory: Callable[[], Any] | None = None,
+) -> int:
+    """cleanup evaluate / cleanup preflight."""
+    from app.assistant.migration.cleanup import (
+        CleanupGateError,
+        evaluate_cleanup_gate,
+        preflight_deploy_b2,
+    )
+
+    dry_run = bool(args.dry_run)
+    apply = bool(args.apply)
+    if dry_run == apply:
+        _emit(
+            {
+                "ok": False,
+                "error": "precondition_failed",
+                "reason": "exactly_one_of_dry_run_or_apply",
+            }
+        )
+        return CLI_EXIT_PRECONDITION_FAILED
+
+    operator = _resolve_operator_principal(getattr(args, "operator_principal", None))
+    if apply and not operator:
+        _emit(
+            {
+                "ok": False,
+                "error": "precondition_failed",
+                "reason": "operator_principal_required_for_apply",
+            }
+        )
+        return CLI_EXIT_PRECONDITION_FAILED
+
+    if apply and _is_wildcard_source_digest(str(args.source_snapshot_digest)):
+        _emit(
+            {
+                "ok": False,
+                "error": "conflict_or_drift",
+                "reason": "wildcard_source_snapshot_digest_not_allowed_on_apply",
+                "expected": str(args.source_snapshot_digest),
+            }
+        )
+        return CLI_EXIT_CONFLICT_OR_DRIFT
+
+    resolved_factory = _resolve_session_factory(session_factory, require=True)
+    assert resolved_factory is not None
+    session = resolved_factory()
+    try:
+        if args.cmd == "evaluate":
+            gate_kind = str(getattr(args, "gate", None) or "deploy_b1")
+            result = evaluate_cleanup_gate(
+                session,
+                gate_kind=gate_kind,  # type: ignore[arg-type]
+                schema_revision=str(args.expected_schema_head),
+                build_revision=str(args.expected_build_revision),
+                environment=str(args.environment),
+                database_fingerprint=str(args.database_fingerprint),
+                request_id=str(args.request_id),
+                actor_principal=operator,
+                reason=getattr(args, "reason", None),
+                dry_run=dry_run,
+            )
+            payload = result.to_dict()
+            payload["environment"] = str(args.environment)
+            payload["databaseFingerprint"] = str(args.database_fingerprint)
+            payload["schemaHead"] = str(args.expected_schema_head)
+            payload["buildRevision"] = str(args.expected_build_revision)
+            payload["sourceSnapshotDigest"] = str(args.source_snapshot_digest)
+            payload["requestId"] = str(args.request_id)
+            if not dry_run:
+                session.commit()
+            else:
+                session.rollback()
+            _write_report(args.report_json, payload)
+            _emit(
+                {
+                    "ok": bool(payload.get("ok")),
+                    "command": "cleanup.evaluate",
+                    "gateKind": payload.get("gateKind"),
+                    "decision": payload.get("decision"),
+                    "blockers": payload.get("blockers"),
+                    "evidenceDigest": payload.get("evidenceDigest"),
+                    "gateId": payload.get("gateId"),
+                    "reportJson": str(args.report_json),
+                }
+            )
+            if not payload.get("ok"):
+                return CLI_EXIT_COMPLETED_WITH_BLOCKERS
+            return CLI_EXIT_COMPLETED
+
+        # preflight (deploy_b2 only)
+        gate = str(getattr(args, "gate", None) or "deploy_b2")
+        if gate != "deploy_b2":
+            _emit(
+                {
+                    "ok": False,
+                    "error": "precondition_failed",
+                    "reason": "preflight_gate_must_be_deploy_b2",
+                }
+            )
+            return CLI_EXIT_PRECONDITION_FAILED
+        result = preflight_deploy_b2(
+            session,
+            schema_revision=str(args.expected_schema_head),
+            build_revision=str(args.expected_build_revision),
+            environment=str(args.environment),
+            database_fingerprint=str(args.database_fingerprint),
+            request_id=str(args.request_id),
+            actor_principal=operator,
+            reason=getattr(args, "reason", None),
+            dry_run=dry_run,
+            require_existing_passed_gate=bool(
+                getattr(args, "require_existing_passed_gate", False)
+            ),
+        )
+        payload = result.to_dict()
+        payload["environment"] = str(args.environment)
+        payload["databaseFingerprint"] = str(args.database_fingerprint)
+        payload["schemaHead"] = str(args.expected_schema_head)
+        payload["buildRevision"] = str(args.expected_build_revision)
+        payload["sourceSnapshotDigest"] = str(args.source_snapshot_digest)
+        payload["requestId"] = str(args.request_id)
+        if not dry_run:
+            session.commit()
+        else:
+            session.rollback()
+        _write_report(args.report_json, payload)
+        _emit(
+            {
+                "ok": bool(payload.get("ok")),
+                "command": "cleanup.preflight",
+                "blockers": payload.get("blockers"),
+                "maintenanceAck": payload.get("maintenanceAck"),
+                "reportJson": str(args.report_json),
+            }
+        )
+        if not payload.get("ok"):
+            return CLI_EXIT_COMPLETED_WITH_BLOCKERS
+        return CLI_EXIT_COMPLETED
+    except CleanupGateError as exc:
+        session.rollback()
+        code = (
+            CLI_EXIT_CONFLICT_OR_DRIFT
+            if exc.code in {"conflict", "drift", "stale_revision", "immutable"}
+            else CLI_EXIT_PRECONDITION_FAILED
+        )
+        _emit({"ok": False, "error": exc.code, "reason": exc.message[:200]})
+        return code
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        close = getattr(session, "close", None)
+        if callable(close) and session_factory is None:
+            close()
 
 
 def _run_rollout_command(
@@ -1750,6 +1931,8 @@ def main(
             return _run_approvals_command(args, session_factory=session_factory)
         if args.group == "rollout" and args.cmd in {"prepare", "activate", "rollback"}:
             return _run_rollout_command(args, session_factory=session_factory)
+        if args.group == "cleanup" and args.cmd in {"evaluate", "preflight"}:
+            return _run_cleanup_command(args, session_factory=session_factory)
         return _run_stub(args)
     except Exception as exc:  # pragma: no cover - unexpected path
         _emit(

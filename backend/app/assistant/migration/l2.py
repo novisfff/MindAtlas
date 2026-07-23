@@ -1,12 +1,13 @@
-"""Plan 10 Task 3 — L2 stable package-ID backfill and verify.
+"""Plan 10 Task 3/10 — L2 stable package-ID backfill and verify.
 
-Backfills legacy ``(conversation_id, skill_name)`` L2 rows onto the native
-triple ``(conversation_id, skill_package_id, memory_namespace)`` while keeping
-``skill_name`` as a compatibility column. Mapping is deterministic and never
-fuzzy. Archive digests/ids/counts before mutation; raw facts stay out of general
-migration event JSON.
+Backfills legacy name-keyed L2 rows onto the native triple
+``(conversation_id, skill_package_id, memory_namespace)``. Mapping is
+deterministic and never fuzzy. Archive digests/ids/counts before mutation; raw
+facts stay out of general migration event JSON.
 
-Deploy-A does **not** drop ``skill_name`` or switch production traffic.
+Deploy B2 drops the ``skill_name`` column after zero-legacy-row verify. This
+module still accepts name strings for mapping resolution; row attribute access
+uses ``getattr`` so pre- and post-B2 schemas both work in tooling.
 """
 
 from __future__ import annotations
@@ -352,6 +353,11 @@ def resolve_l2_package_mapping(
     )
 
 
+def _row_skill_name(row: AssistantConversationSkillL2Memory) -> str:
+    """Compatibility accessor — skill_name column may be absent post-B2."""
+    return str(getattr(row, "skill_name", None) or "")
+
+
 def _archive_evidence_payload(
     row: AssistantConversationSkillL2Memory,
     *,
@@ -362,7 +368,7 @@ def _archive_evidence_payload(
     payload: dict[str, Any] = {
         "sourceRowId": str(row.id),
         "conversationId": str(row.conversation_id),
-        "skillName": str(row.skill_name or "")[:200],
+        "skillName": _row_skill_name(row)[:200],
         "sourceVersion": int(row.version or 1),
         "factCount": len(facts),
         "factsDigest": facts_digest(facts),
@@ -386,7 +392,7 @@ def _ensure_discovered_item(
     actor_principal: str | None,
     build_revision: str | None,
 ) -> Any:
-    name_norm = _safe_name_norm(str(row.skill_name or ""))
+    name_norm = _safe_name_norm(_row_skill_name(row))
     digest = sha256_canonical_json(
         {
             "subjectKind": "l2_memory",
@@ -403,7 +409,7 @@ def _ensure_discovered_item(
         subject_kind="l2_memory",
         source_type=L2_SOURCE_TYPE,
         source_id=str(row.id),
-        source_name=str(row.skill_name or "")[:256],
+        source_name=_row_skill_name(row)[:256],
         source_name_normalized=name_norm[:256],
         source_digest=digest,
         evidence_json={
@@ -680,8 +686,11 @@ def _apply_group_merge(
     prev_facts = list(survivor.facts or [])
     survivor.skill_package_id = mapping.skill_package_id
     survivor.memory_namespace = ns
-    # Keep a stable compatibility skill_name (prefer package canonical).
-    survivor.skill_name = str(mapping.skill_name or survivor.skill_name or "skill")[:100]
+    # skill_name column is removed in Deploy B2; keep assignment only when present.
+    if hasattr(survivor, "skill_name"):
+        survivor.skill_name = str(
+            mapping.skill_name or _row_skill_name(survivor) or "skill"
+        )[:100]
     if prev_facts != merged_facts or survivor.facts_v2 != merged_v2:
         survivor.version = int(survivor.version or 1) + 1
     survivor.facts = merged_facts
@@ -816,7 +825,7 @@ def backfill_l2(
         try:
             mapping = resolve_l2_package_mapping(
                 session,
-                str(row.skill_name or ""),
+                _row_skill_name(row),
                 system_namespace_map=system_namespace_map,
             )
         except L2MigrationError as exc:
@@ -852,7 +861,7 @@ def backfill_l2(
             report,
             L2ItemResult(
                 source_id=str(row.id),
-                source_name_normalized=_safe_name_norm(str(row.skill_name or "")),
+                source_name_normalized=_safe_name_norm(_row_skill_name(row)),
                 conversation_id=str(row.conversation_id),
                 outcome="blocked",
                 state="blocked",
@@ -926,7 +935,7 @@ def backfill_l2(
                     report,
                     L2ItemResult(
                         source_id=str(src.id),
-                        source_name_normalized=_safe_name_norm(str(src.skill_name or "")),
+                        source_name_normalized=_safe_name_norm(_row_skill_name(src)),
                         conversation_id=str(src.conversation_id),
                         outcome="blocked",
                         state="blocked",
@@ -943,7 +952,7 @@ def backfill_l2(
                     report,
                     L2ItemResult(
                         source_id=str(src.id),
-                        source_name_normalized=_safe_name_norm(str(src.skill_name or "")),
+                        source_name_normalized=_safe_name_norm(_row_skill_name(src)),
                         conversation_id=str(src.conversation_id),
                         outcome="failed",
                         state="error",
@@ -981,7 +990,7 @@ def backfill_l2(
                 report,
                 L2ItemResult(
                     source_id=str(src.id),
-                    source_name_normalized=_safe_name_norm(str(src.skill_name or "")),
+                    source_name_normalized=_safe_name_norm(_row_skill_name(src)),
                     conversation_id=str(src.conversation_id),
                     outcome="migrated",
                     state="migrated",

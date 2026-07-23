@@ -132,10 +132,10 @@ class AssistantMemoryService:
     def _resolve_l2_package_target(
         self, skill_name: str
     ) -> tuple[UUID, str, str] | None:
-        """Resolve legacy skill_name to (package_id, namespace, display_name).
+        """Resolve lookup name to (package_id, namespace, display_name).
 
-        Returns None when unmapped/ambiguous so callers fall back to pure
-        name-keyed legacy rows (Deploy-A compatibility).
+        Deploy B2 requires package identity; unmapped names return None and
+        callers must not create name-only L2 rows.
         """
         try:
             from app.assistant.migration.l2 import (
@@ -158,18 +158,6 @@ class AssistantMemoryService:
             mapping.skill_name,
         )
 
-    def _get_l2_row_by_name(
-        self, conversation_id: UUID, skill_name: str
-    ) -> AssistantConversationSkillL2Memory | None:
-        return (
-            self.db.query(AssistantConversationSkillL2Memory)
-            .filter(
-                AssistantConversationSkillL2Memory.conversation_id == conversation_id,
-                AssistantConversationSkillL2Memory.skill_name == skill_name,
-            )
-            .first()
-        )
-
     def _get_l2_row_by_package(
         self,
         conversation_id: UUID,
@@ -190,26 +178,21 @@ class AssistantMemoryService:
     def resolve_l2_row(
         self, conversation_id: UUID, skill_name: str
     ) -> AssistantConversationSkillL2Memory | None:
-        """Prefer package-backed triple when the skill_name maps; else name row."""
+        """Resolve by package triple after name→package mapping."""
         normalized_skill_name = str(skill_name or "").strip()
         if not normalized_skill_name:
             return None
         target = self._resolve_l2_package_target(normalized_skill_name)
-        if target is not None:
-            package_id, namespace, _display = target
-            native = self._get_l2_row_by_package(
-                conversation_id, package_id, namespace
-            )
-            if native is not None:
-                return native
-        return self._get_l2_row_by_name(conversation_id, normalized_skill_name)
+        if target is None:
+            return None
+        package_id, namespace, _display = target
+        return self._get_l2_row_by_package(conversation_id, package_id, namespace)
 
     def get_l2_facts(self, conversation_id: UUID, skill_name: str) -> list[str]:
-        """Legacy name API with package-triple compatibility seam.
+        """Name-keyed API that reads package-triple L2 only.
 
-        When ``skill_name`` resolves to a package, prefer the package-backed
-        ``(conversation, package, namespace)`` row so legacy and Main Agent
-        observe one fact set. Unmapped names keep pure legacy lookup.
+        ``skill_name`` is a lookup key resolved to package identity; unmapped
+        names return empty facts (no legacy name column remains).
         """
         normalized_skill_name = str(skill_name or "").strip()
         if not normalized_skill_name:
@@ -220,12 +203,10 @@ class AssistantMemoryService:
         return self.normalize_l2_facts(row.facts, max_items=10000)
 
     def upsert_l2_facts(self, conversation_id: UUID, skill_name: str, facts: list[str]) -> None:
-        """Legacy name write with package-triple compatibility seam.
+        """Name-keyed write that stores only package/namespace identity.
 
-        Mapped names write through the package/namespace unique key and retain
-        ``skill_name`` only as a compatibility column. Never creates a
-        package-backed null namespace, and never dual-writes a separate legacy
-        name row once a package mapping exists.
+        ``skill_name`` is resolved to a package; unmapped names are no-ops so
+        callers cannot invent name-only rows after skill_name column removal.
         """
         # Plan 09 Task 4: hard tripwire when Eval scope reaches production L2 writer.
         from app.assistant.evaluation.isolation import tripwire_production_writer
@@ -237,52 +218,28 @@ class AssistantMemoryService:
             return
 
         target = self._resolve_l2_package_target(normalized_skill_name)
-        if target is not None:
-            package_id, namespace, display_name = target
-            ns = str(namespace or "").strip() or DEFAULT_L2_MEMORY_NAMESPACE
-            row = self._get_l2_row_by_package(conversation_id, package_id, ns)
-            if row is None:
-                # Also adopt an existing legacy name row in-place when present.
-                legacy = self._get_l2_row_by_name(conversation_id, normalized_skill_name)
-                if legacy is not None and legacy.skill_package_id is None:
-                    row = legacy
-                    row.skill_package_id = package_id
-                    row.memory_namespace = ns
-            if row is None:
-                row = AssistantConversationSkillL2Memory(
-                    conversation_id=conversation_id,
-                    skill_name=(display_name or normalized_skill_name)[:100],
-                    facts=normalized_facts,
-                    version=1,
-                    skill_package_id=package_id,
-                    memory_namespace=ns,
-                )
-                self.db.add(row)
-            else:
-                if list(row.facts or []) != normalized_facts:
-                    row.version = int(row.version or 1) + 1
-                row.facts = normalized_facts
-                row.skill_package_id = package_id
-                row.memory_namespace = ns
-                if display_name:
-                    row.skill_name = str(display_name)[:100]
-            self.db.commit()
+        if target is None:
+            # Deploy B2: no skill_name column / no pure-legacy L2 identity.
             return
 
-        # Unmapped: pure legacy name-keyed identity.
-        row = self._get_l2_row_by_name(conversation_id, normalized_skill_name)
+        package_id, namespace, _display_name = target
+        ns = str(namespace or "").strip() or DEFAULT_L2_MEMORY_NAMESPACE
+        row = self._get_l2_row_by_package(conversation_id, package_id, ns)
         if row is None:
             row = AssistantConversationSkillL2Memory(
                 conversation_id=conversation_id,
-                skill_name=normalized_skill_name,
                 facts=normalized_facts,
                 version=1,
+                skill_package_id=package_id,
+                memory_namespace=ns,
             )
             self.db.add(row)
         else:
             if list(row.facts or []) != normalized_facts:
                 row.version = int(row.version or 1) + 1
             row.facts = normalized_facts
+            row.skill_package_id = package_id
+            row.memory_namespace = ns
         self.db.commit()
 
     def get_workflow_call_memory(

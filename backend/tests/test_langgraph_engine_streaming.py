@@ -1791,12 +1791,41 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
             db.add(conv)
             db.commit()
             db.refresh(conv)
+            from app.assistant.skills.contracts import normalize_skill_lookup_name
+            from app.assistant.skills.models import AssistantSkillPackage, AssistantSkillPackageAlias
+            pkg = AssistantSkillPackage(
+                canonical_name="smart-capture",
+                display_name="Smart Capture",
+                description="d",
+                migration_state="cutover",
+                catalog_enabled=False,
+                is_system=True,
+            )
+            db.add(pkg)
+            db.flush()
+            db.add(
+                AssistantSkillPackageAlias(
+                    skill_package_id=pkg.id,
+                    alias="smart-capture",
+                    normalized_alias=normalize_skill_lookup_name("smart-capture"),
+                    alias_type="canonical",
+                )
+            )
+            db.add(
+                AssistantSkillPackageAlias(
+                    skill_package_id=pkg.id,
+                    alias="smart_capture",
+                    normalized_alias=normalize_skill_lookup_name("smart_capture"),
+                    alias_type="legacy",
+                )
+            )
             db.add(
                 AssistantConversationSkillL2Memory(
                     conversation_id=conv.id,
-                    skill_name="smart_capture",
                     facts=["事实1", "事实2"],
                     version=1,
+                    skill_package_id=pkg.id,
+                    memory_namespace="default",
                 )
             )
             db.commit()
@@ -1864,12 +1893,41 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
             db.add(conv)
             db.commit()
             db.refresh(conv)
+            from app.assistant.skills.contracts import normalize_skill_lookup_name
+            from app.assistant.skills.models import AssistantSkillPackage, AssistantSkillPackageAlias
+            pkg = AssistantSkillPackage(
+                canonical_name="smart-capture",
+                display_name="Smart Capture",
+                description="d",
+                migration_state="cutover",
+                catalog_enabled=False,
+                is_system=True,
+            )
+            db.add(pkg)
+            db.flush()
+            db.add(
+                AssistantSkillPackageAlias(
+                    skill_package_id=pkg.id,
+                    alias="smart-capture",
+                    normalized_alias=normalize_skill_lookup_name("smart-capture"),
+                    alias_type="canonical",
+                )
+            )
+            db.add(
+                AssistantSkillPackageAlias(
+                    skill_package_id=pkg.id,
+                    alias="smart_capture",
+                    normalized_alias=normalize_skill_lookup_name("smart_capture"),
+                    alias_type="legacy",
+                )
+            )
             db.add(
                 AssistantConversationSkillL2Memory(
                     conversation_id=conv.id,
-                    skill_name="smart_capture",
                     facts=["事实1"],
                     version=1,
+                    skill_package_id=pkg.id,
+                    memory_namespace="default",
                 )
             )
             db.commit()
@@ -1943,12 +2001,41 @@ class LangGraphEngineStreamingTests(unittest.TestCase):
                     summary_text="数据库摘要",
                 )
             )
+            from app.assistant.skills.contracts import normalize_skill_lookup_name
+            from app.assistant.skills.models import AssistantSkillPackage, AssistantSkillPackageAlias
+            pkg = AssistantSkillPackage(
+                canonical_name="smart-capture",
+                display_name="Smart Capture",
+                description="d",
+                migration_state="cutover",
+                catalog_enabled=False,
+                is_system=True,
+            )
+            db.add(pkg)
+            db.flush()
+            db.add(
+                AssistantSkillPackageAlias(
+                    skill_package_id=pkg.id,
+                    alias="smart-capture",
+                    normalized_alias=normalize_skill_lookup_name("smart-capture"),
+                    alias_type="canonical",
+                )
+            )
+            db.add(
+                AssistantSkillPackageAlias(
+                    skill_package_id=pkg.id,
+                    alias="smart_capture",
+                    normalized_alias=normalize_skill_lookup_name("smart_capture"),
+                    alias_type="legacy",
+                )
+            )
             db.add(
                 AssistantConversationSkillL2Memory(
                     conversation_id=conv.id,
-                    skill_name="smart_capture",
                     facts=["数据库事实"],
                     version=1,
+                    skill_package_id=pkg.id,
+                    memory_namespace="default",
                 )
             )
             db.commit()

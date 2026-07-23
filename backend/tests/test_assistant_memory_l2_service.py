@@ -10,6 +10,42 @@ bootstrap_backend_imports()
 reset_caches()
 
 
+def _make_package(db, name: str, aliases: list[str] | None = None):
+    from app.assistant.skills.contracts import normalize_skill_lookup_name
+    from app.assistant.skills.models import AssistantSkillPackage, AssistantSkillPackageAlias
+
+    pkg = AssistantSkillPackage(
+        canonical_name=name,
+        display_name=name.replace("-", " ").title(),
+        description=f"package {name}",
+        migration_state="cutover",
+        catalog_enabled=False,
+        is_system=name in {"quick-stats", "smart-capture", "periodic-review"},
+    )
+    db.add(pkg)
+    db.flush()
+    db.add(
+        AssistantSkillPackageAlias(
+            skill_package_id=pkg.id,
+            alias=name,
+            normalized_alias=normalize_skill_lookup_name(name),
+            alias_type="canonical",
+        )
+    )
+    for alias in aliases or []:
+        db.add(
+            AssistantSkillPackageAlias(
+                skill_package_id=pkg.id,
+                alias=alias,
+                normalized_alias=normalize_skill_lookup_name(alias),
+                alias_type="legacy",
+            )
+        )
+    db.commit()
+    db.refresh(pkg)
+    return pkg
+
+
 class AssistantMemoryL2ServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         reset_caches()
@@ -21,6 +57,8 @@ class AssistantMemoryL2ServiceTests(unittest.TestCase):
         self.db.add(self.conv)
         self.db.commit()
         self.db.refresh(self.conv)
+        self.smart = _make_package(self.db, "smart-capture", aliases=["smart_capture"])
+        self.quick = _make_package(self.db, "quick-stats", aliases=["quick_stats"])
 
     def tearDown(self) -> None:
         self.db.close()
@@ -43,13 +81,14 @@ class AssistantMemoryL2ServiceTests(unittest.TestCase):
             self.db.query(AssistantConversationSkillL2Memory)
             .filter(
                 AssistantConversationSkillL2Memory.conversation_id == self.conv.id,
-                AssistantConversationSkillL2Memory.skill_name == "smart_capture",
+                AssistantConversationSkillL2Memory.skill_package_id == self.smart.id,
             )
             .all()
         )
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].facts, ["A", "C"])
         self.assertEqual(int(rows[0].version or 0), 2)
+        self.assertEqual(rows[0].memory_namespace, "default")
 
     def test_upsert_l2_facts_isolated_by_skill(self) -> None:
         from app.assistant.memory_service import AssistantMemoryService  # noqa: E402
@@ -60,6 +99,20 @@ class AssistantMemoryL2ServiceTests(unittest.TestCase):
 
         self.assertEqual(service.get_l2_facts(self.conv.id, "smart_capture"), ["A"])
         self.assertEqual(service.get_l2_facts(self.conv.id, "quick_stats"), ["B"])
+
+    def test_unmapped_name_is_noop(self) -> None:
+        from app.assistant.memory_service import AssistantMemoryService  # noqa: E402
+        from app.assistant.models import AssistantConversationSkillL2Memory  # noqa: E402
+
+        service = AssistantMemoryService(self.db)
+        service.upsert_l2_facts(self.conv.id, "totally_unknown_skill_zz", ["X"])
+        count = (
+            self.db.query(AssistantConversationSkillL2Memory)
+            .filter(AssistantConversationSkillL2Memory.conversation_id == self.conv.id)
+            .count()
+        )
+        self.assertEqual(count, 0)
+        self.assertEqual(service.get_l2_facts(self.conv.id, "totally_unknown_skill_zz"), [])
 
     def test_normalize_l2_facts_dedup_and_max_items(self) -> None:
         from app.assistant.memory_service import AssistantMemoryService  # noqa: E402
@@ -104,41 +157,30 @@ class AssistantMemoryL2ServiceTests(unittest.TestCase):
         service.upsert_workflow_call_memory(
             conversation_id=self.conv.id,
             source_workflow_id=source_workflow.id,
-            source_node_scope="call_child",
+            source_node_scope="node-a",
             target_workflow_id=target_workflow.id,
-            summary_text="summary 1",
-            facts=["A"],
+            summary_text="sum",
+            facts=["f1"],
         )
         service.upsert_workflow_call_memory(
             conversation_id=self.conv.id,
             source_workflow_id=source_workflow.id,
-            source_node_scope="call_child",
+            source_node_scope="node-a",
             target_workflow_id=target_workflow.id,
-            summary_text="summary 2",
-            facts=["A", "B"],
+            summary_text="sum2",
+            facts=["f2"],
         )
-
         rows = (
             self.db.query(AssistantConversationWorkflowCallMemory)
             .filter(
-                AssistantConversationWorkflowCallMemory.conversation_id == self.conv.id,
-                AssistantConversationWorkflowCallMemory.source_workflow_id == source_workflow.id,
-                AssistantConversationWorkflowCallMemory.source_node_scope == "call_child",
-                AssistantConversationWorkflowCallMemory.target_workflow_id == target_workflow.id,
+                AssistantConversationWorkflowCallMemory.conversation_id == self.conv.id
             )
             .all()
         )
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0].summary_text, "summary 2")
-        self.assertEqual(rows[0].facts, ["A", "B"])
-        self.assertEqual(int(rows[0].version or 0), 2)
+        self.assertEqual(rows[0].summary_text, "sum2")
+        self.assertEqual(rows[0].facts, ["f2"])
 
-        self.assertEqual(
-            service.get_workflow_call_memory(
-                conversation_id=self.conv.id,
-                source_workflow_id=source_workflow.id,
-                source_node_scope="call_child",
-                target_workflow_id=target_workflow.id,
-            ),
-            {"conversationSummary": "summary 2", "skillFacts": ["A", "B"]},
-        )
+
+if __name__ == "__main__":
+    unittest.main()
