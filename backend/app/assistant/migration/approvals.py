@@ -6,7 +6,7 @@ Classifies every human-node entrypoint as one of:
 - unsupported_interrupt: no authenticated durable channel; never fall back to
   blocking HumanLoopRuntime for new work
 
-Does not delete HumanLoopRuntime or drop assistant_human_approval (Deploy B).
+assistant_human_approval table is dropped; archive/count handle missing table.
 """
 
 from __future__ import annotations
@@ -540,21 +540,9 @@ class ApprovalMigrationReport:
 
 
 def _load_legacy_approvals(session: Session) -> list[Any]:
-    from app.assistant_config.models import AssistantHumanApproval
-
-    try:
-        return (
-            session.query(AssistantHumanApproval)
-            .order_by(
-                AssistantHumanApproval.created_at.asc(),
-                AssistantHumanApproval.id.asc(),
-            )
-            .all()
-        )
-    except Exception:
-        # Dry-run / inventory-only sessions may lack the legacy table.
-        session.rollback()
-        return []
+    """Legacy assistant_human_approval table is dropped (Plan 10 B2)."""
+    _ = session
+    return []
 
 
 def _load_archives(session: Session) -> list[AssistantLegacyApprovalArchive]:
@@ -570,17 +558,9 @@ def _load_archives(session: Session) -> list[AssistantLegacyApprovalArchive]:
 
 
 def count_pending_legacy_approvals(session: Session) -> int:
-    from app.assistant_config.models import AssistantHumanApproval
-
-    try:
-        return (
-            session.query(AssistantHumanApproval)
-            .filter(AssistantHumanApproval.status == PENDING_APPROVAL_STATUS)
-            .count()
-        )
-    except Exception:
-        session.rollback()
-        return 0
+    """Always zero after assistant_human_approval drop."""
+    _ = session
+    return 0
 
 
 def archive_terminal_approvals(

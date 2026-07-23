@@ -241,10 +241,19 @@ def _reset_to_parent(engine: Engine) -> str:
     task1 = _task1_revision()
     current = _current_revision(engine)
     if current is not None and current != PARENT_REVISION:
-        prior10 = os.environ.get("MINDATLAS_PLAN10_MIGRATION_DOWNGRADE_ACK")
-        prior09 = os.environ.get("MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK")
-        os.environ["MINDATLAS_PLAN10_MIGRATION_DOWNGRADE_ACK"] = "1"
-        os.environ["MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK"] = "1"
+        prior_acks = {
+            key: os.environ.get(key)
+            for key in (
+                "MINDATLAS_PLAN10_MIGRATION_DOWNGRADE_ACK",
+                "MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK",
+                "MINDATLAS_PLAN10_B2_DOWNGRADE_ACK",
+                "MINDATLAS_PLAN10_B2_SKILL_DROP_DOWNGRADE_ACK",
+                "MINDATLAS_PLAN10_B2_MAINTENANCE_ACK",
+                "MINDATLAS_PLAN10_B2_TEST_OVERRIDE",
+            )
+        }
+        for key in prior_acks:
+            os.environ[key] = "1"
         try:
             with engine.begin() as conn:
                 _prepare_plan10_downgrade(conn)
@@ -257,14 +266,11 @@ def _reset_to_parent(engine: Engine) -> str:
                     _prepare_plan09_for_parent_cycle(conn)
                 _run_alembic("downgrade", PARENT_REVISION)
         finally:
-            if prior10 is None:
-                os.environ.pop("MINDATLAS_PLAN10_MIGRATION_DOWNGRADE_ACK", None)
-            else:
-                os.environ["MINDATLAS_PLAN10_MIGRATION_DOWNGRADE_ACK"] = prior10
-            if prior09 is None:
-                os.environ.pop("MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK", None)
-            else:
-                os.environ["MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK"] = prior09
+            for key, prior in prior_acks.items():
+                if prior is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = prior
     elif current != PARENT_REVISION:
         _run_alembic("upgrade", PARENT_REVISION)
     assert _current_revision(engine) == PARENT_REVISION, (
@@ -323,6 +329,7 @@ def _seed_eval_run(session: Session, *, purpose: str = "admin_evaluation"):
 
 
 def test_sole_alembic_head_is_task1() -> None:
+    """Sole head remains linear; Task 1 audit revision is an ancestor of tip."""
     from alembic.script import ScriptDirectory
 
     cfg = _alembic_config()
@@ -330,10 +337,14 @@ def test_sole_alembic_head_is_task1() -> None:
     heads = script.get_heads()
     assert len(heads) == 1, heads
     task1 = _task1_revision()
-    assert heads[0] == task1
-    head_rev = script.get_revision(heads[0])
-    assert head_rev is not None
-    assert head_rev.down_revision == PARENT_REVISION
+    tip = heads[0]
+    assert script.get_revision(task1) is not None
+    walk = list(script.walk_revisions(base="base", head=tip))
+    rev_ids = {r.revision for r in walk}
+    assert task1 in rev_ids, f"task1 {task1} not in ancestry of tip {tip}"
+    task1_rev = script.get_revision(task1)
+    assert task1_rev is not None
+    assert task1_rev.down_revision == PARENT_REVISION
 
 
 def test_migration_cycle_parent_task1_parent_task1() -> None:

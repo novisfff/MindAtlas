@@ -946,43 +946,11 @@ class AssistantService:
             yield from self._fallback_response(locale=resolved_locale)
             return
         try:
-            from app.assistant.orchestration.agent_runtime import AssistantAgent
-
-            agent = AssistantAgent(
-                api_key=cfg.api_key,
-                base_url=cfg.base_url,
-                model=cfg.model,
-                db=db_session,
+            # Plan 10 B2: legacy Supervisor/IntentRouter path removed.
+            raise RuntimeError(
+                "Legacy AssistantAgent/Supervisor runtime is removed; "
+                "use Main Agent durable worker only"
             )
-            history = self._build_llm_messages(conversation_id, db=db_session, locale=resolved_locale)
-            user_input = history[-1]["content"] if history else ""
-            for delta in agent.stream(
-                history[:-1],
-                user_input,
-                runtime_context={
-                    "conversation_id": str(conversation_id),
-                    "stream_output": bool(stream_output),
-                    "run_id": str(run_id) if run_id else (str(message_id) if message_id else None),
-                    "channel_type": "assistant_chat",
-                    "message_id": str(message_id) if message_id else None,
-                    "locale": resolved_locale,
-                },
-                on_tool_call_start=on_tool_call_start,
-                on_tool_call_end=on_tool_call_end,
-                on_skill_start=on_skill_start,
-                on_skill_end=on_skill_end,
-                on_analysis_start=on_analysis_start,
-                on_analysis_delta=on_analysis_delta,
-                on_analysis_end=on_analysis_end,
-                on_node_start=on_node_start,
-                on_node_end=on_node_end,
-                on_human_approval_requested=on_human_approval_requested,
-                on_human_approval_resolved=on_human_approval_resolved,
-                cancel_checker=cancel_checker,
-            ):
-                ensure_not_cancelled(cancel_checker)
-                yield delta
-            return
         except AssistantRunCancelled:
             raise
         except Exception as e:

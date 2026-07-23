@@ -53,6 +53,7 @@ class _FakeSkillEngine:
             yield chunk
 
 
+@unittest.skip('legacy Supervisor/IntentRouter removed (Plan 10 B2)')
 class SupervisorGraphRuntimeTests(unittest.TestCase):
     def setUp(self) -> None:
         reset_caches()

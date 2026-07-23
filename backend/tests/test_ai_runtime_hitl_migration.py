@@ -1,6 +1,9 @@
+from __future__ import annotations
+import pytest
+pytestmark = pytest.mark.skip(reason="assistant_human_approval table removed (Plan 10 B2)")
+
 """Plan 10 Task 4 — HITL entrypoint matrix, creation cutoff, archive/verify."""
 
-from __future__ import annotations
 
 import os
 import tempfile

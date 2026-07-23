@@ -92,10 +92,11 @@ class AssistantServiceNoOuterFallbackTests(unittest.TestCase):
         svc = AssistantService(self.db)
         cfg = OpenAiFallbackConfig(api_key="k", base_url="https://x", model="m")
 
-        with patch.object(svc, "_get_openai_config", return_value=cfg), patch(
-            "app.assistant.orchestration.agent_runtime.AssistantAgent",
-            new=_FailingAgent,
-        ), patch.object(svc, "_openai_stream", side_effect=AssertionError("_openai_stream should not be called")):
+        # Legacy AssistantAgent path is removed; generate_response fail-closes and
+        # must not call the outer OpenAI stream fallback.
+        with patch.object(svc, "_get_openai_config", return_value=cfg), patch.object(
+            svc, "_openai_stream", side_effect=AssertionError("_openai_stream should not be called")
+        ):
             out = list(svc._generate_response(self.conv.id))
 
         text = "".join(out)

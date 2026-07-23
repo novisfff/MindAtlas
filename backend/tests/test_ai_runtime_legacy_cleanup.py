@@ -146,3 +146,43 @@ class LegacyCleanupArchitectureTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+    def test_legacy_orchestration_modules_removed(self) -> None:
+        import importlib.util
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[1] / "app" / "assistant" / "orchestration"
+        for name in (
+            "intent_router.py",
+            "supervisor_graph.py",
+            "supervisor_state.py",
+            "agent_runtime.py",
+        ):
+            self.assertFalse((root / name).exists(), f"{name} should be removed")
+        # Package must not export AssistantAgent/SkillRouter
+        import app.assistant.orchestration as orch
+        for attr in ("AssistantAgent", "SkillRouter"):
+            with self.assertRaises(AttributeError):
+                getattr(orch, attr)
+
+    def test_human_loop_runtime_is_fail_closed(self) -> None:
+        from app.assistant.workflow.human_approval_runtime import (
+            HumanLoopRuntime,
+            LegacyHitlRemoved,
+            cancel_pending_human_approvals_for_run,
+            list_pending_approvals_for_conversation,
+            submit_human_approval_decision,
+        )
+        from app.common.exceptions import ApiException
+        from uuid import uuid4
+
+        rt = HumanLoopRuntime()
+        with self.assertRaises(LegacyHitlRemoved):
+            rt.create_and_wait(node_id="n1", node_label="n")
+        self.assertEqual(list_pending_approvals_for_conversation(None, uuid4()), [])
+        self.assertEqual(cancel_pending_human_approvals_for_run(None, run_id="r"), [])
+        with self.assertRaises(ApiException) as ctx:
+            submit_human_approval_decision(None, approval_id=uuid4(), decision="approve")
+        self.assertEqual(ctx.exception.status_code, 410)
+
