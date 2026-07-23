@@ -44,7 +44,6 @@ from app.assistant.skills.service import AgentSkillService, MainAgentProfileServ
 from app.assistant_config.models import (
     AssistantAgentProfile,
     AssistantAgentProfileVersion,
-    AssistantSkill,
     AssistantWorkflow,
     AssistantWorkflowVersion,
 )
@@ -154,7 +153,7 @@ def map_legacy_name_to_canonical_base(name: str, skill_id: UUID) -> str:
 
 
 def legacy_skill_canonical_name(
-    skill: AssistantSkill,
+    skill: Any,
     *,
     occupied: set[str] | None = None,
 ) -> str:
@@ -227,7 +226,7 @@ def _yaml_scalar(value: str) -> str:
     return dumped.rstrip("\n")
 
 
-def _description_for_skill(skill: AssistantSkill, canonical: str) -> str:
+def _description_for_skill(skill: Any, canonical: str) -> str:
     base = (skill.description or "").strip()
     if not base:
         base = f"Legacy Skill {skill.name or canonical}"
@@ -263,7 +262,7 @@ def _agent_compatibility_contract() -> dict[str, Any]:
     }
 
 
-def resolve_legacy_target_ref(session: Session, skill: AssistantSkill) -> LegacyTargetRef | None:
+def resolve_legacy_target_ref(session: Session, skill: Any) -> LegacyTargetRef | None:
     if skill.workflow_id is not None:
         workflow = session.get(AssistantWorkflow, skill.workflow_id)
         if workflow is None:
@@ -327,7 +326,7 @@ def resolve_legacy_target_ref(session: Session, skill: AssistantSkill) -> Legacy
 
 
 def legacy_source_digest(
-    skill: AssistantSkill,
+    skill: Any,
     target_ref: LegacyTargetRef | None,
 ) -> str:
     """Stable digest of legacy Skill source + pinned target publication evidence."""
@@ -360,7 +359,7 @@ def legacy_source_digest(
 
 
 def render_legacy_skill_package(
-    skill: AssistantSkill,
+    skill: Any,
     *,
     target_ref: LegacyTargetRef,
     canonical_name: str | None = None,
@@ -609,7 +608,7 @@ def _clear_package_published_pointer(
 def _materialize_shadow_draft(
     session: Session,
     *,
-    skill: AssistantSkill,
+    skill: Any,
     parsed: ParsedSkillPackage,
     package: AssistantSkillPackage | None,
 ) -> AssistantSkillPackage:
@@ -738,7 +737,7 @@ def _validated_control_tool_keys(tools: Any) -> tuple[str, ...]:
 
 def _bridge_source_ref(
     *,
-    skill: AssistantSkill,
+    skill: Any,
     agent: AssistantAgentProfile,
     version: AssistantAgentProfileVersion,
     snapshot: dict[str, Any],
@@ -792,7 +791,8 @@ class LegacySkillShadowAdapter:
 
     def sync_one(self, session: Session, legacy_skill_id: UUID) -> LegacySyncItem:
         try:
-            skill = session.get(AssistantSkill, legacy_skill_id)
+            # assistant_skill table dropped (Plan 10 B2)
+            skill = None
             if skill is None:
                 return LegacySyncItem(
                     status="failed",
@@ -835,19 +835,14 @@ class LegacySkillShadowAdapter:
 
     def sync_all(self, session: Session) -> LegacySyncReport:
         report = LegacySyncReport()
-        skill_ids = [
-            row[0]
-            for row in session.query(AssistantSkill.id)
-            .order_by(AssistantSkill.name.asc())
-            .all()
-        ]
+        skill_ids: list[UUID] = []  # assistant_skill dropped
         for skill_id in skill_ids:
             item = self.sync_one(session, skill_id)
             report.add(item)
         return report
 
     def _sync_package_skill(
-        self, session: Session, skill: AssistantSkill
+        self, session: Session, skill: Any
     ) -> LegacySyncItem:
         package = _existing_package_for_skill(session, skill.id)
         if package is not None and package.migration_state != "shadow":
@@ -1061,7 +1056,7 @@ class LegacySkillShadowAdapter:
         )
 
     def _sync_general_chat(
-        self, session: Session, skill: AssistantSkill
+        self, session: Session, skill: Any
     ) -> LegacySyncItem:
         # Never create a general-chat package.
         existing_pkg = (

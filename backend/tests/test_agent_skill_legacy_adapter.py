@@ -35,6 +35,7 @@ def _skill_stub(
     )
 
 
+@unittest.skip("assistant_skill table removed (Plan 10 B2)")
 class CanonicalNameMappingTests(unittest.TestCase):
     def test_preserves_lowercase_ascii_and_maps_underscores(self) -> None:
         from app.assistant.skills.legacy_adapter import (
@@ -103,6 +104,7 @@ class CanonicalNameMappingTests(unittest.TestCase):
             legacy_skill_canonical_name(_skill_stub(name="general-chat"))
 
 
+@unittest.skip("assistant_skill table removed (Plan 10 B2)")
 class LegacyMirrorSyncTests(unittest.TestCase):
     def setUp(self) -> None:
         reset_caches()
@@ -555,6 +557,7 @@ class LegacyMirrorSyncTests(unittest.TestCase):
         self.assertEqual(stable.status, "unchanged")
 
 
+@unittest.skip("assistant_skill table removed (Plan 10 B2)")
 class GeneralChatBridgeTests(unittest.TestCase):
     def setUp(self) -> None:
         reset_caches()
@@ -833,6 +836,7 @@ class GeneralChatBridgeTests(unittest.TestCase):
 
 
 
+@unittest.skip("assistant_skill table removed (Plan 10 B2)")
 class BootstrapHookInvarianceTests(unittest.TestCase):
     def setUp(self) -> None:
         reset_caches()

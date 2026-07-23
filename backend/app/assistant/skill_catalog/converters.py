@@ -13,7 +13,7 @@ from app.assistant.skill_catalog.base import (
 )
 
 if TYPE_CHECKING:
-    from app.assistant_config.models import AssistantSkill, AssistantSkillEdge, AssistantSkillNode
+    from app.assistant_config.models import AssistantSkillEdge, AssistantSkillNode  # AssistantSkill dropped
 
 
 _REMOVED_WORKFLOW_NODE_TYPES = {
@@ -55,7 +55,7 @@ def _parse_agent_model_config(raw: Any) -> tuple[str, str | None]:
     return ("custom", model_id)
 
 
-def db_skill_to_definition_light(skill: AssistantSkill) -> SkillDefinition:
+def db_skill_to_definition_light(skill: Any) -> SkillDefinition:
     """轻量级转换 - 用于路由阶段，不加载 nodes/edges 详情。"""
     raw_intent_examples = skill.intent_examples or []
     if not isinstance(raw_intent_examples, list):
@@ -114,7 +114,7 @@ def db_skill_to_definition_light(skill: AssistantSkill) -> SkillDefinition:
     )
 
 
-def db_skill_to_definition(skill: AssistantSkill) -> SkillDefinition:
+def db_skill_to_definition(skill: Any) -> SkillDefinition:
     """将数据库 AssistantSkill 模型转换为 SkillDefinition。"""
     raw_intent_examples = skill.intent_examples or []
     if not isinstance(raw_intent_examples, list):

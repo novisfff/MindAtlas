@@ -71,9 +71,9 @@ class AssistantSkillPackage(UuidPrimaryKeyMixin, TimestampMixin, Base):
         nullable=True,
         index=True,
     )
+    # Provenance UUID only after Plan 10 B2 drop of assistant_skill (no FK).
     legacy_skill_id = Column(
         UUID(as_uuid=True),
-        ForeignKey("assistant_skill.id", ondelete="SET NULL"),
         nullable=True,
         unique=True,
         index=True,
@@ -729,9 +729,9 @@ class AssistantMainAgentProfile(UuidPrimaryKeyMixin, TimestampMixin, Base):
         index=True,
     )
     migration_state = Column(String(32), nullable=False)
+    # Provenance UUID only after Plan 10 B2 drop of assistant_skill (no FK).
     legacy_skill_id = Column(
         UUID(as_uuid=True),
-        ForeignKey("assistant_skill.id", ondelete="SET NULL"),
         nullable=True,
         unique=True,
         index=True,

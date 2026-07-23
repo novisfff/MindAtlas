@@ -58,7 +58,6 @@ from app.assistant.skills.schemas import (
     SaveSkillDraftCommand,
 )
 from app.assistant.skills.service import AgentSkillService, MainAgentProfileService
-from app.assistant_config.models import AssistantSkill
 from app.common.exceptions import ApiException
 
 logger = logging.getLogger(__name__)
@@ -290,7 +289,7 @@ def _reject_secrets_in_mapping(record: Mapping[str, Any]) -> None:
             )
 
 
-def reject_secrets_in_legacy_skill(skill: AssistantSkill) -> None:
+def reject_secrets_in_legacy_skill(skill: Any) -> None:
     """Reject credentials/mutable secrets on an ORM legacy skill before publish."""
     record: dict[str, Any] = {}
     if skill.tools is not None:
@@ -361,7 +360,7 @@ def _source_type_write_branch() -> str:
     return "legacy_write_branch"
 
 
-def _skill_order_key(skill: AssistantSkill) -> tuple[int, str, str]:
+def _skill_order_key(skill: Any) -> tuple[int, str, str]:
     try:
         name = normalize_skill_lookup_name(str(skill.name or ""))
     except (TypeError, ValueError):
@@ -376,7 +375,7 @@ def _skill_order_key(skill: AssistantSkill) -> tuple[int, str, str]:
 
 def _ensure_discovered_skill_item(
     repo: RuntimeMigrationRepository,
-    skill: AssistantSkill,
+    skill: Any,
     *,
     source_digest: str,
     actor_principal: str | None,
@@ -563,7 +562,7 @@ def _lock_profile_cutover(
 
 
 def _find_package_for_skill(
-    session: Session, skill: AssistantSkill
+    session: Session, skill: Any
 ) -> AssistantSkillPackage | None:
     by_legacy = (
         session.query(AssistantSkillPackage)
@@ -607,7 +606,7 @@ def _as_uuid(value: Any) -> UUID | None:
 def _publish_package_from_parsed(
     session: Session,
     *,
-    skill: AssistantSkill,
+    skill: Any,
     parsed: ParsedSkillPackage,
     package: AssistantSkillPackage | None,
     request_id: str,
@@ -704,7 +703,7 @@ def _publish_package_from_parsed(
 
 def _migrate_general_chat_profile(
     session: Session,
-    skill: AssistantSkill,
+    skill: Any,
     *,
     request_id: str,
     actor_principal: str | None,
@@ -1050,7 +1049,7 @@ def _migrate_general_chat_profile(
 
 def _migrate_package_skill(
     session: Session,
-    skill: AssistantSkill,
+    skill: Any,
     *,
     request_id: str,
     actor_principal: str | None,
@@ -1580,7 +1579,7 @@ def _migrate_write_branch(
 
 def _verify_one_skill(
     session: Session,
-    skill: AssistantSkill,
+    skill: Any,
     *,
     actor_principal: str | None,
     build_revision: str | None,
@@ -1954,16 +1953,14 @@ def _verify_one_skill(
 def _select_skills(
     session: Session,
     skill_ids: Sequence[UUID] | None,
-) -> list[AssistantSkill]:
-    if skill_ids:
-        skills = (
-            session.query(AssistantSkill)
-            .filter(AssistantSkill.id.in_(list(skill_ids)))
-            .all()
-        )
-    else:
-        skills = session.query(AssistantSkill).all()
-    return sorted(skills, key=_skill_order_key)
+) -> list[Any]:
+    """Legacy assistant_skill table dropped — no live skill rows to migrate.
+
+    Historical migration is fixture/CLI driven; post-drop this returns empty.
+    """
+    _ = (session, skill_ids)
+    return []
+
 
 
 def _tally(report: PackageMigrationReport, result: PackageMigrationItemResult) -> None:

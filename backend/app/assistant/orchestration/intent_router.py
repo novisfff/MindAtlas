@@ -244,17 +244,11 @@ class SkillRouter:
         # 如果数据库中存在同名 Skill 且 enabled=False，则视为显式禁用（不回退到系统 Skill）。
         # 这样前端"禁用系统技能"能真正生效，行为与 ToolRegistry 的禁用逻辑保持一致。
         # 但默认技能(general_chat)必须始终可用，不受禁用影响
-        from app.assistant_config.models import AssistantSkill
-
+        
         disabled_names = {
             name
             for (name,) in (
-                self.db.query(AssistantSkill.name)
-                .filter(
-                    AssistantSkill.enabled.is_(False),
-                    AssistantSkill.name != DEFAULT_SKILL_NAME,  # 排除默认技能
-                )
-                .all()
+                []  # assistant_skill table dropped
             )
         }
         if disabled_names:

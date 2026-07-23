@@ -46,7 +46,7 @@ OWNERSHIP_RULES: tuple[tuple[str, OwnerClass, str, str | None], ...] = (
         "assistant_config/models.py",
         "legacy",
         "config",
-        "AssistantSkill + AssistantHumanApproval ORM anchors",
+        "Legacy AssistantSkill ORM removed; HumanLoopRuntime residual code only",
     ),
     (
         "features/assistant-config/api/skills.ts",

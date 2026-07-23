@@ -21,7 +21,6 @@ from app.ai_provider.crypto import api_key_hint, encrypt_api_key
 from app.assistant_config.models import (
     AssistantAgentProfile,
     AssistantAgentProfileVersion,
-    AssistantSkill,
     AssistantSystemBehaviorBinding,
     AssistantTargetFolder,
     AssistantWorkflow,
@@ -36,8 +35,6 @@ from app.assistant_config.schemas import (
     AssistantAgentProfileCreateRequest,
     AssistantAgentProfileUpdateRequest,
     AssistantFolderMoveRequest,
-    AssistantSkillCreateRequest,
-    AssistantSkillUpdateRequest,
     AssistantTargetFolderCreateRequest,
     AssistantTargetFolderResponse,
     AssistantTargetFolderUpdateRequest,
@@ -181,34 +178,12 @@ class AssistantConfigService:
             pass
 
     def _best_effort_shadow_sync_for_workflow(self, workflow_id: UUID | None) -> None:
-        if workflow_id is None:
-            return
-        try:
-            skill_ids = [
-                row[0]
-                for row in self.db.query(AssistantSkill.id)
-                .filter(AssistantSkill.workflow_id == workflow_id)
-                .all()
-            ]
-            for skill_id in skill_ids:
-                self._best_effort_shadow_sync_one(skill_id)
-        except Exception:
-            pass
+        _ = workflow_id  # assistant_skill dropped
+        return
 
     def _best_effort_shadow_sync_for_agent(self, agent_profile_id: UUID | None) -> None:
-        if agent_profile_id is None:
-            return
-        try:
-            skill_ids = [
-                row[0]
-                for row in self.db.query(AssistantSkill.id)
-                .filter(AssistantSkill.agent_profile_id == agent_profile_id)
-                .all()
-            ]
-            for skill_id in skill_ids:
-                self._best_effort_shadow_sync_one(skill_id)
-        except Exception:
-            pass
+        _ = agent_profile_id
+        return
 
     def _best_effort_shadow_sync_all(self) -> None:
         try:
@@ -745,9 +720,9 @@ class AssistantConfigService:
     ) -> list[str]:
         if self._resolve_start_input_mode(workflow_input) != "structured":
             return []
-        if not workflow.skills:
+        if True:  # assistant_skill dropped
             return []
-        skill_names = ", ".join(sorted(skill.name for skill in workflow.skills))
+        skill_names = ""  # assistant_skill dropped
         message = (
             "Structured-input workflow cannot be referenced by skills. "
             f"Current referenced skills: {skill_names}"
@@ -1014,7 +989,7 @@ class AssistantConfigService:
             return None
 
         locale = self._current_locale()
-        for linked_skill in (workflow.skills or []):
+        for linked_skill in []:  # assistant_skill dropped
             if not bool(getattr(linked_skill, "is_system", False)):
                 continue
             name = str(getattr(linked_skill, "name", "") or "").strip()
@@ -1040,7 +1015,7 @@ class AssistantConfigService:
             return None
 
         locale = self._current_locale()
-        for linked_skill in (agent_profile.skills or []):
+        for linked_skill in []:  # assistant_skill dropped
             if not bool(getattr(linked_skill, "is_system", False)):
                 continue
             name = str(getattr(linked_skill, "name", "") or "").strip()
@@ -1307,7 +1282,7 @@ class AssistantConfigService:
                 changed = True
 
         if changed:
-            for linked_skill in agent_profile.skills or []:
+            for linked_skill in []:  # assistant_skill dropped
                 linked_skill.system_prompt = agent_profile.system_prompt
                 linked_skill.kb_config = agent_profile.kb_config
                 linked_skill.tools = list(agent_profile.tools or [])
@@ -1456,7 +1431,7 @@ class AssistantConfigService:
             self.db.delete(item)
 
     def _serialize_workflow_summary(self, workflow: AssistantWorkflow) -> dict[str, Any]:
-        referenced_skill_ids = [s.id for s in (workflow.skills or [])]
+        referenced_skill_ids: list = []  # assistant_skill dropped
         referenced_system_behavior_keys = self._binding_keys_from_relationship(
             getattr(workflow, "system_behavior_bindings", None)
         )
@@ -1486,7 +1461,7 @@ class AssistantConfigService:
         }
 
     def _serialize_workflow(self, workflow: AssistantWorkflow) -> dict[str, Any]:
-        referenced_skill_ids = [s.id for s in (workflow.skills or [])]
+        referenced_skill_ids: list = []  # assistant_skill dropped
         referenced_system_behavior_keys = self._binding_keys_from_relationship(
             getattr(workflow, "system_behavior_bindings", None)
         )
@@ -1535,7 +1510,7 @@ class AssistantConfigService:
         return self._display_workflow_name(workflow, locale=locale)
 
     def _serialize_agent_profile_summary(self, agent_profile: AssistantAgentProfile) -> dict[str, Any]:
-        referenced_skill_ids = [s.id for s in (agent_profile.skills or [])]
+        referenced_skill_ids: list = []  # assistant_skill dropped
         referenced_system_behavior_keys = self._binding_keys_from_relationship(
             getattr(agent_profile, "system_behavior_bindings", None)
         )
@@ -1568,7 +1543,7 @@ class AssistantConfigService:
         }
 
     def _serialize_agent_profile(self, agent_profile: AssistantAgentProfile) -> dict[str, Any]:
-        referenced_skill_ids = [s.id for s in (agent_profile.skills or [])]
+        referenced_skill_ids: list = []  # assistant_skill dropped
         referenced_system_behavior_keys = self._binding_keys_from_relationship(
             getattr(agent_profile, "system_behavior_bindings", None)
         )
@@ -1748,7 +1723,7 @@ class AssistantConfigService:
         )
         if asset is not None:
             return asset.display_name
-        for linked_skill in (workflow.skills or []):
+        for linked_skill in []:  # assistant_skill dropped
             if not bool(getattr(linked_skill, "is_system", False)):
                 continue
             asset = get_system_skill_asset(
@@ -1776,7 +1751,7 @@ class AssistantConfigService:
         )
         if asset is not None:
             return asset.display_name
-        for linked_skill in (agent_profile.skills or []):
+        for linked_skill in []:  # assistant_skill dropped
             if not bool(getattr(linked_skill, "is_system", False)):
                 continue
             asset = get_system_skill_asset(
@@ -1803,13 +1778,13 @@ class AssistantConfigService:
 
         workflows = (
             self.db.query(AssistantWorkflow)
-            .options(joinedload(AssistantWorkflow.skills))
+            
             .filter(AssistantWorkflow.is_system.is_(True))
             .all()
         )
         for workflow in workflows:
             matched_kinds: list[str] = []
-            if any(bool(getattr(skill, "is_system", False)) for skill in (workflow.skills or [])):
+            if False:  # assistant_skill dropped
                 matched_kinds.append("system_skill")
             if str(workflow.name or "").strip() in system_behavior_workflow_names:
                 matched_kinds.append("system_behavior")
@@ -1827,13 +1802,13 @@ class AssistantConfigService:
 
         agents = (
             self.db.query(AssistantAgentProfile)
-            .options(joinedload(AssistantAgentProfile.skills))
+            
             .filter(AssistantAgentProfile.is_system.is_(True))
             .all()
         )
         for agent_profile in agents:
             matched_kinds: list[str] = []
-            if any(bool(getattr(skill, "is_system", False)) for skill in (agent_profile.skills or [])):
+            if False:  # assistant_skill dropped
                 matched_kinds.append("system_skill")
             if len(matched_kinds) != 1:
                 unexpected_agents.append(
@@ -2726,7 +2701,6 @@ class AssistantConfigService:
             .options(
                 joinedload(AssistantWorkflow.draft_version),
                 joinedload(AssistantWorkflow.published_version),
-                joinedload(AssistantWorkflow.skills),
                 joinedload(AssistantWorkflow.system_behavior_bindings),
             )
             .filter(
@@ -2742,8 +2716,7 @@ class AssistantConfigService:
                 .options(
                     joinedload(AssistantWorkflow.draft_version),
                     joinedload(AssistantWorkflow.published_version),
-                    joinedload(AssistantWorkflow.skills),
-                    joinedload(AssistantWorkflow.system_behavior_bindings),
+                        joinedload(AssistantWorkflow.system_behavior_bindings),
                 )
                 .filter(
                     AssistantWorkflow.name.in_(tuple(definition.legacy_canonical_names)),
@@ -3308,98 +3281,9 @@ class AssistantConfigService:
         base.pop("modelId", None)
         return base
 
-    def serialize_skill(self, skill: AssistantSkill) -> dict[str, Any]:
-        target_type = self._derive_target_type(
-            workflow_id=skill.workflow_id,
-            agent_profile_id=skill.agent_profile_id,
-            langgraph_pattern=getattr(skill, "langgraph_pattern", None),
-        )
-        workflow = skill.workflow
-        agent_profile = skill.agent_profile
-
-        if target_type == "workflow":
-            draft_workflow = self._get_workflow_draft_input(workflow) if workflow is not None else None
-            nodes = (
-                self._workflow_response_nodes_from_input(
-                    workflow_id=workflow.id,
-                    workflow=draft_workflow,
-                    ts=workflow.updated_at or workflow.created_at or self._utcnow(),
-                )
-                if workflow is not None and draft_workflow is not None
-                else []
-            )
-            edges = (
-                self._workflow_response_edges_from_input(
-                    workflow_id=workflow.id,
-                    workflow=draft_workflow,
-                    ts=workflow.updated_at or workflow.created_at or self._utcnow(),
-                )
-                if workflow is not None and draft_workflow is not None
-                else []
-            )
-            workflow_version = (workflow.workflow_version if workflow is not None else skill.workflow_version) or 1
-            workflow_viewport = draft_workflow.viewport if draft_workflow is not None else skill.workflow_viewport
-            tools = skill.tools or []
-            kb_config = skill.kb_config if isinstance(skill.kb_config, dict) else None
-            system_prompt = None
-            target_summary = None
-            if workflow is not None:
-                target_summary = {
-                    "id": workflow.id,
-                    "name": self._display_workflow_name(workflow),
-                    "enabled": bool(workflow.enabled),
-                }
-        else:
-            nodes = []
-            edges = []
-            workflow_version = 1
-            workflow_viewport = None
-            tools = (
-                agent_profile.tools
-                if agent_profile is not None and isinstance(agent_profile.tools, list)
-                else (skill.tools or [])
-            )
-            kb_config = (
-                agent_profile.kb_config
-                if agent_profile is not None and isinstance(agent_profile.kb_config, dict)
-                else (skill.kb_config if isinstance(skill.kb_config, dict) else {"enabled": False})
-            )
-            system_prompt = (
-                agent_profile.system_prompt
-                if agent_profile is not None
-                else skill.system_prompt
-            )
-            target_summary = None
-            if agent_profile is not None:
-                target_summary = {
-                    "id": agent_profile.id,
-                    "name": agent_profile.name,
-                    "enabled": bool(agent_profile.enabled),
-                }
-
-        return {
-            "id": skill.id,
-            "name": skill.name,
-            "description": skill.description or "",
-            "intent_examples": skill.intent_examples or [],
-            "tools": tools or [],
-            "mode": "langgraph",
-            "target_type": target_type,
-            "workflow_id": skill.workflow_id,
-            "agent_profile_id": skill.agent_profile_id,
-            "target_summary": target_summary,
-            "langgraph_pattern": "workflow_dag" if target_type == "workflow" else "agent_loop",
-            "system_prompt": system_prompt,
-            "is_system": bool(skill.is_system),
-            "enabled": bool(skill.enabled),
-            "kb_config": kb_config,
-            "workflow_version": workflow_version,
-            "workflow_viewport": workflow_viewport,
-            "nodes": nodes,
-            "edges": edges,
-            "created_at": skill.created_at,
-            "updated_at": skill.updated_at,
-        }
+    def serialize_skill(self, skill: Any) -> dict[str, Any]:
+        _ = skill
+        self._legacy_skill_gone(action="serialize")
 
     def _apply_workflow_to_workflow_entity(
         self,
@@ -3454,7 +3338,7 @@ class AssistantConfigService:
     def _bind_skill_to_workflow(
         self,
         *,
-        skill: AssistantSkill,
+        skill: Any,
         workflow_id: UUID | None,
         request_workflow: WorkflowInput | None,
         default_name: str,
@@ -3521,7 +3405,7 @@ class AssistantConfigService:
     def _bind_skill_to_agent_profile(
         self,
         *,
-        skill: AssistantSkill,
+        skill: Any,
         agent_profile_id: UUID | None,
         request_system_prompt: str | None,
         request_tools: list[str] | None,
@@ -3638,7 +3522,7 @@ class AssistantConfigService:
     def _resolve_or_create_system_workflow_for_reset(
         self,
         *,
-        skill: AssistantSkill,
+        skill: Any,
         default,
         enabled: bool,
     ) -> AssistantWorkflow:
@@ -3685,7 +3569,7 @@ class AssistantConfigService:
     def _resolve_or_create_system_agent_profile_for_reset(
         self,
         *,
-        skill: AssistantSkill,
+        skill: Any,
         default,
         enabled: bool,
     ) -> AssistantAgentProfile:
@@ -3949,22 +3833,7 @@ class AssistantConfigService:
     def _has_minimal_system_catalog_presence(self, *, locale: str | None = None) -> bool:
         expected = self._expected_system_catalog_names(locale=locale)
 
-        expected_skill_names = expected["skill_names"]
-        if expected_skill_names:
-            existing_skill_names = {
-                str(name)
-                for name, in (
-                    self.db.query(AssistantSkill.name)
-                    .filter(
-                        AssistantSkill.is_system.is_(True),
-                        AssistantSkill.name.in_(tuple(expected_skill_names)),
-                    )
-                    .all()
-                )
-                if name
-            }
-            if existing_skill_names != expected_skill_names:
-                return False
+        _ = expected.get("skill_names")  # assistant_skill dropped
 
         expected_workflow_names = expected["workflow_names"]
         if expected_workflow_names:
@@ -4124,16 +3993,7 @@ class AssistantConfigService:
             )
 
         # 同时清理 skills.tools 里引用的已删除工具名，避免“技能配置里仍存在已删除工具”
-        removed_names = internal_names.union(stale_names)
-        if removed_names:
-            skills = self.db.query(AssistantSkill).all()
-            for skill in skills:
-                tools = getattr(skill, "tools", None)
-                if not isinstance(tools, list):
-                    continue
-                cleaned = [t for t in tools if not (isinstance(t, str) and t in removed_names)]
-                if cleaned != tools:
-                    skill.tools = cleaned
+        _ = internal_names.union(stale_names)  # assistant_skill dropped
 
         if not commit:
             return
@@ -4208,62 +4068,10 @@ class AssistantConfigService:
         return result
 
     def sync_system_skills(self, *, commit: bool = True) -> None:
-        """同步系统技能到数据库。
+        """No-op: legacy assistant_skill table removed (Plan 10 B2)."""
+        _ = commit
+        return
 
-        Note:
-        - 系统 Workflow 的节点坐标基线来自 JSON 默认定义（system_defaults）。
-        - sync 会强制把 shipped 系统执行体恢复为官方基线内容。
-        - 系统 Skill 的上层绑定会被保留为系统壳，但底层系统 Workflow / Agent 会压缩为单一基线发布版本。
-        """
-        system_skills = SkillRegistry.list_system_skills(locale=self._current_locale())
-        if not system_skills:
-            return
-
-        for attempt in range(2):
-            changed = False
-            try:
-                for s in system_skills:
-                    existing = (
-                        self.db.query(AssistantSkill)
-                        .filter(AssistantSkill.name == s.name)
-                        .first()
-                    )
-                    if not existing:
-                        existing = AssistantSkill(
-                            name=s.name,
-                            description=s.description,
-                            intent_examples=s.intent_examples,
-                            tools=s.tools,
-                            mode="langgraph",
-                            langgraph_pattern="workflow_dag" if self._derive_target_type(
-                                langgraph_pattern=getattr(s, "langgraph_pattern", None),
-                            ) == "workflow" else "agent_loop",
-                            system_prompt=s.system_prompt,
-                            kb_config=self._skill_default_kb_config(s),
-                            is_system=True,
-                            enabled=True,
-                        )
-                        changed = True
-
-                    if self._reset_skill_to_default(existing, s):
-                        changed = True
-
-                    if existing not in self.db:
-                        self.db.add(existing)
-
-                if changed and commit:
-                    self.db.commit()
-                return
-            except IntegrityError as exc:
-                self.db.rollback()
-                if attempt == 0:
-                    self.db.expire_all()
-                    continue
-                raise ApiException(status_code=409, code=40920, message="Sync system skills failed") from exc
-
-    # -------------------------
-    # Tools CRUD
-    # -------------------------
     def list_tools(self, sync_system: bool = False, include_disabled: bool = False) -> list[AssistantTool]:
         # Deprecated compatibility flag: reads are now always side-effect free.
         _ = sync_system
@@ -4493,240 +4301,40 @@ class AssistantConfigService:
             ) from exc
 
     # -------------------------
-    # Skills CRUD
+    # Skills CRUD (Plan 10 B2: table dropped)
     # -------------------------
-    def list_skills(self, sync_system: bool = False, include_disabled: bool = False) -> list[AssistantSkill]:
-        # Deprecated compatibility flag: reads are now always side-effect free.
-        _ = sync_system
-        q = (
-            self.db.query(AssistantSkill)
-            .options(
-                joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.draft_version),
-                joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.published_version),
-                joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.skills),
-                joinedload(AssistantSkill.agent_profile).joinedload(AssistantAgentProfile.skills),
-            )
-            .order_by(AssistantSkill.created_at.desc())
-        )
-        if not include_disabled:
-            q = q.filter(AssistantSkill.enabled.is_(True))
-        return q.all()
-
-    def get_skill(self, id: UUID) -> AssistantSkill:
-        skill = (
-            self.db.query(AssistantSkill)
-            .populate_existing()
-            .options(
-                joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.draft_version),
-                joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.published_version),
-                joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.skills),
-                joinedload(AssistantSkill.agent_profile).joinedload(AssistantAgentProfile.skills),
-            )
-            .filter(AssistantSkill.id == id)
-            .first()
-        )
-        if not skill:
-            raise ApiException(status_code=404, code=40411, message=f"Skill not found: {id}")
-        return skill
-
-    def create_skill(self, request: AssistantSkillCreateRequest) -> AssistantSkill:
-        existing = self.db.query(AssistantSkill).filter(
-            AssistantSkill.name.ilike(request.name)
-        ).first()
-        if existing:
-            raise ApiException(status_code=400, code=40020, message=f"Skill name exists: {request.name}")
-
-        skill = AssistantSkill(
-            name=request.name,
-            description=request.description,
-            intent_examples=request.intent_examples,
-            tools=request.tools or [],
-            mode="langgraph",
-            langgraph_pattern=request.langgraph_pattern or "agent_loop",
-            system_prompt=request.system_prompt,
-            kb_config=request.kb_config if isinstance(request.kb_config, dict) else {"enabled": False},
-            is_system=False,
-            enabled=request.enabled,
-        )
-        self.db.add(skill)
-
-        target_type = self._derive_target_type(
-            target_type=request.target_type,
-            workflow_id=request.workflow_id,
-            agent_profile_id=request.agent_profile_id,
-            langgraph_pattern=request.langgraph_pattern,
-        )
-        if target_type == "workflow":
-            if request.workflow_id is not None and request.workflow is not None:
-                raise ApiException(
-                    status_code=422,
-                    code=42208,
-                    message="Cannot provide workflow payload when binding an existing workflow",
-                )
-            self._bind_skill_to_workflow(
-                skill=skill,
-                workflow_id=request.workflow_id,
-                request_workflow=request.workflow,
-                default_name=request.name,
-                description=request.description,
-                enabled=bool(request.enabled),
-                is_system=False,
-            )
-        else:
-            self._bind_skill_to_agent_profile(
-                skill=skill,
-                agent_profile_id=request.agent_profile_id,
-                request_system_prompt=request.system_prompt,
-                request_tools=request.tools,
-                request_kb_config=request.kb_config,
-                default_name=request.name,
-                description=request.description,
-                enabled=bool(request.enabled),
-                is_system=False,
-            )
-
-        try:
-            self.db.commit()
-        except IntegrityError as exc:
-            self.db.rollback()
-            raise ApiException(status_code=409, code=40920, message="Create skill failed") from exc
-        created = self.get_skill(skill.id)
-        self._best_effort_shadow_sync_one(created.id)
-        return created
-
-    def update_skill(self, id: UUID, request: AssistantSkillUpdateRequest) -> AssistantSkill:
-        skill = self.get_skill(id)
-        previous_target_type = self._derive_target_type(
-            workflow_id=skill.workflow_id,
-            agent_profile_id=skill.agent_profile_id,
-            langgraph_pattern=skill.langgraph_pattern,
+    def _legacy_skill_gone(self, *, action: str = "access") -> None:
+        raise ApiException(
+            status_code=410,
+            code=41010,
+            message=(
+                f"Legacy assistant Skill {action} is gone. "
+                "Use Universal Skill packages or standalone Workflow/Agent APIs."
+            ),
+            details={"legacySkillAdmin": True, "replacement": "universal_skills"},
         )
 
-        if skill.is_system:
-            # 系统技能允许编辑内容，但禁止改名
-            if request.name is not None and request.name != skill.name:
-                raise ApiException(status_code=400, code=40021, message="System skill cannot be renamed")
-        else:
-            if request.name is not None:
-                skill.name = request.name
 
-        if request.description is not None:
-            skill.description = request.description
-        if request.intent_examples is not None:
-            skill.intent_examples = request.intent_examples
-        if request.mode is not None and request.mode != "langgraph":
-            raise ApiException(status_code=422, code=42204, message="mode must be langgraph")
-        skill.mode = "langgraph"
-        if request.enabled is not None:
-            # 阻止禁用默认 Skill
-            if skill.name == DEFAULT_SKILL_NAME and request.enabled is False:
-                raise ApiException(status_code=400, code=40025, message="General chat skill cannot be disabled")
-            skill.enabled = request.enabled
+    def list_skills(self, sync_system: bool = False, include_disabled: bool = False) -> list[Any]:
+        _ = (sync_system, include_disabled)
+        return []
 
-        requested_target_type = self._derive_target_type(
-            target_type=request.target_type,
-            workflow_id=request.workflow_id,
-            agent_profile_id=request.agent_profile_id,
-            langgraph_pattern=request.langgraph_pattern or skill.langgraph_pattern,
-        )
-        target_changed = requested_target_type != previous_target_type
+    def get_skill(self, id: UUID) -> Any:
+        self._legacy_skill_gone(action='get_skill')
 
-        if requested_target_type == "workflow":
-            if request.workflow_id is not None and request.workflow is not None:
-                raise ApiException(
-                    status_code=422,
-                    code=42208,
-                    message="Cannot provide workflow payload when binding an existing workflow",
-                )
-            workflow_id = request.workflow_id
-            if workflow_id is None and not target_changed:
-                workflow_id = skill.workflow_id
-            self._bind_skill_to_workflow(
-                skill=skill,
-                workflow_id=workflow_id,
-                request_workflow=request.workflow,
-                default_name=skill.name,
-                description=skill.description,
-                enabled=bool(skill.enabled),
-                is_system=bool(skill.is_system),
-            )
-        else:
-            agent_profile_id = request.agent_profile_id
-            if agent_profile_id is None and not target_changed:
-                agent_profile_id = skill.agent_profile_id
-            self._bind_skill_to_agent_profile(
-                skill=skill,
-                agent_profile_id=agent_profile_id,
-                request_system_prompt=request.system_prompt,
-                request_tools=request.tools,
-                request_kb_config=request.kb_config,
-                default_name=skill.name,
-                description=skill.description,
-                enabled=bool(skill.enabled),
-                is_system=bool(skill.is_system),
-            )
-            if request.system_prompt is not None and skill.agent_profile is not None:
-                skill.agent_profile.system_prompt = request.system_prompt
-            if request.kb_config is not None and skill.agent_profile is not None:
-                skill.agent_profile.kb_config = self._normalize_agent_kb_config(
-                    kb_config=request.kb_config,
-                    model_source=None,
-                    model_id=None,
-                    existing_kb_config=(
-                        skill.agent_profile.kb_config
-                        if isinstance(skill.agent_profile.kb_config, dict)
-                        else {"enabled": False}
-                    ),
-                )
-                skill.kb_config = skill.agent_profile.kb_config
-            if request.tools is not None and skill.agent_profile is not None:
-                skill.agent_profile.tools = request.tools
-                skill.tools = list(request.tools)
+    def create_skill(self, request: AssistantSkillCreateRequest) -> Any:
+        self._legacy_skill_gone(action='create_skill')
 
-        try:
-            self.db.commit()
-        except IntegrityError as exc:
-            self.db.rollback()
-            raise ApiException(status_code=409, code=40921, message="Update skill failed") from exc
-        updated = self.get_skill(skill.id)
-        self._best_effort_shadow_sync_one(updated.id)
-        return updated
+    def update_skill(self, id: UUID, request: AssistantSkillUpdateRequest) -> Any:
+        self._legacy_skill_gone(action='update_skill')
 
-    def reset_skill(self, id: UUID, confirm: bool) -> AssistantSkill:
-        """复位系统技能到默认配置"""
-        if not confirm:
-            raise ApiException(status_code=400, code=40023, message="confirm=true required")
-
-        skill = self.get_skill(id)
-        if not skill.is_system:
-            raise ApiException(status_code=400, code=40024, message="Only system skill can be reset")
-
-        from app.assistant.skill_catalog.definitions import get_skill_by_name
-
-        default = get_skill_by_name(skill.name, locale=self._current_locale())
-        if not default:
-            raise ApiException(status_code=404, code=40412, message=f"Default not found: {skill.name}")
-
-        self._reset_skill_to_default(skill, default)
-
-        try:
-            self.db.commit()
-        except IntegrityError as exc:
-            self.db.rollback()
-            raise ApiException(status_code=409, code=40922, message="Reset skill failed") from exc
-        self.db.refresh(skill)
-        self._best_effort_shadow_sync_one(skill.id)
-        return skill
+    def reset_skill(self, id: UUID, confirm: bool) -> Any:
+        self._legacy_skill_gone(action='reset_skill')
 
     def delete_skill(self, id: UUID) -> None:
-        skill = self.get_skill(id)
-        if skill.is_system:
-            raise ApiException(status_code=400, code=40022, message="System skill cannot be deleted")
-        self._retire_shadow_packages_for_legacy_skill(skill)
-        self.db.delete(skill)
-        self.db.commit()
+        self._legacy_skill_gone(action='delete_skill')
 
-    def _retire_shadow_packages_for_legacy_skill(self, skill: AssistantSkill) -> None:
+    def _retire_shadow_packages_for_legacy_skill(self, skill: Any) -> None:
         """Retire shadow packages tied to a legacy skill so package names can be reclaimed.
 
         Clears the current published pointer (history rows stay), renames the package
@@ -4758,83 +4366,9 @@ class AssistantConfigService:
             package.legacy_skill_id = None
 
     def reset_all_system_skills(self, confirm: bool, *, commit: bool = True) -> dict:
-        """重置所有系统技能到默认配置，并清理已下线的系统技能"""
-        if not confirm:
-            raise ApiException(status_code=400, code=40023, message="confirm=true required")
+        self._legacy_skill_gone(action='reset_all_system_skills')
 
-        locale = self._current_locale()
-        from app.assistant.skill_catalog.defaults_loader import load_system_skill_defaults
-        from app.assistant.skill_catalog.definitions import get_skill_by_name
-
-        system_defaults = load_system_skill_defaults(locale=locale)
-
-        # 获取代码侧系统技能名称集合
-        default_names = {s.name for s in system_defaults}
-
-        # 获取 DB 中所有系统技能
-        db_system_skills = (
-            self.db.query(AssistantSkill)
-            .filter(AssistantSkill.is_system.is_(True))
-            .all()
-        )
-
-        reset_count = 0
-        deleted_count = 0
-        created_count = 0
-        affected: list[dict] = []
-
-        # 处理 DB 中已存在的系统技能
-        for skill in db_system_skills:
-            if skill.name in default_names:
-                # 重置到默认配置
-                default = get_skill_by_name(skill.name, locale=locale)
-                if default:
-                    self._reset_skill_to_default(skill, default)
-                    reset_count += 1
-                    affected.append({"name": skill.name, "id": str(skill.id), "action": "reset"})
-            else:
-                # 已下线的系统技能，删除（保留执行体实体，若后续仍被引用可复用）
-                self.db.delete(skill)
-                deleted_count += 1
-                affected.append({"name": skill.name, "id": str(skill.id), "action": "deleted"})
-
-        # 创建缺失的系统技能
-        existing_names = {s.name for s in db_system_skills}
-        for s in system_defaults:
-            if s.name not in existing_names:
-                skill = AssistantSkill(
-                    name=s.name,
-                    description=s.description,
-                    intent_examples=s.intent_examples,
-                    tools=list(s.tools or []),
-                    mode="langgraph",
-                    langgraph_pattern="workflow_dag",
-                    system_prompt=s.system_prompt,
-                    kb_config=self._skill_default_kb_config(s),
-                    is_system=True,
-                    enabled=True,
-                )
-                self._reset_skill_to_default(skill, s)
-                self.db.add(skill)
-                created_count += 1
-                affected.append({"name": s.name, "id": None, "action": "created"})
-
-        if commit:
-            try:
-                self.db.commit()
-            except IntegrityError as exc:
-                self.db.rollback()
-                raise ApiException(status_code=409, code=40923, message="Reset all skills failed") from exc
-            self._best_effort_shadow_sync_all()
-
-        return {
-            "resetCount": reset_count,
-            "deletedCount": deleted_count,
-            "createdCount": created_count,
-            "affected": affected,
-        }
-
-    def _reset_skill_to_default(self, skill: AssistantSkill, default) -> bool:
+    def _reset_skill_to_default(self, skill: Any, default) -> bool:
         """内部方法：将技能重置到默认配置。
 
         对 workflow_dag 系统技能，reset 会按 JSON 默认定义（system_defaults）的节点坐标重建草稿并发布，
@@ -4943,7 +4477,7 @@ class AssistantConfigService:
 
         return changed
 
-    def _apply_workflow_to_skill(self, skill: AssistantSkill, workflow) -> None:
+    def _apply_workflow_to_skill(self, skill: Any, workflow) -> None:
         """Compatibility helper: apply workflow onto a skill's bound workflow target."""
         workflow_model = skill.workflow
         if workflow_model is None:
@@ -5229,7 +4763,6 @@ class AssistantConfigService:
         q = (
             self.db.query(AssistantWorkflow)
             .options(
-                joinedload(AssistantWorkflow.skills),
                 joinedload(AssistantWorkflow.system_behavior_bindings),
             )
             .order_by(AssistantWorkflow.created_at.desc())
@@ -5250,7 +4783,6 @@ class AssistantConfigService:
             .options(
                 joinedload(AssistantWorkflow.draft_version),
                 joinedload(AssistantWorkflow.published_version),
-                joinedload(AssistantWorkflow.skills),
                 joinedload(AssistantWorkflow.system_behavior_bindings),
             )
             .filter(AssistantWorkflow.id == workflow_id)
@@ -5614,8 +5146,8 @@ class AssistantConfigService:
                     "references": self._serialize_workflow_call_references(workflow_call_refs),
                 },
             )
-        if workflow.skills:
-            skill_names = ", ".join(sorted(s.name for s in workflow.skills))
+        if False:  # assistant_skill dropped
+            skill_names = ""  # assistant_skill dropped
             raise ApiException(
                 status_code=409,
                 code=40932,
@@ -5659,7 +5191,6 @@ class AssistantConfigService:
         q = (
             self.db.query(AssistantAgentProfile)
             .options(
-                joinedload(AssistantAgentProfile.skills),
                 joinedload(AssistantAgentProfile.system_behavior_bindings),
             )
             .order_by(AssistantAgentProfile.created_at.desc())
@@ -5674,7 +5205,6 @@ class AssistantConfigService:
         profile = (
             self.db.query(AssistantAgentProfile)
             .options(
-                joinedload(AssistantAgentProfile.skills),
                 joinedload(AssistantAgentProfile.system_behavior_bindings),
             )
             .filter(AssistantAgentProfile.id == agent_profile_id)
@@ -5867,7 +5397,7 @@ class AssistantConfigService:
         profile.system_prompt = request.draft.system_prompt
         profile.tools = list(request.draft.tools or [])
         profile.kb_config = normalized_kb
-        for skill in profile.skills or []:
+        for skill in []:  # assistant_skill dropped
             if skill.agent_profile_id == profile.id:
                 skill.system_prompt = profile.system_prompt
                 skill.kb_config = profile.kb_config
@@ -6066,8 +5596,8 @@ class AssistantConfigService:
                 version_id=skill_version_id,
                 message="Agent profile is referenced by a published skill binding/dependency",
             )
-        if profile.skills:
-            skill_names = ", ".join(sorted(s.name for s in profile.skills))
+        if False:  # assistant_skill dropped
+            skill_names = ""  # assistant_skill dropped
             raise ApiException(
                 status_code=409,
                 code=40935,
@@ -6109,7 +5639,7 @@ class AssistantConfigService:
             )
         return self.get_workflow(skill.workflow_id)
 
-    def update_workflow(self, skill_id, workflow) -> AssistantSkill:
+    def update_workflow(self, skill_id, workflow) -> Any:
         """Compatibility API: update workflow by skill id."""
         from uuid import UUID as _UUID
 

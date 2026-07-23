@@ -140,69 +140,6 @@ class AssistantTool(UuidPrimaryKeyMixin, TimestampMixin, Base):
     )
 
 
-class AssistantSkill(UuidPrimaryKeyMixin, TimestampMixin, Base):
-    """AI 助手技能配置"""
-    __tablename__ = "assistant_skill"
-
-    name = Column(String(128), nullable=False, unique=True, index=True)
-    description = Column(String(512), nullable=False, default="")
-    intent_examples = Column(JSON, nullable=True)
-    tools = Column(JSON, nullable=True)
-
-    # 执行模式固定为 langgraph（保留列用于显式约束）
-    mode = Column(String(32), nullable=False, default="langgraph")
-    # LangGraph 子图模式: agent_loop | workflow_dag
-    langgraph_pattern = Column(String(32), nullable=True)
-    # agent_loop 模式的系统提示词
-    system_prompt = Column(Text, nullable=True)
-    # 知识库配置 (JSON)
-    kb_config = Column(JSON, nullable=True)
-    # 工作流版本号 (workflow_dag 模式)
-    workflow_version = Column(Integer, nullable=False, default=1)
-    # 画布视口状态 (JSON: {x, y, zoom})
-    workflow_viewport = Column(JSON, nullable=True)
-    # 新绑定模型：Skill 必须绑定 workflow 或 agent_profile 之一（迁移后由 DB 约束保证）
-    workflow_id = Column(
-        UUID(as_uuid=True),
-        ForeignKey("assistant_workflow.id", ondelete="RESTRICT"),
-        nullable=True,
-        index=True,
-    )
-    agent_profile_id = Column(
-        UUID(as_uuid=True),
-        ForeignKey("assistant_agent_profile.id", ondelete="RESTRICT"),
-        nullable=True,
-        index=True,
-    )
-
-    is_system = Column(Boolean, nullable=False, default=False)
-    enabled = Column(Boolean, nullable=False, default=True)
-
-    workflow = relationship("AssistantWorkflow", back_populates="skills")
-    agent_profile = relationship("AssistantAgentProfile", back_populates="skills")
-
-    __table_args__ = (
-        CheckConstraint(
-            "(workflow_id IS NOT NULL AND agent_profile_id IS NULL) OR "
-            "(workflow_id IS NULL AND agent_profile_id IS NOT NULL)",
-            name="ck_assistant_skill_single_target_binding",
-        ),
-    )
-
-    @property
-    def nodes(self) -> list[AssistantSkillNode]:
-        workflow = getattr(self, "workflow", None)
-        if workflow is None:
-            return []
-        return list(getattr(workflow, "nodes", []) or [])
-
-    @property
-    def edges(self) -> list[AssistantSkillEdge]:
-        workflow = getattr(self, "workflow", None)
-        if workflow is None:
-            return []
-        return list(getattr(workflow, "edges", []) or [])
-
 
 class AssistantTargetFolder(UuidPrimaryKeyMixin, TimestampMixin, Base):
     """Folder for organizing reusable workflow and agent targets."""
@@ -286,7 +223,6 @@ class AssistantWorkflow(UuidPrimaryKeyMixin, TimestampMixin, Base):
         passive_deletes=True,
         foreign_keys="AssistantWorkflowVersion.workflow_id",
     )
-    skills = relationship("AssistantSkill", back_populates="workflow")
     system_behavior_bindings = relationship("AssistantSystemBehaviorBinding", back_populates="workflow")
 
     @property
@@ -383,7 +319,6 @@ class AssistantAgentProfile(UuidPrimaryKeyMixin, TimestampMixin, Base):
     )
     folder = relationship("AssistantTargetFolder", back_populates="agent_profiles")
 
-    skills = relationship("AssistantSkill", back_populates="agent_profile")
     versions = relationship(
         "AssistantAgentProfileVersion",
         back_populates="agent_profile",
@@ -484,7 +419,6 @@ class AssistantHumanApproval(UuidPrimaryKeyMixin, TimestampMixin, Base):
     )
     skill_id = Column(
         UUID(as_uuid=True),
-        ForeignKey("assistant_skill.id", ondelete="SET NULL"),
         nullable=True,
         index=True,
     )

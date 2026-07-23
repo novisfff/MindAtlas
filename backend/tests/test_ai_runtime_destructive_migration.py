@@ -323,7 +323,7 @@ def test_upgrade_drops_skill_name_and_human_approval() -> None:
                 ).fetchone()
                 assert approval is None
 
-                # assistant_skill residual retained.
+                # assistant_skill still present after ca6f; dropped by 5cc5a70095f9.
                 skill_table = conn.execute(
                     text(
                         "SELECT 1 FROM information_schema.tables "
@@ -383,5 +383,62 @@ def test_downgrade_requires_ack_and_does_not_claim_data_restore() -> None:
                     )
                 ).fetchone()
                 assert skill_name is not None
+        finally:
+            _restore_env(prev)
+
+
+SKILL_DROP_REVISION = "5cc5a70095f9"
+SKILL_DROP_BLOCKED_TOKEN = "MINDATLAS_PLAN10_B2_SKILL_DROP_BLOCKED"
+
+
+def test_skill_drop_blocked_without_ack() -> None:
+    with _engine() as engine:
+        _reset_schema(engine)
+        prev = _set_env(
+            **{
+                B2_ACK_ENV: "1",  # allow ca6f
+                B2_TEST_OVERRIDE_ENV: None,
+            }
+        )
+        try:
+            _upgrade_to(B2_REVISION)  # through ca6f with ack
+            # clear ack for skill drop
+            os.environ.pop(B2_ACK_ENV, None)
+            os.environ.pop(B2_TEST_OVERRIDE_ENV, None)
+            with pytest.raises(Exception) as excinfo:
+                _upgrade_to(SKILL_DROP_REVISION)
+            assert SKILL_DROP_BLOCKED_TOKEN in str(excinfo.value)
+            assert _current_revision(engine) == B2_REVISION
+        finally:
+            _restore_env(prev)
+
+
+def test_skill_drop_removes_assistant_skill_table() -> None:
+    with _engine() as engine:
+        _reset_schema(engine)
+        prev = _set_env(**{B2_ACK_ENV: "1", B2_TEST_OVERRIDE_ENV: None})
+        try:
+            _upgrade_to(SKILL_DROP_REVISION)
+            assert _current_revision(engine) == SKILL_DROP_REVISION
+            with engine.connect() as conn:
+                skill_table = conn.execute(
+                    text(
+                        "SELECT 1 FROM information_schema.tables "
+                        "WHERE table_name = 'assistant_skill' "
+                        "AND table_schema = current_schema()"
+                    )
+                ).fetchone()
+                assert skill_table is None
+                # provenance columns remain without FK
+                for table in ("assistant_skill_package", "assistant_main_agent_profile"):
+                    col = conn.execute(
+                        text(
+                            "SELECT 1 FROM information_schema.columns "
+                            "WHERE table_name = :t AND column_name = 'legacy_skill_id' "
+                            "AND table_schema = current_schema()"
+                        ),
+                        {"t": table},
+                    ).fetchone()
+                    assert col is not None
         finally:
             _restore_env(prev)

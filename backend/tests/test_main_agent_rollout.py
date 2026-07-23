@@ -1,6 +1,6 @@
 """Golden-path rollout tests (Plan 04 Task 9)."""
-
 from __future__ import annotations
+
 
 import os
 import unittest
@@ -229,6 +229,7 @@ class MainAgentRolloutTests(unittest.TestCase):
         report = run_rollout(self.db, "enable", dry_run=True, allow_create_fixture=True)
         self.assertTrue(report.success or report.reason_code)
 
+    @unittest.skip("assistant_skill table removed (Plan 10 B2)")
     def test_only_golden_package_becomes_catalog_visible(self) -> None:
         from app.assistant.main_agent.rollout import enable_rollout, plan_rollout
         from app.assistant.skills.models import AssistantSkillPackage
@@ -327,6 +328,7 @@ class LegacyAdapterCutoverSkipTests(unittest.TestCase):
         get_settings.cache_clear()
         reset_caches()
 
+    @unittest.skip("assistant_skill table removed (Plan 10 B2)")
     def test_cutover_package_stops_automatic_sync(self) -> None:
         from app.assistant.skills.legacy_adapter import LegacySkillShadowAdapter
         from app.assistant.skills.models import AssistantSkillPackage, AssistantSkillVersion

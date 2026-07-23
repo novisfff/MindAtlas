@@ -37,7 +37,6 @@ from app.assistant.skills.models import (
     AssistantSkillPackage,
     AssistantSkillPackageAlias,
 )
-from app.assistant_config.models import AssistantSkill
 
 logger = logging.getLogger(__name__)
 
@@ -214,7 +213,7 @@ def resolve_l2_package_mapping(
     """Resolve legacy skill_name → package triple using plan precedence.
 
     Precedence:
-    1. package.legacy_skill_id via AssistantSkill name match (unique)
+    1. (removed) AssistantSkill name→legacy_skill_id join after table drop
     2. exact normalized canonical/legacy/custom alias unique match
     3. checked-in system map + unique package canonical match
     4. unique package.canonical_name from map_legacy_name_to_canonical_base
@@ -236,31 +235,9 @@ def resolve_l2_package_mapping(
 
     candidates: list[tuple[AssistantSkillPackage, str, str]] = []
 
-    # 1) legacy_skill_id via skill name (exact strip match first, then normalized).
-    skills = (
-        session.query(AssistantSkill)
-        .filter(AssistantSkill.name == raw_name)
-        .all()
-    )
-    if not skills:
-        # Fallback: scan enabled skills for normalized name equality (bounded).
-        for skill in session.query(AssistantSkill).all():
-            if _safe_name_norm(str(skill.name or "")) == name_norm:
-                skills.append(skill)
-    if len(skills) > 1:
-        # Ambiguous multiple legacy skills for same normalized name.
-        raise L2MigrationError(
-            "ambiguous_legacy_skill_name",
-            f"multiple AssistantSkill rows match {raw_name!r}",
-        )
-    if len(skills) == 1:
-        pkg = (
-            session.query(AssistantSkillPackage)
-            .filter(AssistantSkillPackage.legacy_skill_id == skills[0].id)
-            .one_or_none()
-        )
-        if pkg is not None:
-            candidates.append((pkg, "legacy_skill_id", DEFAULT_MEMORY_NAMESPACE))
+    # 1) legacy_skill_id name match is unavailable after assistant_skill drop.
+    #    Packages retain legacy_skill_id UUID provenance only (no join table).
+    #    Prefer alias / system map / canonical match.
 
     # 2) exact unique alias match (canonical / legacy / custom; ignore disabled custom).
     alias = (

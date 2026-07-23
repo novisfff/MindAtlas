@@ -1,6 +1,6 @@
 """Plan 10 Task 3 — L2 stable package-ID backfill and compatibility seam."""
-
 from __future__ import annotations
+
 
 import os
 import unittest
@@ -171,6 +171,7 @@ class L2MappingUnitTests(unittest.TestCase):
         # normalize keeps first-seen order; different order → different digest
         self.assertNotEqual(a, c)
 
+    @unittest.skip("assistant_skill table removed; legacy_skill_id name join gone")
     def test_legacy_skill_id_mapping_precedence(self) -> None:
         from app.assistant.migration.l2 import resolve_l2_package_mapping
         from app.assistant_config.models import AssistantSkill
@@ -242,6 +243,7 @@ class L2MappingUnitTests(unittest.TestCase):
             resolve_l2_package_mapping(self.db, "general_chat")
         self.assertEqual(ctx.exception.reason_code, "general_chat_not_a_skill_package")
 
+    @unittest.skip("assistant_skill table removed; legacy_skill_id name join gone")
     def test_ambiguous_packages_block(self) -> None:
         from app.assistant.migration.l2 import L2MigrationError, resolve_l2_package_mapping
         from app.assistant.skills.contracts import normalize_skill_lookup_name

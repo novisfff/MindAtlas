@@ -1,6 +1,6 @@
 """Plan 10 Task 2 — migrate legacy skills to native packages / Main Agent Profile."""
-
 from __future__ import annotations
+
 
 import os
 import unittest
@@ -138,6 +138,7 @@ class SourceAdapterUnitTests(unittest.TestCase):
             self.assertEqual(decision.reason_code, "non_create_write_branch")
 
 
+@unittest.skip("assistant_skill table removed (Plan 10 B2) — historical migrate path")
 class SkillPackageMigrationServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         reset_caches()
@@ -755,6 +756,7 @@ class SkillPackageMigrationServiceTests(unittest.TestCase):
         )
 
 
+@unittest.skip("assistant_skill table removed (Plan 10 B2) — historical migrate path")
 class PackagesCliTests(unittest.TestCase):
     def setUp(self) -> None:
         reset_caches()
