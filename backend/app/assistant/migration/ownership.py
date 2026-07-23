@@ -32,15 +32,15 @@ OWNERSHIP_RULES: tuple[tuple[str, OwnerClass, str, str | None], ...] = (
     ),
     (
         "assistant/skill_catalog/",
-        "legacy",
+        "shared_capability",
         "catalog",
-        "Legacy skill catalog definitions/loaders",
+        "SkillDefinition types retained for Workflow DAG engine (DB skill rows gone)",
     ),
     (
         "assistant/workflow/human_approval_runtime.py",
         "legacy",
         "approval",
-        "Legacy HITL runtime fail-closed after table drop (Plan 10 B2)",
+        "Fail-closed HITL shell after assistant_human_approval drop (Plan 10 B2)",
     ),
     (
         "assistant_config/models.py",

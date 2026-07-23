@@ -243,7 +243,7 @@ class OwnershipAuditTests(unittest.TestCase):
         catalog = classify_module_ownership(
             "backend/app/assistant/skill_catalog/definitions.py"
         )
-        self.assertEqual(catalog.owner_class, "legacy")
+        self.assertEqual(catalog.owner_class, "shared_capability")
 
         hitl = classify_module_ownership(
             "backend/app/assistant/workflow/human_approval_runtime.py"

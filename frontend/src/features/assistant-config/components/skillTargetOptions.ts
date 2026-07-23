@@ -1,7 +1,7 @@
 import type { AssistantAgentProfile } from '../api/agents'
 import type { SystemBehaviorContractField, SystemBehaviorContractSummary } from '../api/system-behaviors'
 import type { CallableWorkflow, WorkflowContractParam } from '../api/workflows'
-import type { AssistantSkill, SkillTargetType } from '../api/skills'
+import type { SkillTargetType } from '../api/skills'
 import type { AssistantWorkflow } from '../api/workflows'
 import { isStructuredStartWorkflowFromNodes } from './workflow/startNodeConfig'
 
@@ -271,7 +271,7 @@ export function buildSkillBindingTargets(
 }
 
 export function resolveSkillTargetKey(
-  skill: Pick<AssistantSkill, 'targetType' | 'workflowId' | 'agentProfileId'> | undefined,
+  skill: { targetType?: SkillTargetType | null; workflowId?: string | null; agentProfileId?: string | null } | undefined,
   availableTargets: AssistantExecutableTarget[] = [],
 ): string | null {
   if (!skill?.targetType) return null

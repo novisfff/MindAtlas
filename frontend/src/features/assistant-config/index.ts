@@ -1,5 +1,5 @@
 export * from './api/tools'
-export * from './api/skills'
+export type { SkillTargetType } from './api/skills'
 export * from './api/skill-packages'
 export {
   MAIN_AGENT_PROFILES_BASE,

@@ -165,21 +165,6 @@ class AssistantConfigService:
     def __init__(self, db: Session):
         self.db = db
 
-    def _best_effort_shadow_sync_one(self, legacy_skill_id=None) -> None:
-        _ = legacy_skill_id  # assistant_skill + shadow sync removed
-        return
-
-    def _best_effort_shadow_sync_for_workflow(self, workflow_id: UUID | None) -> None:
-        _ = workflow_id  # assistant_skill dropped
-        return
-
-    def _best_effort_shadow_sync_for_agent(self, agent_profile_id: UUID | None) -> None:
-        _ = agent_profile_id
-        return
-
-    def _best_effort_shadow_sync_all(self) -> None:
-        return
-
     def _current_locale(self, preferred_locale: str | None = None) -> str:
         return resolve_system_locale(self.db, preferred_locale=preferred_locale)
 
@@ -3899,7 +3884,6 @@ class AssistantConfigService:
             self.db.rollback()
             raise ApiException(status_code=409, code=40969, message="Sync system catalog failed") from exc
         # After tools/workflows/agents/skills are present, mirror into disabled shadows.
-        self._best_effort_shadow_sync_all()
 
     def ensure_system_catalog_synced(self) -> None:
         self._acquire_system_catalog_sync_lock()
@@ -4320,10 +4304,6 @@ class AssistantConfigService:
 
     def delete_skill(self, id: UUID) -> None:
         self._legacy_skill_gone(action='delete_skill')
-
-    def _retire_shadow_packages_for_legacy_skill(self, skill) -> None:
-        _ = skill  # legacy_skill_id column removed
-        return
 
     def reset_all_system_skills(self, confirm: bool, *, commit: bool = True) -> dict:
         self._legacy_skill_gone(action='reset_all_system_skills')
@@ -4924,7 +4904,6 @@ class AssistantConfigService:
             self.db.rollback()
             raise ApiException(status_code=409, code=40937, message="Publish workflow failed") from exc
         published_workflow = self.get_workflow(workflow.id)
-        self._best_effort_shadow_sync_for_workflow(published_workflow.id)
         return published_workflow
 
     def rollback_workflow_version(self, workflow_id: UUID, version_id: UUID) -> RollbackVersionResponse:
@@ -5388,7 +5367,6 @@ class AssistantConfigService:
             self.db.rollback()
             raise ApiException(status_code=409, code=40939, message="Publish agent profile failed") from exc
         published_profile = self.get_agent_profile(profile.id)
-        self._best_effort_shadow_sync_for_agent(published_profile.id)
         return published_profile
 
     def rollback_agent_profile_version(self, agent_profile_id: UUID, version_id: UUID) -> RollbackVersionResponse:
