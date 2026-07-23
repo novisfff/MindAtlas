@@ -1,4 +1,5 @@
 from __future__ import annotations
+from types import SimpleNamespace
 
 import copy
 import hashlib
@@ -1745,22 +1746,34 @@ class AssistantConfigService:
             for definition in list_system_behavior_definitions(locale=locale)
             if definition.default_target.target_type == "workflow"
         }
+        # System skill targets are now bare workflows/agents named after skill defaults
+        # (no assistant_skill row). Classify by the same naming contract as reset helpers.
+        system_skill_workflow_names: set[str] = set()
+        system_skill_agent_names: set[str] = set()
+        for skill_def in SkillRegistry.list_system_skills(locale=locale):
+            pattern = getattr(skill_def, "langgraph_pattern", None)
+            target_type = self._derive_target_type(langgraph_pattern=pattern)
+            if target_type == "workflow":
+                system_skill_workflow_names.add(f"{skill_def.name}__workflow")
+            else:
+                system_skill_agent_names.add(f"{skill_def.name}__agent")
+
         unexpected_workflows: list[dict[str, Any]] = []
         unexpected_agents: list[dict[str, Any]] = []
 
         workflows = (
             self.db.query(AssistantWorkflow)
-            
             .filter(AssistantWorkflow.is_system.is_(True))
             .all()
         )
         for workflow in workflows:
             matched_kinds: list[str] = []
-            if False:  # assistant_skill dropped
+            name = str(workflow.name or "").strip()
+            if name in system_skill_workflow_names:
                 matched_kinds.append("system_skill")
-            if str(workflow.name or "").strip() in system_behavior_workflow_names:
+            if name in system_behavior_workflow_names:
                 matched_kinds.append("system_behavior")
-            if str(workflow.name or "").strip() in standalone_workflow_names:
+            if name in standalone_workflow_names:
                 matched_kinds.append("standalone_system_target")
             if len(matched_kinds) != 1:
                 unexpected_workflows.append(
@@ -1774,13 +1787,13 @@ class AssistantConfigService:
 
         agents = (
             self.db.query(AssistantAgentProfile)
-            
             .filter(AssistantAgentProfile.is_system.is_(True))
             .all()
         )
         for agent_profile in agents:
             matched_kinds: list[str] = []
-            if False:  # assistant_skill dropped
+            name = str(agent_profile.name or "").strip()
+            if name in system_skill_agent_names:
                 matched_kinds.append("system_skill")
             if len(matched_kinds) != 1:
                 unexpected_agents.append(
@@ -4039,9 +4052,96 @@ class AssistantConfigService:
         return result
 
     def sync_system_skills(self, *, commit: bool = True) -> None:
-        """No-op: legacy assistant_skill table removed (Plan 10 B2)."""
-        _ = commit
-        return
+        """Restore system Workflow/Agent targets without creating assistant_skill rows.
+
+        Plan 10 B2 dropped the legacy skill table. System catalog warm still needs
+        the underlying workflow/agent baselines that used to be created as skill
+        targets (e.g. ``general_chat__agent``).
+        """
+        system_skills = SkillRegistry.list_system_skills(locale=self._current_locale())
+        if not system_skills:
+            return
+
+        for attempt in range(2):
+            changed = False
+            try:
+                for s in system_skills:
+                    target_type = self._derive_target_type(
+                        langgraph_pattern=getattr(s, "langgraph_pattern", None),
+                    )
+                    if target_type == "workflow":
+                        workflow_input = self._workflow_input_from_skill_default(s)
+                        workflow_input = self._resolve_system_workflow_asset_references(
+                            workflow_input=workflow_input
+                        )
+                        # Synthetic skill shell for naming helpers only.
+                        skill_shell = SimpleNamespace(
+                            name=s.name,
+                            description=s.description or "",
+                            is_system=True,
+                            enabled=True,
+                            workflow_id=None,
+                            workflow=None,
+                            agent_profile_id=None,
+                            agent_profile=None,
+                        )
+                        workflow_model = self._resolve_or_create_system_workflow_for_reset(
+                            skill=skill_shell,
+                            default=s,
+                            enabled=True,
+                        )
+                        self._enforce_workflow_structured_input_constraints(
+                            workflow=workflow_model,
+                            workflow_input=workflow_input,
+                            raise_error=True,
+                        )
+                        if self._ensure_system_workflow_baseline_state(
+                            workflow=workflow_model,
+                            workflow_input=workflow_input,
+                            description=s.description or "",
+                            enabled=True,
+                        ):
+                            changed = True
+                    else:
+                        skill_shell = SimpleNamespace(
+                            name=s.name,
+                            description=s.description or "",
+                            is_system=True,
+                            enabled=True,
+                            workflow_id=None,
+                            workflow=None,
+                            agent_profile_id=None,
+                            agent_profile=None,
+                        )
+                        agent_profile = self._resolve_or_create_system_agent_profile_for_reset(
+                            skill=skill_shell,
+                            default=s,
+                            enabled=True,
+                        )
+                        draft = self._agent_draft_from_skill_default(s)
+                        if self._ensure_system_agent_baseline_state(
+                            agent_profile=agent_profile,
+                            draft=draft,
+                            description=s.description or "",
+                            enabled=True,
+                        ):
+                            changed = True
+
+                if changed and commit:
+                    self.db.commit()
+                elif not commit:
+                    self.db.flush()
+                return
+            except IntegrityError as exc:
+                self.db.rollback()
+                if attempt == 0:
+                    self.db.expire_all()
+                    continue
+                raise ApiException(
+                    status_code=409,
+                    code=40920,
+                    message="Sync system skills failed",
+                ) from exc
 
     def list_tools(self, sync_system: bool = False, include_disabled: bool = False) -> list[AssistantTool]:
         # Deprecated compatibility flag: reads are now always side-effect free.
