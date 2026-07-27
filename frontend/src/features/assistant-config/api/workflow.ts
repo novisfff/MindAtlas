@@ -728,21 +728,18 @@ export interface NodeTypeDefinition {
 export const getNodeTypes = () =>
   apiClient.get<NodeTypeDefinition[]>('/api/assistant-config/workflow/node-types')
 
-export const saveWorkflow = (skillId: string, data: WorkflowInput) =>
-  apiClient.put(`/api/assistant-config/skills/${skillId}/workflow`, { body: data })
 
-export const validateWorkflow = (skillId: string, data: WorkflowInput) =>
-  apiClient.post<WorkflowValidationResponse>(
-    `/api/assistant-config/skills/${skillId}/validate-workflow`,
-    { body: data },
-  )
 
 export const runWorkflowTestStream = async (
-  skillId: string,
+  _workflowOrLegacyId: string,
   payload: WorkflowTestRunRequest,
   options: WorkflowTestStreamOptions = {},
 ) => {
-  const targetPath = options.path || `/api/assistant-config/skills/${skillId}/workflow/test-run`
+  // Nested skill workflow test-run path removed (Plan 10 B2). Callers must pass options.path.
+  const targetPath = options.path
+  if (!targetPath) {
+    throw new Error('runWorkflowTestStream requires options.path (standalone workflow test-run)')
+  }
   const response = await fetch(targetPath, {
     method: 'POST',
     headers: withMindAtlasLocale({

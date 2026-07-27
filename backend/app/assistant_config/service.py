@@ -4386,10 +4386,10 @@ class AssistantConfigService:
     def get_skill(self, id: UUID) -> Any:
         self._legacy_skill_gone(action='get_skill')
 
-    def create_skill(self, request: AssistantSkillCreateRequest) -> Any:
+    def create_skill(self, request: Any) -> Any:
         self._legacy_skill_gone(action='create_skill')
 
-    def update_skill(self, id: UUID, request: AssistantSkillUpdateRequest) -> Any:
+    def update_skill(self, id: UUID, request: Any) -> Any:
         self._legacy_skill_gone(action='update_skill')
 
     def reset_skill(self, id: UUID, confirm: bool) -> Any:
