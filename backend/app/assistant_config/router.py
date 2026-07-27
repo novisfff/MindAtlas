@@ -190,60 +190,6 @@ def move_target_folder(request: AssistantFolderMoveRequest, db: Session = Depend
     return ApiResponse.ok(None, "Folder moved")
 
 
-# ==================== Skills ====================
-
-def _legacy_skill_admin_gone() -> None:
-    """Deploy residual: legacy single-target Skill admin surface is retired; tables remain."""
-    raise ApiException(
-        status_code=410,
-        code=41010,
-        message=(
-            "Legacy assistant Skill admin is gone. "
-            "Use Universal Skill packages under /api/assistant/skill-admin "
-            "or standalone Workflow/Agent APIs."
-        ),
-        details={"legacySkillAdmin": True, "replacement": "universal_skills"},
-    )
-
-
-@router.get("/skills", response_model=ApiResponse)
-def list_skills(
-    sync_system: bool = Query(False),
-    include_disabled: bool = Query(True),
-) -> ApiResponse:
-    _legacy_skill_admin_gone()
-
-
-@router.get("/skills/{id}", response_model=ApiResponse)
-def get_skill(id: UUID) -> ApiResponse:
-    _legacy_skill_admin_gone()
-
-
-@router.post("/skills", response_model=ApiResponse)
-def create_skill() -> ApiResponse:
-    _legacy_skill_admin_gone()
-
-
-@router.put("/skills/{id}", response_model=ApiResponse)
-def update_skill(id: UUID) -> ApiResponse:
-    _legacy_skill_admin_gone()
-
-
-@router.post("/skills/{id}/reset", response_model=ApiResponse)
-def reset_skill(id: UUID) -> ApiResponse:
-    _legacy_skill_admin_gone()
-
-
-@router.post("/skills/reset-all", response_model=ApiResponse)
-def reset_all_skills() -> ApiResponse:
-    _legacy_skill_admin_gone()
-
-
-@router.delete("/skills/{id}", response_model=ApiResponse)
-def delete_skill(id: UUID) -> ApiResponse:
-    _legacy_skill_admin_gone()
-
-
 # ==================== System AI Behaviors ====================
 
 @router.get("/system-behaviors", response_model=ApiResponse)
@@ -703,26 +649,6 @@ def submit_run_approval_decision(
             message=str(exc),
         ) from exc
     return ApiResponse.ok(payload)
-
-
-# ==================== Compatibility Skill Workflow Routes (gone) ====================
-
-@router.put("/skills/{id}/workflow", response_model=ApiResponse)
-def update_workflow(id: UUID) -> ApiResponse:
-    """Legacy nested Skill workflow mutation — retired in Deploy B1."""
-    _legacy_skill_admin_gone()
-
-
-@router.post("/skills/{id}/validate-workflow", response_model=ApiResponse)
-def validate_workflow(id: UUID) -> ApiResponse:
-    """Legacy nested Skill workflow validation — retired in Deploy B1."""
-    _legacy_skill_admin_gone()
-
-
-@router.post("/skills/{id}/workflow/test-run")
-def test_run_workflow(id: UUID) -> StreamingResponse:
-    """Legacy nested Skill workflow test-run — retired in Deploy B1."""
-    _legacy_skill_admin_gone()
 
 
 # Node type metadata

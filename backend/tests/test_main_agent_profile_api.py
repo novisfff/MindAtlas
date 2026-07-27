@@ -274,11 +274,9 @@ class MainAgentProfileApiTests(unittest.TestCase):
 
     def test_legacy_skills_route_is_gone(self) -> None:
         schema = self.client.get("/openapi.json").json()
-        self.assertIn("/api/assistant-config/skills", schema["paths"])
+        self.assertNotIn("/api/assistant-config/skills", schema["paths"])
         resp = self.client.get("/api/assistant-config/skills")
-        self.assertEqual(resp.status_code, 410)
-        payload = resp.json()
-        self.assertEqual(payload.get("code"), 41010)
+        self.assertEqual(resp.status_code, 404)
 
 
 if __name__ == "__main__":

@@ -1,9 +1,11 @@
 import type { AssistantAgentProfile } from '../api/agents'
 import type { SystemBehaviorContractField, SystemBehaviorContractSummary } from '../api/system-behaviors'
 import type { CallableWorkflow, WorkflowContractParam } from '../api/workflows'
-import type { SkillTargetType } from '../api/skills'
 import type { AssistantWorkflow } from '../api/workflows'
 import { isStructuredStartWorkflowFromNodes } from './workflow/startNodeConfig'
+
+/** Shared skill-target type leftovers after Plan 10 legacy skill admin removal. */
+export type SkillTargetType = 'workflow' | 'agent'
 
 const DEFAULT_SKILL_NAME = 'general_chat'
 const DEFAULT_SYSTEM_TARGET_PREFIX = `${DEFAULT_SKILL_NAME}__`

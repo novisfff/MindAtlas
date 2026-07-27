@@ -86,7 +86,7 @@ class LegacyCleanupArchitectureTests(unittest.TestCase):
         hit = forbidden.intersection(imports)
         self.assertFalse(hit, f"admission imports forbidden legacy symbols: {hit}")
 
-    def test_legacy_skill_admin_routes_return_410(self) -> None:
+    def test_legacy_skill_admin_routes_are_absent(self) -> None:
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
 
@@ -110,6 +110,13 @@ class LegacyCleanupArchitectureTests(unittest.TestCase):
         app.dependency_overrides[get_db] = _override_db
         client = TestClient(app)
 
+        schema = client.get("/openapi.json").json()
+        self.assertNotIn("/api/assistant-config/skills", schema["paths"])
+        self.assertFalse(
+            any(path.startswith("/api/assistant-config/skills") for path in schema["paths"]),
+            schema["paths"].keys(),
+        )
+
         for method, path, body in (
             ("get", "/api/assistant-config/skills", None),
             ("get", "/api/assistant-config/skills/00000000-0000-0000-0000-000000000001", None),
@@ -128,8 +135,8 @@ class LegacyCleanupArchitectureTests(unittest.TestCase):
             resp = getattr(client, method)(path, **kwargs)
             self.assertEqual(
                 resp.status_code,
-                410,
-                f"{method.upper()} {path} expected 410, got {resp.status_code}: {resp.text}",
+                404,
+                f"{method.upper()} {path} expected 404, got {resp.status_code}: {resp.text}",
             )
 
     def test_frontend_app_does_not_mount_skill_settings_page(self) -> None:
