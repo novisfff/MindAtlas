@@ -463,7 +463,7 @@ class SystemSkillWorkflowReferenceTests(unittest.TestCase):
         from types import SimpleNamespace
         from uuid import uuid4
 
-        from app.assistant.skills.legacy_adapter import (
+        from app.assistant.migration.legacy_names import (
             legacy_skill_canonical_name,
             map_legacy_name_to_canonical_base,
         )

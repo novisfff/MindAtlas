@@ -26,7 +26,7 @@ DIGEST_C = "c" * 64
 DIGEST_D = "d" * 64
 DIGEST_E = "e" * 64
 
-# Locked Plan 01 agent compatibility contract (Decision 1 / legacy_adapter).
+# Locked Plan 01 agent compatibility contract (Decision 1 / legacy_names).
 CANONICAL_AGENT_INPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {"input": {}},
@@ -278,7 +278,7 @@ def _install_fake_llm(monkeypatch: pytest.MonkeyPatch, llm: _FakeLLM | None = No
 
 
 def test_canonical_agent_contract_is_locked_plan01_surface() -> None:
-    from app.assistant.skills.legacy_adapter import _agent_compatibility_contract
+    from app.assistant.migration.legacy_names import _agent_compatibility_contract
 
     contract = _agent_compatibility_contract()
     assert contract["input_schema"] == CANONICAL_AGENT_INPUT_SCHEMA

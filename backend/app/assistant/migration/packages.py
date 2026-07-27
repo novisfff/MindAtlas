@@ -30,7 +30,7 @@ from app.assistant.skills.contracts import (
     is_reserved_skill_lookup_name,
     normalize_skill_lookup_name,
 )
-from app.assistant.skills.legacy_adapter import (
+from app.assistant.migration.legacy_names import (
     GENERAL_CHAT_NAME,
     _bridge_source_ref,
     _load_published_agent_snapshot,

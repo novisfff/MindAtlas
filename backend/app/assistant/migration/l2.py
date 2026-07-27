@@ -32,7 +32,7 @@ from app.assistant.migration.repository import (
 )
 from app.assistant.models import AssistantConversationSkillL2Memory
 from app.assistant.skills.contracts import normalize_skill_lookup_name
-from app.assistant.skills.legacy_adapter import map_legacy_name_to_canonical_base
+from app.assistant.migration.legacy_names import map_legacy_name_to_canonical_base
 from app.assistant.skills.models import (
     AssistantSkillPackage,
     AssistantSkillPackageAlias,

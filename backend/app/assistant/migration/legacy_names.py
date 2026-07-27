@@ -1,15 +1,13 @@
-"""Legacy Skill → disabled v2 shadow package / Main Agent bridge (Plan 01 Task 7).
+"""Legacy Skill naming / package-render helpers used by Plan 10 migration.
 
-Does not route, execute, or catalog-enable packages. Shadow aggregates stay
-``migration_state=shadow`` and ``catalog_enabled=false`` until an administrator
-edit promotes them to native via AgentSkillService.save_draft.
+Pure-ish helpers extracted from the retired ``skills.legacy_adapter`` module.
+Does not sync, route, or catalog-enable packages.
 """
 
 from __future__ import annotations
 
-import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Literal
 from uuid import UUID
 
@@ -26,21 +24,14 @@ from app.assistant.skills.contracts import (
     validate_canonical_skill_name,
 )
 from app.assistant.skills.models import (
-    AssistantMainAgentProfile,
-    AssistantMainAgentProfileVersion,
     AssistantSkillPackage,
     AssistantSkillPackageAlias,
-    AssistantSkillVersion,
 )
 from app.assistant.skills.package_io import parse_skill_directory_files
 from app.assistant.skills.schemas import (
-    PublishMainAgentProfileCommand,
-    PublishSkillVersionCommand,
-    SaveMainAgentProfileDraftCommand,
-    default_main_agent_profile_snapshot,
     MainAgentProfileSnapshotV1,
+    default_main_agent_profile_snapshot,
 )
-from app.assistant.skills.service import AgentSkillService, MainAgentProfileService
 from app.assistant_config.models import (
     AssistantAgentProfile,
     AssistantAgentProfileVersion,
@@ -48,12 +39,8 @@ from app.assistant_config.models import (
     AssistantWorkflowVersion,
 )
 from app.assistant_config.registry import ToolRegistry
-from app.common.exceptions import ApiException
-
-logger = logging.getLogger(__name__)
 
 GENERAL_CHAT_NAME = "general_chat"
-SyncStatus = Literal["published", "unchanged", "draft_unresolved", "failed"]
 
 _NON_ASCII_OR_INVALID = re.compile(r"[^a-z0-9]+")
 
@@ -67,69 +54,6 @@ class LegacyTargetRef:
     target_id: UUID | None
     published_version_id: UUID | None
     published_snapshot_digest: str | None = None
-
-
-@dataclass
-class LegacySyncDiagnostic:
-    reason_code: str
-    legacy_skill_id: UUID | None
-    shadow_package_id: UUID | None = None
-    source_path: str | None = None
-    message: str | None = None
-
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "reasonCode": self.reason_code,
-            "legacySkillId": str(self.legacy_skill_id) if self.legacy_skill_id else None,
-            "shadowPackageId": str(self.shadow_package_id) if self.shadow_package_id else None,
-            "sourcePath": self.source_path,
-            "message": self.message,
-        }
-
-
-@dataclass
-class LegacySyncItem:
-    status: SyncStatus
-    legacy_skill_id: UUID | None
-    shadow_package_id: UUID | None = None
-    diagnostics: list[LegacySyncDiagnostic] = field(default_factory=list)
-
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "status": self.status,
-            "legacySkillId": str(self.legacy_skill_id) if self.legacy_skill_id else None,
-            "shadowPackageId": str(self.shadow_package_id) if self.shadow_package_id else None,
-            "diagnostics": [d.as_dict() for d in self.diagnostics],
-        }
-
-
-@dataclass
-class LegacySyncReport:
-    published: int = 0
-    unchanged: int = 0
-    draft_unresolved: int = 0
-    failed: int = 0
-    items: list[LegacySyncItem] = field(default_factory=list)
-
-    def add(self, item: LegacySyncItem) -> None:
-        self.items.append(item)
-        if item.status == "published":
-            self.published += 1
-        elif item.status == "unchanged":
-            self.unchanged += 1
-        elif item.status == "draft_unresolved":
-            self.draft_unresolved += 1
-        else:
-            self.failed += 1
-
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "published": self.published,
-            "unchanged": self.unchanged,
-            "draftUnresolved": self.draft_unresolved,
-            "failed": self.failed,
-            "items": [item.as_dict() for item in self.items],
-        }
 
 
 def _stable_uuid_prefix(skill_id: UUID, length: int = 12) -> str:
@@ -551,28 +475,18 @@ def _main_agent_snapshot_from_agent(
     )
 
 
-def best_effort_sync_one(session: Session, legacy_skill_id: UUID) -> None:
-    """No-op: assistant_skill and shadow sync removed (Plan 10 B2)."""
-    _ = (session, legacy_skill_id)
-    return None
-
-
-def best_effort_sync_all(session: Session) -> None:
-    """No-op: assistant_skill and shadow sync removed (Plan 10 B2)."""
-    _ = session
-    return None
-
-
 __all__ = [
+    "GENERAL_CHAT_NAME",
     "LegacyTargetRef",
-    "LegacySyncDiagnostic",
-    "LegacySyncItem",
-    "LegacySyncReport",
     "map_legacy_name_to_canonical_base",
     "legacy_skill_canonical_name",
     "render_legacy_skill_package",
     "resolve_legacy_target_ref",
     "legacy_source_digest",
-    "best_effort_sync_one",
-    "best_effort_sync_all",
+    "_agent_compatibility_contract",
+    "_occupied_canonical_names",
+    "_load_published_agent_snapshot",
+    "_validated_control_tool_keys",
+    "_bridge_source_ref",
+    "_main_agent_snapshot_from_agent",
 ]
