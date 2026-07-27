@@ -445,6 +445,7 @@ def test_skill_drop_removes_assistant_skill_table() -> None:
 
 
 LEGACY_ID_DROP_REVISION = "d3a9fcac15c7"
+LEGACY_DIGEST_DROP_REVISION = "3bd7bc4257c9"
 
 
 def test_legacy_skill_id_columns_dropped() -> None:
@@ -472,5 +473,42 @@ def test_legacy_skill_id_columns_dropped() -> None:
                         "AND table_schema = current_schema()"
                     )
                 ).fetchone()
+        finally:
+            _restore_env(prev)
+
+
+def test_legacy_source_digest_columns_dropped() -> None:
+    with _engine() as engine:
+        _reset_schema(engine)
+        prev = _set_env(**{B2_ACK_ENV: "1", B2_TEST_OVERRIDE_ENV: None})
+        try:
+            _upgrade_to(LEGACY_DIGEST_DROP_REVISION)
+            assert _current_revision(engine) == LEGACY_DIGEST_DROP_REVISION
+            with engine.connect() as conn:
+                for table in ("assistant_skill_package", "assistant_main_agent_profile"):
+                    for column in ("legacy_skill_id", "legacy_source_digest"):
+                        col = conn.execute(
+                            text(
+                                "SELECT 1 FROM information_schema.columns "
+                                "WHERE table_name = :t AND column_name = :c "
+                                "AND table_schema = current_schema()"
+                            ),
+                            {"t": table, "c": column},
+                        ).fetchone()
+                        assert col is None, f"{table}.{column}"
+                    # SHA-256 check constraints must be gone too.
+                    ck = conn.execute(
+                        text(
+                            "SELECT 1 FROM information_schema.table_constraints "
+                            "WHERE table_schema = current_schema() "
+                            "AND table_name = :t "
+                            "AND constraint_name = :n"
+                        ),
+                        {
+                            "t": table,
+                            "n": f"ck_{table}_legacy_source_digest",
+                        },
+                    ).fetchone()
+                    assert ck is None, f"ck_{table}_legacy_source_digest"
         finally:
             _restore_env(prev)

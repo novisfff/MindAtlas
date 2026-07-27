@@ -1176,7 +1176,6 @@ class AgentSkillService:
                 )
                 for a in aliases
             ],
-                        legacy_source_digest=package.legacy_source_digest,
         )
 
     def list_versions(self, package_id: UUID) -> list[SkillVersionSummary]:
@@ -2756,7 +2755,6 @@ class MainAgentProfileService:
             aggregate_revision=int(getattr(profile, "aggregate_revision", 0) or 0),
             draft_version=draft,
             published_version=published,
-                        legacy_source_digest=profile.legacy_source_digest,
             created_at=profile.created_at,
             updated_at=profile.updated_at,
         )

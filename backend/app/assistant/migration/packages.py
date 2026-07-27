@@ -687,11 +687,7 @@ def _publish_package_from_parsed(
     )
     if version is None:
         raise PackageMigrationError("publish_version_missing", "published version row missing")
-    # Stamp legacy source digest for adapter stability.
-    target_ref = resolve_legacy_target_ref(session, skill)
-    if target_ref is not None:
-        package.legacy_source_digest = legacy_source_digest(skill, target_ref)
-        session.flush()
+    # Source digests stay in migration item evidence only (no package column stamp).
     # published summary may lag; use version row.
     del published
     return package, version
@@ -849,12 +845,9 @@ def _migrate_general_chat_profile(
             migration_item_id=str(item.id),
         )
 
-    # Idempotent cutover short-circuit.
-    if (
-        str(profile.migration_state) == "cutover"
-        and profile.published_version_id is not None
-        and profile.legacy_source_digest == bridge_digest
-    ):
+    # Idempotent cutover short-circuit (state + published pointer only;
+    # legacy_source_digest no longer persisted on the profile row).
+    if str(profile.migration_state) == "cutover" and profile.published_version_id is not None:
         pub = session.get(AssistantMainAgentProfileVersion, profile.published_version_id)
         target_digest = str(pub.content_digest) if pub is not None else bridge_digest
         if str(item.state) not in {"migrated", "verified"}:
@@ -870,6 +863,7 @@ def _migrate_general_chat_profile(
                 evidence_json={
                     "canonicalName": "default",
                     "migrationState": "cutover",
+                    "sourceDigest": bridge_digest,
                 },
                 actor_principal=actor_principal,
                 build_revision=build_revision,
@@ -888,25 +882,14 @@ def _migrate_general_chat_profile(
             migration_item_id=str(item.id),
         )
 
-    # If already native/cutover with different digest, do not overwrite.
-    if str(profile.migration_state) in {"native", "cutover"} and str(
-        profile.migration_state
-    ) == "cutover":
-        # already handled above; fall through only for native without cutover
-        pass
-
-    if str(profile.migration_state) in {"native", "cutover"} and profile.legacy_source_digest not in {
-        None,
-        bridge_digest,
-    }:
-        # Native ownership with different source — lock cutover without rewrite.
-        if str(profile.migration_state) != "cutover":
-            profile = _lock_profile_cutover(
-                session,
-                profile,
-                actor_principal=actor_principal,
-                request_id=request_id,
-            )
+    # Native ownership — lock cutover without rewrite; digests live on migration items.
+    if str(profile.migration_state) == "native":
+        profile = _lock_profile_cutover(
+            session,
+            profile,
+            actor_principal=actor_principal,
+            request_id=request_id,
+        )
         pub = (
             session.get(AssistantMainAgentProfileVersion, profile.published_version_id)
             if profile.published_version_id
@@ -926,6 +909,7 @@ def _migrate_general_chat_profile(
             target_id=str(profile.id),
             target_version=str(profile.published_version_id) if profile.published_version_id else None,
             target_digest=target_digest,
+            evidence_json={"sourceDigest": bridge_digest},
             actor_principal=actor_principal,
             build_revision=build_revision,
         )
@@ -999,7 +983,6 @@ def _migrate_general_chat_profile(
     )
     profile = session.get(AssistantMainAgentProfile, profile.id)
     assert profile is not None
-    profile.legacy_source_digest = bridge_digest
     session.flush()
 
     profile = _lock_profile_cutover(
@@ -1022,6 +1005,7 @@ def _migrate_general_chat_profile(
             "canonicalName": "default",
             "migrationState": str(profile.migration_state),
             "runtimeEnabled": bool(profile.runtime_enabled),
+            "sourceDigest": bridge_digest,
         },
         actor_principal=actor_principal,
         build_revision=build_revision,

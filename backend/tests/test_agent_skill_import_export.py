@@ -675,7 +675,6 @@ class TestDeterministicExport:
             migration_state="shadow",
             catalog_enabled=False,
             is_system=False,
-            legacy_source_digest=sha256_bytes(b"legacy-source"),
         )
         self.db.add(package)
         self.db.flush()

@@ -40,7 +40,6 @@ export interface MainAgentProfileSummary {
   draftVersion?: MainAgentProfileVersionSummary | null
   publishedVersion?: MainAgentProfileVersionSummary | null
   legacySkillId?: string | null
-  legacySourceDigest?: string | null
   createdAt?: string | null
   updatedAt?: string | null
 }

@@ -238,7 +238,6 @@ class SkillPackageSummary(CamelModel):
 
 class SkillPackageDetail(SkillPackageSummary):
     aliases: list[SkillPackageAliasSummary] = Field(default_factory=list)
-    legacy_source_digest: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -820,7 +819,6 @@ class MainAgentProfileSummary(CamelModel):
     aggregate_revision: int = 0
     draft_version: MainAgentProfileVersionSummary | None = None
     published_version: MainAgentProfileVersionSummary | None = None
-    legacy_source_digest: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
