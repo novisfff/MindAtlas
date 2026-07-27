@@ -82,7 +82,7 @@ Stop and refresh this plan through review if the checkpoint differs.
 @dataclass(frozen=True)
 class OperatorPrincipal:
     operator_id: UUID
-    role: Literal["viewer", "operator"]
+    role: OperatorRole
     session_id: UUID
     authentication_method: Literal["password_session"] = "password_session"
 
@@ -109,6 +109,7 @@ class RuntimeSchemaCompatibility(Protocol):
 
 # backend/app/assistant/runtime/contracts.py
 class AssistantRuntimeClosure(FrozenContract):
+    schema_version: Literal[1] = 1
     rollout_revision_id: UUID
     rollout_revision_digest: str
     profile_version_id: UUID

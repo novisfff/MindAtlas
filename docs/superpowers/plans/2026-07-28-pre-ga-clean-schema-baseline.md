@@ -77,7 +77,7 @@ OPERATOR_AUTH_CONTRACT_VERSION = "operator-auth-v1"
 @dataclass(frozen=True)
 class OperatorPrincipal:
     operator_id: UUID
-    role: Literal["viewer", "operator"]
+    role: OperatorRole
     session_id: UUID
     authentication_method: Literal["password_session"] = "password_session"
 ```
