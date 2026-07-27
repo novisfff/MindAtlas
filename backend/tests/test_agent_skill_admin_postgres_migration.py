@@ -36,6 +36,7 @@ TASK1_HEAD = "403414a62e55"
 # Sole pre-merge Plan 09 head is the evaluation workbench revision (09B).
 # Task 1 lifecycle (09A) remains a reachable intermediate (parent of 09B).
 PLAN09_HEAD = "027869a00a47"
+CURRENT_HEAD = "3bd7bc4257c9"
 DOWNGRADE_BLOCKED_TOKEN = (
     "MINDATLAS_PLAN09_DOWNGRADE_BLOCKED_ARCHIVED_OR_CATALOG_EVIDENCE"
 )
@@ -355,7 +356,7 @@ def test_task1_revises_plan08_parent_and_is_sole_head() -> None:
     assert rev is not None
     assert rev.down_revision == PARENT_REVISION
     heads = script.get_heads()
-    assert heads == [PLAN09_HEAD], f"expected sole head {PLAN09_HEAD}, got {heads}"
+    assert heads == [CURRENT_HEAD], f"expected sole head {CURRENT_HEAD}, got {heads}"
     head_rev = script.get_revision(PLAN09_HEAD)
     assert head_rev is not None
     # Sole head is 09B eval workbench; it revises 09A lifecycle.
@@ -594,7 +595,7 @@ def test_parent_head_parent_head_cycle_and_sole_head() -> None:
     with _engine() as engine:
         assert _current_revision(engine) == TASK1_HEAD
         heads = ScriptDirectory.from_config(_alembic_config()).get_heads()
-        assert heads == [PLAN09_HEAD]
+        assert heads == [CURRENT_HEAD]
 
 
 # ---------------------------------------------------------------------------
