@@ -10,13 +10,13 @@ OWNERSHIP_RULES: tuple[tuple[str, OwnerClass, str, str | None], ...] = (
         "assistant/orchestration/intent_router.py",
         "legacy",
         "routing",
-        "Legacy intent router (removed Plan 10 B2)",
+        "REMOVED legacy intent router (Plan 10 B2)",
     ),
     (
         "assistant/orchestration/supervisor_graph.py",
         "legacy",
         "routing",
-        "Legacy single-skill supervisor graph (removed Plan 10 B2)",
+        "REMOVED legacy supervisor graph (Plan 10 B2)",
     ),
     (
         "assistant/orchestration/supervisor_state.py",
@@ -28,7 +28,7 @@ OWNERSHIP_RULES: tuple[tuple[str, OwnerClass, str, str | None], ...] = (
         "assistant/orchestration/agent_runtime.py",
         "legacy",
         "routing",
-        "Legacy agent runtime glue (removed Plan 10 B2)",
+        "REMOVED legacy agent runtime (Plan 10 B2)",
     ),
     (
         "assistant/skill_catalog/",
@@ -49,10 +49,10 @@ OWNERSHIP_RULES: tuple[tuple[str, OwnerClass, str, str | None], ...] = (
         "Legacy AssistantSkill + HumanApproval ORM removed; HumanLoopRuntime fail-closed",
     ),
     (
-        "features/assistant-config/api/skills.ts",
+        "features/assistant-config/components/skillTargetOptions.ts",
         "frontend_legacy",
         "ui",
-        "Legacy skill shape types retained for workflow deserialize / target keys",
+        "SkillTargetType leftovers after legacy skills API REMOVED",
     ),
     (
         "assistant/main_agent/",

@@ -254,23 +254,6 @@ export function buildSystemBehaviorBindingTargets(
   return [specialDefaultTarget, ...withDefaultMarked.filter((item) => item.key !== defaultTarget.key)]
 }
 
-export function buildSkillBindingTargets(
-  workflows: AssistantWorkflow[],
-  agents: AssistantAgentProfile[],
-  options?: BuildTargetOptions,
-): AssistantExecutableTarget[] {
-  const realTargets = buildAssistantExecutableTargets(workflows, agents, options)
-  const defaultTarget = realTargets.find((item) => item.isSystemDefault)
-  if (!defaultTarget) return realTargets
-
-  const specialDefaultTarget: AssistantExecutableTarget = {
-    ...defaultTarget,
-    key: SYSTEM_DEFAULT_TARGET_KEY,
-    isSystemDefault: true,
-  }
-
-  return [specialDefaultTarget, ...realTargets.filter((item) => item.key !== defaultTarget.key)]
-}
 
 export function resolveSkillTargetKey(
   skill: { targetType?: SkillTargetType | null; workflowId?: string | null; agentProfileId?: string | null } | undefined,

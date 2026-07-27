@@ -657,32 +657,18 @@ class AssistantService:
                 self._mark_run_stream_detached(run_key)
 
     def _start_background_run(self, *, run_id: UUID, stream_output: bool, locale: str) -> None:
-        run_key = str(run_id)
-        if self._has_background_thread(run_key):
-            return
+        """Legacy chat daemon entry — removed (Plan 10).
 
-        def _runner() -> None:
-            db = SessionLocal()
-            locale_token = set_request_locale(locale)
-            try:
-                AssistantService(db)._run_chat_background(run_id=run_id, stream_output=stream_output, locale=locale)
-            except Exception:
-                logger.exception("assistant background run crashed run_id=%s", run_id)
-            finally:
-                reset_request_locale(locale_token)
-                try:
-                    db.close()
-                except Exception:
-                    pass
-                self._clear_background_thread(run_key)
-
-        thread = threading.Thread(
-            target=_runner,
-            name=f"assistant-run-{run_key[:8]}",
-            daemon=True,
+        Production chat admits Main Agent only via ``chat_stream`` and the durable
+        worker. Callers must not spawn the IntentRouter/Supervisor background thread.
+        ``_run_chat_background`` / ``_generate_response`` remain as fail-closed
+        shells for residual characterization tests that invoke them directly.
+        """
+        _ = (stream_output, locale)
+        raise RuntimeError(
+            f"Legacy chat daemon is removed; cannot start background run {run_id}. "
+            "Use Main Agent durable worker only."
         )
-        self._register_background_thread(run_key, thread)
-        thread.start()
 
     def _run_chat_background(self, *, run_id: UUID, stream_output: bool, locale: str | None = None) -> None:
         resolved_locale = resolve_system_locale(self.db, preferred_locale=locale)

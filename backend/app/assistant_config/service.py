@@ -87,7 +87,6 @@ from app.assistant_config.standalone_system_target_registry import (
 )
 from app.assistant.workflow.system_assets import (
     get_system_asset_by_canonical_name,
-    get_system_skill_asset,
     list_system_assets,
     load_system_agent_asset,
     load_system_workflow_asset,
@@ -953,16 +952,6 @@ class AssistantConfigService:
             return None
 
         locale = self._current_locale()
-        for linked_skill in []:  # assistant_skill dropped
-            if not bool(getattr(linked_skill, "is_system", False)):
-                continue
-            name = str(getattr(linked_skill, "name", "") or "").strip()
-            if not name:
-                continue
-            asset = get_system_skill_asset(name, locale=locale)
-            if asset is not None and asset.kind == "workflow":
-                return load_system_workflow_asset(asset.asset_key, locale=locale)
-
         workflow_name = str(workflow.name or "").strip()
         if workflow_name:
             asset = get_system_asset_by_canonical_name(
@@ -979,15 +968,6 @@ class AssistantConfigService:
             return None
 
         locale = self._current_locale()
-        for linked_skill in []:  # assistant_skill dropped
-            if not bool(getattr(linked_skill, "is_system", False)):
-                continue
-            name = str(getattr(linked_skill, "name", "") or "").strip()
-            if not name:
-                continue
-            asset = get_system_skill_asset(name, locale=locale)
-            if asset is not None and asset.kind == "agent":
-                return load_system_agent_asset(asset.asset_key, locale=locale)
         raw_name = str(agent_profile.name or "").strip()
         if raw_name:
             asset = get_system_asset_by_canonical_name(
@@ -1245,12 +1225,6 @@ class AssistantConfigService:
                 self._keep_only_agent_version(agent_profile, agent_profile.published_version_id)
                 changed = True
 
-        if changed:
-            for linked_skill in []:  # assistant_skill dropped
-                linked_skill.system_prompt = agent_profile.system_prompt
-                linked_skill.kb_config = agent_profile.kb_config
-                linked_skill.tools = list(agent_profile.tools or [])
-
         return changed
 
     def _get_agent_system_baseline_version_id(self, agent_profile_id: UUID) -> UUID | None:
@@ -1395,7 +1369,7 @@ class AssistantConfigService:
             self.db.delete(item)
 
     def _serialize_workflow_summary(self, workflow: AssistantWorkflow) -> dict[str, Any]:
-        referenced_skill_ids: list = []  # assistant_skill dropped
+        referenced_skill_ids: list = []
         referenced_system_behavior_keys = self._binding_keys_from_relationship(
             getattr(workflow, "system_behavior_bindings", None)
         )
@@ -1425,7 +1399,7 @@ class AssistantConfigService:
         }
 
     def _serialize_workflow(self, workflow: AssistantWorkflow) -> dict[str, Any]:
-        referenced_skill_ids: list = []  # assistant_skill dropped
+        referenced_skill_ids: list = []
         referenced_system_behavior_keys = self._binding_keys_from_relationship(
             getattr(workflow, "system_behavior_bindings", None)
         )
@@ -1474,7 +1448,7 @@ class AssistantConfigService:
         return self._display_workflow_name(workflow, locale=locale)
 
     def _serialize_agent_profile_summary(self, agent_profile: AssistantAgentProfile) -> dict[str, Any]:
-        referenced_skill_ids: list = []  # assistant_skill dropped
+        referenced_skill_ids: list = []
         referenced_system_behavior_keys = self._binding_keys_from_relationship(
             getattr(agent_profile, "system_behavior_bindings", None)
         )
@@ -1507,7 +1481,7 @@ class AssistantConfigService:
         }
 
     def _serialize_agent_profile(self, agent_profile: AssistantAgentProfile) -> dict[str, Any]:
-        referenced_skill_ids: list = []  # assistant_skill dropped
+        referenced_skill_ids: list = []
         referenced_system_behavior_keys = self._binding_keys_from_relationship(
             getattr(agent_profile, "system_behavior_bindings", None)
         )
@@ -1687,15 +1661,6 @@ class AssistantConfigService:
         )
         if asset is not None:
             return asset.display_name
-        for linked_skill in []:  # assistant_skill dropped
-            if not bool(getattr(linked_skill, "is_system", False)):
-                continue
-            asset = get_system_skill_asset(
-                str(getattr(linked_skill, "name", "") or "").strip(),
-                locale=normalized_locale,
-            )
-            if asset is not None and asset.kind == "workflow":
-                return asset.display_name
         return raw_name
 
     def _display_agent_profile_name(
@@ -1715,15 +1680,6 @@ class AssistantConfigService:
         )
         if asset is not None:
             return asset.display_name
-        for linked_skill in []:  # assistant_skill dropped
-            if not bool(getattr(linked_skill, "is_system", False)):
-                continue
-            asset = get_system_skill_asset(
-                str(getattr(linked_skill, "name", "") or "").strip(),
-                locale=normalized_locale,
-            )
-            if asset is not None and asset.kind == "agent":
-                return asset.display_name
         return raw_name
 
     def _audit_system_target_origins(self) -> dict[str, list[dict[str, Any]]]:
@@ -3674,7 +3630,6 @@ class AssistantConfigService:
     def _has_minimal_system_catalog_presence(self, *, locale: str | None = None) -> bool:
         expected = self._expected_system_catalog_names(locale=locale)
 
-        _ = expected.get("skill_names")  # assistant_skill dropped
 
         expected_workflow_names = expected["workflow_names"]
         if expected_workflow_names:
@@ -3833,7 +3788,6 @@ class AssistantConfigService:
             )
 
         # 同时清理 skills.tools 里引用的已删除工具名，避免“技能配置里仍存在已删除工具”
-        _ = internal_names.union(stale_names)  # assistant_skill dropped
 
         if not commit:
             return
@@ -4872,13 +4826,6 @@ class AssistantConfigService:
                     "references": self._serialize_workflow_call_references(workflow_call_refs),
                 },
             )
-        if False:  # assistant_skill dropped
-            skill_names = ""  # assistant_skill dropped
-            raise ApiException(
-                status_code=409,
-                code=40932,
-                message=f"Workflow is referenced by skills: {skill_names}",
-            )
         behavior_keys = self._binding_keys_from_relationship(getattr(workflow, "system_behavior_bindings", None))
         if behavior_keys and not confirm_rebind_system_behaviors:
             raise ApiException(
@@ -5123,12 +5070,6 @@ class AssistantConfigService:
         profile.system_prompt = request.draft.system_prompt
         profile.tools = list(request.draft.tools or [])
         profile.kb_config = normalized_kb
-        for skill in []:  # assistant_skill dropped
-            if skill.agent_profile_id == profile.id:
-                skill.system_prompt = profile.system_prompt
-                skill.kb_config = profile.kb_config
-                skill.tools = profile.tools or []
-
         publish_draft = AgentPublishDraftInput.model_validate(
             {
                 "system_prompt": profile.system_prompt,
@@ -5320,13 +5261,6 @@ class AssistantConfigService:
                 package_id=package_id,
                 version_id=skill_version_id,
                 message="Agent profile is referenced by a published skill binding/dependency",
-            )
-        if False:  # assistant_skill dropped
-            skill_names = ""  # assistant_skill dropped
-            raise ApiException(
-                status_code=409,
-                code=40935,
-                message=f"Agent profile is referenced by skills: {skill_names}",
             )
         behavior_keys = self._binding_keys_from_relationship(getattr(profile, "system_behavior_bindings", None))
         if behavior_keys and not confirm_rebind_system_behaviors:

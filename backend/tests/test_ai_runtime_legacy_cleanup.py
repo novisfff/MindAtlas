@@ -150,15 +150,7 @@ class LegacyCleanupArchitectureTests(unittest.TestCase):
         self.assertIn('Navigate to="/settings/universal-skills"', text)
         self.assertIn("/settings/universal-skills", text)
 
-
-if __name__ == "__main__":
-    unittest.main()
-
-
     def test_legacy_orchestration_modules_removed(self) -> None:
-        import importlib.util
-        from pathlib import Path
-
         root = Path(__file__).resolve().parents[1] / "app" / "assistant" / "orchestration"
         for name in (
             "intent_router.py",
@@ -169,11 +161,14 @@ if __name__ == "__main__":
             self.assertFalse((root / name).exists(), f"{name} should be removed")
         # Package must not export AssistantAgent/SkillRouter
         import app.assistant.orchestration as orch
+
         for attr in ("AssistantAgent", "SkillRouter"):
             with self.assertRaises(AttributeError):
                 getattr(orch, attr)
 
     def test_human_loop_runtime_is_fail_closed(self) -> None:
+        from uuid import uuid4
+
         from app.assistant.workflow.human_approval_runtime import (
             HumanLoopRuntime,
             LegacyHitlRemoved,
@@ -182,7 +177,6 @@ if __name__ == "__main__":
             submit_human_approval_decision,
         )
         from app.common.exceptions import ApiException
-        from uuid import uuid4
 
         rt = HumanLoopRuntime()
         with self.assertRaises(LegacyHitlRemoved):
@@ -193,3 +187,16 @@ if __name__ == "__main__":
             submit_human_approval_decision(None, approval_id=uuid4(), decision="approve")
         self.assertEqual(ctx.exception.status_code, 410)
 
+    def test_start_background_run_is_fail_closed(self) -> None:
+        from uuid import uuid4
+
+        from app.assistant.service import AssistantService
+
+        svc = AssistantService(db=None)  # type: ignore[arg-type]
+        with self.assertRaises(RuntimeError) as ctx:
+            svc._start_background_run(run_id=uuid4(), stream_output=False, locale="en")
+        self.assertIn("Legacy chat daemon is removed", str(ctx.exception))
+
+
+if __name__ == "__main__":
+    unittest.main()

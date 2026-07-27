@@ -596,7 +596,6 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
             svc, "sync_system_tools"
         ) as tools_sync_mock, patch.object(svc, "sync_system_skills") as skills_sync_mock:
             svc.list_tools(sync_system=True, include_disabled=True)
-            svc.list_skills(sync_system=True, include_disabled=True)
             svc.list_workflows(include_disabled=True)
             svc.get_workflow(workflow.id)
             svc.list_agent_profiles(include_disabled=True)

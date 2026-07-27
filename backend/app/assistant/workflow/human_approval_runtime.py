@@ -135,8 +135,11 @@ def submit_human_approval_decision(
     decision: Any = None,
     values: dict[str, Any] | None = None,
     comment: str | None = None,
+    **_kwargs: Any,
 ) -> dict[str, Any]:
-    _ = (db, approval_id, decision, values, comment)
+    # Accept legacy expected_run_id / expected_conversation_id kwargs so API
+    # callers still receive a clean 410 rather than a TypeError.
+    _ = (db, approval_id, decision, values, comment, _kwargs)
     _gone(action="submit_decision")
     return {}
 
