@@ -68,6 +68,11 @@ logging.basicConfig(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan: startup and shutdown events."""
+    from app.assistant.migration.rollout import validate_runtime_rollout_startup
+    from app.database import SessionLocal
+
+    with SessionLocal() as db:
+        validate_runtime_rollout_startup(db, settings=settings)
     warm_assistant_config_system_catalog()
     setup_scheduler()
     yield

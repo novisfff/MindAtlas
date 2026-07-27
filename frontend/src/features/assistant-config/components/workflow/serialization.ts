@@ -8,7 +8,6 @@ import type {
   NodeType,
   ConditionExpression,
 } from '../../api/workflow'
-import type { AssistantSkill } from '../../api/skills'
 import type { AssistantWorkflow } from '../../api/workflows'
 import { normalizeIfElseConfig } from './ifElseConfig'
 import { buildLabelMaps, ensureWorkflowUniqueLabels, defaultLabelForNodeType } from './labelUtils'
@@ -135,17 +134,6 @@ export function serializeToWorkflowInput(
 /**
  * Convert API skill response (with nodes/edges) to React Flow format.
  */
-export function deserializeFromSkill(skill: AssistantSkill): {
-  nodes: Node<WfNodeData>[]
-  edges: Edge[]
-  viewport?: Viewport
-} {
-  return deserializeFromWorkflowLike({
-    nodes: skill.nodes,
-    edges: skill.edges,
-    workflowViewport: skill.workflowViewport,
-  })
-}
 
 export function deserializeFromWorkflow(workflow: AssistantWorkflow): {
   nodes: Node<WfNodeData>[]

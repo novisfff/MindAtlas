@@ -354,6 +354,13 @@ class AssistantSkillEvalRun(UuidPrimaryKeyMixin, TimestampMixin, Base):
     gate_eligible = Column(
         Boolean, nullable=False, default=False, server_default=text("false")
     )
+    # Plan 10: admin_evaluation (default) | runtime_shadow (always gate-ineligible).
+    purpose = Column(
+        String(32),
+        nullable=False,
+        default="admin_evaluation",
+        server_default=text("'admin_evaluation'"),
+    )
     actor_principal = Column(String(128), nullable=True)
     request_id = Column(String(128), nullable=True)
     # Durable cancel CAS evidence (Plan 09 residual 3).
@@ -481,6 +488,15 @@ class AssistantSkillEvalRun(UuidPrimaryKeyMixin, TimestampMixin, Base):
             # Structural synthetic runs can never be gate-eligible (DB defense).
             "evidence_provenance <> 'structural_synthetic' OR gate_eligible = false",
             name="ck_assistant_skill_eval_run_synthetic_gate_ineligible",
+        ),
+        CheckConstraint(
+            "purpose IN ('admin_evaluation','runtime_shadow')",
+            name="ck_assistant_skill_eval_run_purpose",
+        ),
+        CheckConstraint(
+            # Online runtime shadow is rollout evidence, never a publish-gate dataset.
+            "purpose <> 'runtime_shadow' OR gate_eligible = false",
+            name="ck_assistant_skill_eval_run_runtime_shadow_gate_ineligible",
         ),
         _nullable_sha256_check(
             "last_cancel_request_digest",

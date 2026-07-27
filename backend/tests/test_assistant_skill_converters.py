@@ -1,4 +1,7 @@
 from __future__ import annotations
+import pytest
+pytestmark = pytest.mark.skip(reason="db skill converters removed with assistant_skill (Plan 10 B2)")
+
 
 import unittest
 

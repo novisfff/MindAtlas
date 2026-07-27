@@ -17,7 +17,6 @@ import {
   useDeleteWorkflowMutation,
   useMoveTargetFolderMutation,
   useMoveTargetToFolderMutation,
-  useSkillsQuery,
   useTargetFoldersQuery,
   useUpdateTargetFolderMutation,
   useWorkflowDetailQuery,
@@ -108,7 +107,6 @@ export function AssistantTargetsSettings() {
   const navigate = useNavigate()
   const { data: workflows = [], isLoading: isLoadingWorkflows } = useWorkflowsQuery()
   const { data: agents = [], isLoading: isLoadingAgents } = useAgentProfilesQuery()
-  const { data: skills = [] } = useSkillsQuery()
   const { data: folders = [], isLoading: isLoadingFolders } = useTargetFoldersQuery()
 
   const createWorkflowMutation = useCreateWorkflowMutation()
@@ -138,21 +136,11 @@ export function AssistantTargetsSettings() {
   const [folderDescription, setFolderDescription] = useState('')
   const [folderColor, setFolderColor] = useState('slate')
 
-  const targets = useMemo(() => {
-    const systemDefaultSkill = skills.find((item) => item.name === 'general_chat')
-    const defaultTargetType = systemDefaultSkill?.targetType ?? null
-    const defaultTargetId = defaultTargetType === 'workflow'
-      ? (systemDefaultSkill?.workflowId ?? null)
-      : (systemDefaultSkill?.agentProfileId ?? null)
-    return buildAssistantExecutableTargets(
-      workflows,
-      agents,
-      {
-        defaultTargetType,
-        defaultTargetId,
-      },
-    )
-  }, [agents, skills, workflows])
+  // Infer system default via general_chat__* target names — legacy skills GET is gone.
+  const targets = useMemo(
+    () => buildAssistantExecutableTargets(workflows, agents),
+    [agents, workflows],
+  )
 
   const workflowById = useMemo(
     () => new Map(workflows.map((item) => [item.id, item])),

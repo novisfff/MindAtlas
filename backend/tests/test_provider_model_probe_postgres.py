@@ -180,7 +180,7 @@ def _reset_to_plan01_parent() -> None:
 
     Must use a real Alembic downgrade (or fresh upgrade from parent), never
     ``stamp`` while leaving child schema columns in place — that makes the next
-    ``upgrade head`` try to ADD COLUMN current_capability_probe_id again.
+    ``upgrade`` try to ADD COLUMN current_capability_probe_id again.
     """
     _configure_database_env(_POSTGRES_URL)
     engine = create_engine(_as_sqlalchemy_url(_POSTGRES_URL), future=True)
@@ -359,7 +359,7 @@ def test_upgrade_preserves_plan01_revisions_and_null_pointer() -> None:
             ).scalar()
             assert int(rev) == 1
 
-    _run_alembic("upgrade", "head")
+    _run_alembic("upgrade", PLAN09_HEAD)
     with _engine() as engine:
         assert _current_revision(engine) in {
             PLAN03_PROBE_REVISION,
@@ -396,7 +396,7 @@ def test_upgrade_preserves_plan01_revisions_and_null_pointer() -> None:
 
 def test_pointer_ownership_and_immutability_and_checks() -> None:
     _reset_to_plan01_parent()
-    _run_alembic("upgrade", "head")
+    _run_alembic("upgrade", PLAN09_HEAD)
     with _engine() as engine:
         with engine.begin() as conn:
             _, model_a = _insert_credential_model(conn, name="p3-a", model_name="ma")
@@ -558,7 +558,7 @@ def test_pointer_ownership_and_immutability_and_checks() -> None:
 
 def test_delete_current_probe_sets_null_and_model_delete_cascades() -> None:
     _reset_to_plan01_parent()
-    _run_alembic("upgrade", "head")
+    _run_alembic("upgrade", PLAN09_HEAD)
     with _engine() as engine:
         with engine.begin() as conn:
             _, model_id = _insert_credential_model(conn, name="p3-del", model_name="mdel")
@@ -594,7 +594,7 @@ def test_delete_current_probe_sets_null_and_model_delete_cascades() -> None:
 
 def test_downgrade_with_probe_rows_refuses_then_upgrade_cycle() -> None:
     _reset_to_plan01_parent()
-    _run_alembic("upgrade", "head")
+    _run_alembic("upgrade", PLAN09_HEAD)
     with _engine() as engine:
         with engine.begin() as conn:
             _, model_id = _insert_credential_model(conn, name="p3-down", model_name="mdown")
@@ -644,7 +644,7 @@ def test_downgrade_with_probe_rows_refuses_then_upgrade_cycle() -> None:
             assert "runtime_revision" in cols
             assert "current_capability_probe_id" not in cols
 
-    _run_alembic("upgrade", "head")
+    _run_alembic("upgrade", PLAN09_HEAD)
     with _engine() as engine:
         assert _current_revision(engine) in {
             PLAN03_PROBE_REVISION,

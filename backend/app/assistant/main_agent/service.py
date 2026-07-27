@@ -85,9 +85,11 @@ from app.assistant.skills.schemas import (
     MainAgentProfileSnapshotV1,
     ModelRequirementsV1,
 )
-from app.config import AssistantMainAgentMode, get_settings
+from app.config import get_settings
 
 logger = logging.getLogger(__name__)
+
+MainAgentAdmissionMode = Literal["off", "shadow", "read_only"]
 
 RuntimeKind = Literal["legacy", "main_agent"]
 ExecutionKind = Literal["production", "evaluation"]
@@ -355,7 +357,7 @@ class AssistantRuntimeRunner(Protocol):
 
 @dataclass(frozen=True)
 class AdmissionContext:
-    mode: AssistantMainAgentMode
+    mode: MainAgentAdmissionMode
     execution_kind: ExecutionKind
     profile: AssistantMainAgentProfile
     profile_version: AssistantMainAgentProfileVersion
@@ -408,7 +410,7 @@ def compute_main_agent_effective_policy_digest(
 
 def select_runtime_for_mode(
     *,
-    mode: AssistantMainAgentMode | str,
+    mode: MainAgentAdmissionMode | str,
     execution_kind: ExecutionKind = "production",
 ) -> tuple[RuntimeKind | None, str | None]:
     """Return (runtime_to_try, reason) without constructing services.
@@ -432,7 +434,7 @@ def select_runtime_for_mode(
 
 def should_construct_main_agent(
     *,
-    mode: AssistantMainAgentMode | str,
+    mode: MainAgentAdmissionMode | str,
     execution_kind: ExecutionKind = "production",
 ) -> bool:
     runtime, _ = select_runtime_for_mode(mode=mode, execution_kind=execution_kind)
@@ -636,7 +638,7 @@ def resolve_assistant_model_identity(
 def admit_main_agent(
     db: Session,
     *,
-    mode: AssistantMainAgentMode | str,
+    mode: MainAgentAdmissionMode | str,
     execution_kind: ExecutionKind = "production",
     app_build_revision: str | None = None,
 ) -> AdmissionContext:
@@ -875,7 +877,7 @@ class MainAgentService:
     def admit(
         self,
         *,
-        mode: AssistantMainAgentMode | str,
+        mode: MainAgentAdmissionMode | str,
         execution_kind: ExecutionKind = "production",
     ) -> AdmissionContext:
         if self._admission is not None and self._allow_injected_provider:
@@ -890,10 +892,11 @@ class MainAgentService:
 
     def run(self, request: AssistantRuntimeRequest) -> AssistantRuntimeResult:
         events = self._event_adapter or MainAgentEventAdapter(lambda *_a, **_k: None)
-        mode = self._settings.assistant_main_agent_mode
         if self._admission is None:
             try:
-                self.admit(mode=mode, execution_kind=request.execution_kind)
+                # A durable Main Agent Run has already frozen runtime selection.
+                # Re-admission validates its dependencies; it never re-routes from env.
+                self.admit(mode="read_only", execution_kind=request.execution_kind)
             except MainAgentAdmissionError as exc:
                 return self._admission_failure_result(
                     request=request,

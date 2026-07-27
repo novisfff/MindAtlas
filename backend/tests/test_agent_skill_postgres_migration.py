@@ -25,8 +25,9 @@ reset_caches()
 
 PRE_PLAN01_HEAD = "a7b8c9d0e1f2"
 PLAN01_REVISION = "acf208493c87"
-# CI upgrades to true Alembic head (may be Plan 03+). Plan 01 preservation
-# checks still apply as long as Plan 01 revision is an ancestor of head.
+PLAN09_HEAD = "027869a00a47"
+# This historical suite stops at Plan 09 because Plan 10 intentionally removes
+# the legacy runtime tables whose Plan 01 preservation semantics it verifies.
 DOWNGRADE_BLOCKED_TOKEN = "MINDATLAS_PLAN01_DOWNGRADE_BLOCKED_NATIVE_DATA"
 
 
@@ -135,13 +136,13 @@ def _engine() -> Engine:
 def _reset_to_head() -> None:
     """Bring disposable DB to Plan 01 head, discarding derived v2 rows if needed."""
     _configure_database_env(_POSTGRES_URL)
-    # Prefer upgrade path; if already past/at head this is a no-op.
+    # Prefer the last revision that still contains the legacy runtime.
     try:
-        _run_alembic("upgrade", "head")
+        _run_alembic("upgrade", PLAN09_HEAD)
     except Exception:
-        # If head is blocked somehow, stamp parent then upgrade.
+        # If the historical head is blocked somehow, stamp parent then upgrade.
         _run_alembic("stamp", PRE_PLAN01_HEAD)
-        _run_alembic("upgrade", "head")
+        _run_alembic("upgrade", PLAN09_HEAD)
 
 
 def _current_revision(engine: Engine) -> str | None:
@@ -439,7 +440,7 @@ def test_legacy_rows_survive_parent_to_head_upgrade() -> None:
                 {"id": tool_id, "name": tool_name},
             )
 
-    _run_alembic("upgrade", "head")
+    _run_alembic("upgrade", PLAN09_HEAD)
 
     with _engine() as engine:
         _assert_at_or_after_plan01(_current_revision(engine))
@@ -1099,7 +1100,7 @@ def test_downgrade_succeeds_for_derived_shadow_only(engine: Engine) -> None:
     _run_alembic("downgrade", PRE_PLAN01_HEAD)
     with _engine() as eng:
         assert _current_revision(eng) == PRE_PLAN01_HEAD
-    _run_alembic("upgrade", "head")
+    _run_alembic("upgrade", PLAN09_HEAD)
     with _engine() as eng:
         _assert_at_or_after_plan01(_current_revision(eng))
 
@@ -1203,4 +1204,3 @@ def test_two_session_sequence_conflict(engine: Engine) -> None:
             {"pkg": package_id},
         ).scalar_one()
     assert int(count) == 1
-

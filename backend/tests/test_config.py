@@ -1,4 +1,4 @@
-"""Settings validation for Plan 04 main-agent feature mode and hard ceilings."""
+"""Settings validation for native runtime rollout config and hard ceilings."""
 
 from __future__ import annotations
 
@@ -41,7 +41,8 @@ def _settings(**overrides):
 
 def test_main_agent_defaults_are_production_safe() -> None:
     s = _settings()
-    assert s.assistant_main_agent_mode == "off"
+    assert s.assistant_runtime_mode == "legacy"
+    assert s.assistant_runtime_rollout_revision == ""
     assert s.assistant_main_agent_catalog_top_k == 8
     assert s.assistant_main_agent_max_active_skills == 4
     assert s.assistant_main_agent_resource_chunk_bytes == 16384
@@ -89,18 +90,12 @@ def test_golden_write_requires_usable_reconciliation_operator_path() -> None:
     assert settings.assistant_capability_reconciliation_enabled is True
 
 
-@pytest.mark.parametrize("mode", ["off", "shadow", "read_only"])
-def test_main_agent_mode_accepts_literal_values(mode: str) -> None:
-    s = _settings(ASSISTANT_MAIN_AGENT_MODE=mode)
-    assert s.assistant_main_agent_mode == mode
-
-
-@pytest.mark.parametrize("mode", ["write", "on", "READ_ONLY", "", "legacy", "true"])
-def test_main_agent_mode_rejects_invalid(mode: str) -> None:
+@pytest.mark.parametrize("mode", ["off", "shadow", "read_only", "legacy", ""])
+def test_removed_main_agent_mode_is_always_rejected(mode: str) -> None:
     with pytest.raises(ValidationError) as exc_info:
         _settings(ASSISTANT_MAIN_AGENT_MODE=mode)
     text = str(exc_info.value)
-    assert "assistant_main_agent_mode" in text.lower() or "ASSISTANT_MAIN_AGENT_MODE" in text
+    assert "ASSISTANT_MAIN_AGENT_MODE has been removed" in text
     assert "sk-" not in text
     assert "FERNET" not in text
 

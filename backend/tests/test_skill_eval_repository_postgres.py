@@ -32,6 +32,8 @@ bootstrap_backend_imports()
 reset_caches()
 
 PARENT_REVISION = "403414a62e55"
+CURRENT_HEAD = "3bd7bc4257c9"
+COMPATIBILITY_HEAD = "6417df0243be"
 DOWNGRADE_BLOCKED_TOKEN = "MINDATLAS_PLAN09_EVAL_DOWNGRADE_BLOCKED"
 
 _POSTGRES_URL = os.environ.get("MINDATLAS_TEST_POSTGRES_URL", "").strip()
@@ -249,8 +251,9 @@ def _reset_to_parent(engine: Engine) -> str:
             try:
                 _run_alembic("downgrade", PARENT_REVISION)
             except Exception:
-                # Last resort: upgrade to head then prepare+downgrade again.
-                _run_alembic("upgrade", "head")
+                # Last resort: upgrade to the Plan 09 eval revision, then
+                # prepare and downgrade again.
+                _run_alembic("upgrade", COMPATIBILITY_HEAD)
                 with engine.begin() as conn:
                     _prepare_plan09_downgrade(conn)
                 _run_alembic("downgrade", PARENT_REVISION)
@@ -288,11 +291,10 @@ def test_sole_alembic_head_is_task3() -> None:
     heads = script.get_heads()
     assert len(heads) == 1, heads
     task3 = _task3_revision()
-    # Sole head is the evaluation workbench itself after residual alias
-    # soft-disable was folded into 09A lifecycle.
+    # The evaluation workbench remains reachable in the sole Plan 10 chain.
     head = heads[0]
-    assert head == task3
-    head_rev = script.get_revision(head)
+    assert head == CURRENT_HEAD
+    head_rev = script.get_revision(task3)
     assert head_rev is not None
     assert head_rev.down_revision == PARENT_REVISION
 
@@ -304,7 +306,7 @@ def test_migration_cycle_parent_task3_parent_task3() -> None:
             for name in EVAL_TABLES:
                 assert not _table_exists(conn, name), name
 
-        _run_alembic("upgrade", task3)
+        _run_alembic("upgrade", COMPATIBILITY_HEAD)
         with engine.connect() as conn:
             for name in EVAL_TABLES:
                 assert _table_exists(conn, name), name
@@ -379,7 +381,7 @@ def test_migration_cycle_parent_task3_parent_task3() -> None:
                 assert not _table_exists(conn, name), name
 
         # Re-upgrade and re-import fixtures.
-        _run_alembic("upgrade", task3)
+        _run_alembic("upgrade", COMPATIBILITY_HEAD)
         with _session(engine) as session:
             from app.assistant.evaluation.datasets import import_plan04_dataset
 
@@ -401,7 +403,7 @@ def test_immutable_triggers_and_uniqueness() -> None:
         # Fresh parent → head so in-place migration edits (e.g. unique gate-use)
         # are actually applied, not skipped by a stale alembic_version stamp.
         _reset_to_parent(engine)
-        _run_alembic("upgrade", "head")
+        _run_alembic("upgrade", COMPATIBILITY_HEAD)
         ids: dict[str, uuid.UUID] = {}
         with _session(engine) as session:
             from app.assistant.evaluation.repository import EvaluationRepository
@@ -645,7 +647,7 @@ def test_immutable_triggers_and_uniqueness() -> None:
 def test_owner_kind_check_constraint() -> None:
     with _engine() as engine:
         task3 = _task3_revision()
-        _run_alembic("upgrade", task3)
+        _run_alembic("upgrade", COMPATIBILITY_HEAD)
         with _session(engine) as session:
             with pytest.raises((DBAPIError, IntegrityError)):
                 session.execute(
@@ -682,7 +684,7 @@ def test_evidence_provenance_constraints() -> None:
     """Task 5: provenance enum, fixture shape, synthetic gate ineligible."""
     with _engine() as engine:
         task3 = _task3_revision()
-        _run_alembic("upgrade", task3)
+        _run_alembic("upgrade", COMPATIBILITY_HEAD)
         with _session(engine) as session:
             # Invalid provenance rejected.
             with pytest.raises((DBAPIError, IntegrityError)):

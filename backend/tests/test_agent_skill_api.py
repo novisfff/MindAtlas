@@ -179,30 +179,16 @@ class AgentSkillApiTests(unittest.TestCase):
 
         # No duplicated prefix registration.
         self.assertNotIn("/api/assistant-config/skill-packages/skill-packages", paths)
-        # Legacy skills surface remains present.
-        self.assertIn("/api/assistant-config/skills", paths)
+        # Legacy skills admin surface is fully removed.
+        self.assertNotIn("/api/assistant-config/skills", paths)
 
-    def test_legacy_skills_openapi_snapshot_unchanged_shape(self) -> None:
-        """Snapshot pre-existing legacy skills routes for regression safety."""
+    def test_legacy_skills_admin_is_gone(self) -> None:
+        """Legacy skills admin routes are absent from OpenAPI and return 404."""
         schema = self.client.get("/openapi.json").json()
-        legacy = schema["paths"]["/api/assistant-config/skills"]
-        self.assertIn("get", legacy)
-        self.assertIn("post", legacy)
-        # Response still uses shared ApiResponse envelope (no v2 fields required).
-        get_resp = legacy["get"]["responses"]["200"]
-        self.assertTrue(get_resp)
+        self.assertNotIn("/api/assistant-config/skills", schema["paths"])
 
-        # Live list still succeeds with the historical envelope.
         resp = self.client.get("/api/assistant-config/skills")
-        self.assertEqual(resp.status_code, 200)
-        payload = resp.json()
-        self.assertIn("success", payload)
-        self.assertIn("code", payload)
-        self.assertIn("message", payload)
-        self.assertIn("data", payload)
-        self.assertTrue(payload["success"])
-        self.assertEqual(payload["code"], 0)
-        self.assertIsInstance(payload["data"], list)
+        self.assertEqual(resp.status_code, 404)
 
     # ------------------------------------------------------------------
     # Create / get / list

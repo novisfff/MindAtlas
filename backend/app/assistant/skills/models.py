@@ -71,15 +71,7 @@ class AssistantSkillPackage(UuidPrimaryKeyMixin, TimestampMixin, Base):
         nullable=True,
         index=True,
     )
-    legacy_skill_id = Column(
-        UUID(as_uuid=True),
-        ForeignKey("assistant_skill.id", ondelete="SET NULL"),
-        nullable=True,
-        unique=True,
-        index=True,
-    )
     migration_state = Column(String(32), nullable=False)
-    legacy_source_digest = Column(String(64), nullable=True)
     catalog_enabled = Column(Boolean, nullable=False, default=False, server_default=text("false"))
     is_system = Column(Boolean, nullable=False, default=False, server_default=text("false"))
     # Plan 09 aggregate lifecycle (revision CAS + archive/catalog evidence).
@@ -130,10 +122,6 @@ class AssistantSkillPackage(UuidPrimaryKeyMixin, TimestampMixin, Base):
         ),
         # Plan 04 dropped ck_assistant_skill_package_catalog_disabled so aggregates
         # may be enabled later; default remains false (NOT NULL + server_default).
-        _nullable_sha256_check(
-            "legacy_source_digest",
-            name="ck_assistant_skill_package_legacy_source_digest",
-        ),
         CheckConstraint(
             "aggregate_revision >= 0",
             name="ck_assistant_skill_package_aggregate_revision",
@@ -729,14 +717,6 @@ class AssistantMainAgentProfile(UuidPrimaryKeyMixin, TimestampMixin, Base):
         index=True,
     )
     migration_state = Column(String(32), nullable=False)
-    legacy_skill_id = Column(
-        UUID(as_uuid=True),
-        ForeignKey("assistant_skill.id", ondelete="SET NULL"),
-        nullable=True,
-        unique=True,
-        index=True,
-    )
-    legacy_source_digest = Column(String(64), nullable=True)
     runtime_enabled = Column(Boolean, nullable=False, default=False, server_default=text("false"))
     # Plan 09 aggregate CAS + durable last-mutation idempotency (mirrors packages).
     aggregate_revision = Column(
@@ -770,10 +750,6 @@ class AssistantMainAgentProfile(UuidPrimaryKeyMixin, TimestampMixin, Base):
         ),
         # Plan 04 dropped ck_assistant_main_agent_profile_runtime_disabled so
         # profiles may be enabled later; default remains false.
-        _nullable_sha256_check(
-            "legacy_source_digest",
-            name="ck_assistant_main_agent_profile_legacy_source_digest",
-        ),
         CheckConstraint(
             "aggregate_revision >= 0",
             name="ck_assistant_main_agent_profile_aggregate_revision",

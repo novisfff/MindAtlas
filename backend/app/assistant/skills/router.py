@@ -1,7 +1,7 @@
 """HTTP surface for Agent Skill packages and Main Agent profiles (Plan 01 Task 9).
 
 Two child routers own their full prefixes; ``app.main`` registers them without an
-extra prefix. Legacy ``/api/assistant-config/skills`` is intentionally untouched.
+extra prefix. Legacy ``/api/assistant-config/skills`` admin routes were removed.
 """
 
 from __future__ import annotations

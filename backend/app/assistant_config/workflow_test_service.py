@@ -388,23 +388,16 @@ class WorkflowTestRunService:
         )
 
     def prepare(self, skill_id: UUID, request: WorkflowTestRunRequest) -> PreparedWorkflowTestRun:
-        """Compatibility route: prepare test-run by skill id."""
-        skill = self.config_service.get_skill(skill_id)
-        if skill.workflow_id is None:
-            raise ApiException(
-                status_code=409,
-                code=42231,
-                message=f"Skill '{skill.name}' is bound to an agent, not a workflow",
-            )
-        kb_cfg_raw = getattr(skill, "kb_config", None)
-        kb_enabled = bool(kb_cfg_raw.get("enabled", False)) if isinstance(kb_cfg_raw, dict) else False
-        return self._prepare_internal(
-            scope_skill_id=skill.id,
-            scope_workflow_id=skill.workflow_id,
-            display_name=skill.name,
-            description=skill.description or "",
-            kb_enabled=kb_enabled,
-            request=request,
+        """Compatibility route removed with assistant_skill (Plan 10 B2)."""
+        _ = (skill_id, request)
+        raise ApiException(
+            status_code=410,
+            code=41010,
+            message=(
+                "Legacy skill-scoped workflow test-run is gone. "
+                "Use standalone workflow test-run APIs."
+            ),
+            details={"legacySkillAdmin": True, "replacement": "workflow_test_run"},
         )
 
     def prepare_for_workflow(self, workflow_id: UUID, request: WorkflowTestRunRequest) -> PreparedWorkflowTestRun:

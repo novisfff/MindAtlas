@@ -29,9 +29,10 @@ ASSISTANT_ARTIFACT_RUN_MAX_BYTES_HARD_MAX = 104857600  # 100 MiB
 ASSISTANT_INTERRUPT_MAX_TTL_SEC_HARD_MAX = 604800  # 7 days
 ASSISTANT_INTERRUPT_COMMENT_MAX_CHARS_HARD_MAX = 4000
 
-AssistantMainAgentMode = Literal["off", "shadow", "read_only"]
 AssistantCapabilityLedgerMode = Literal["legacy_read_only", "enforced"]
 AssistantMainAgentWriteMode = Literal["off", "golden"]
+# Plan 10 native runtime selection config.
+AssistantRuntimeMode = Literal["legacy", "main_agent"]
 
 
 def compute_artifact_orphan_grace_floor_sec(
@@ -85,11 +86,24 @@ class Settings(BaseSettings):
         alias="AI_MODEL_CAPABILITY_PROBE_ENABLED",
     )
 
-    # Plan 04 main agent feature mode + bounded resource ceilings (production default off).
-    assistant_main_agent_mode: AssistantMainAgentMode = Field(
-        default="off",
-        alias="ASSISTANT_MAIN_AGENT_MODE",
+    # Plan 10 runtime mode (default legacy) and durable rollout revision label.
+    assistant_runtime_mode: AssistantRuntimeMode = Field(
+        default="legacy",
+        alias="ASSISTANT_RUNTIME_MODE",
     )
+    # Optional active durable rollout revision label (empty = none/default legacy).
+    assistant_runtime_rollout_revision: str = Field(
+        default="",
+        alias="ASSISTANT_RUNTIME_ROLLOUT_REVISION",
+    )
+    # Reject the removed Plan 04 switch if it remains in process env or dotenv.
+    removed_assistant_main_agent_mode: str | None = Field(
+        default=None,
+        alias="ASSISTANT_MAIN_AGENT_MODE",
+        exclude=True,
+        repr=False,
+    )
+    # Main Agent bounded resource ceilings.
     assistant_main_agent_catalog_top_k: int = Field(
         default=8,
         ge=1,
@@ -491,12 +505,15 @@ class Settings(BaseSettings):
         value = (v or "").strip().upper()
         return value or "INFO"
 
-    @field_validator("assistant_main_agent_mode", mode="before")
+    @field_validator("removed_assistant_main_agent_mode", mode="before")
     @classmethod
-    def normalize_main_agent_mode(cls, v: object) -> object:
-        if isinstance(v, str):
-            return v.strip()
-        return v
+    def reject_removed_main_agent_mode(cls, _v: object) -> object:
+        if _v is None:
+            return None
+        raise ValueError(
+            "ASSISTANT_MAIN_AGENT_MODE has been removed; use "
+            "ASSISTANT_RUNTIME_MODE and ASSISTANT_RUNTIME_ROLLOUT_REVISION"
+        )
 
     @model_validator(mode="after")
     def validate_main_agent_cross_field_bounds(self) -> Settings:

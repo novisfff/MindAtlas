@@ -33,6 +33,7 @@ bootstrap_backend_imports()
 reset_caches()
 
 PLAN09_HEAD = "027869a00a47"
+CURRENT_HEAD = "3bd7bc4257c9"
 TASK1_HEAD = "403414a62e55"
 PARENT_REVISION = "d7e8f9a0b1c3"
 
@@ -252,7 +253,7 @@ def test_sole_alembic_head_is_plan09_eval() -> None:
 
     script = ScriptDirectory.from_config(_alembic_config())
     heads = script.get_heads()
-    assert heads == [PLAN09_HEAD], f"expected sole head {PLAN09_HEAD}, got {heads}"
+    assert heads == [CURRENT_HEAD], f"expected sole head {CURRENT_HEAD}, got {heads}"
     head = script.get_revision(PLAN09_HEAD)
     assert head is not None
     assert head.down_revision == TASK1_HEAD

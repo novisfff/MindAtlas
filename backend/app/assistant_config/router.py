@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
+from app.common.exceptions import ApiException
 from app.assistant_config.schemas import (
     AgentPublishRequest,
     AgentVersionListResponse,
@@ -14,9 +15,6 @@ from app.assistant_config.schemas import (
     AssistantAgentProfileResponse,
     AssistantAgentProfileUpdateRequest,
     AssistantFolderMoveRequest,
-    AssistantSkillCreateRequest,
-    AssistantSkillResponse,
-    AssistantSkillUpdateRequest,
     AssistantTargetFolderCreateRequest,
     AssistantTargetFolderResponse,
     AssistantTargetFolderUpdateRequest,
@@ -54,7 +52,6 @@ from app.assistant_config.workflow_copilot_service import WorkflowCopilotService
 from app.assistant_config.service import AssistantConfigService
 from app.common.exceptions import ApiException
 from app.common.responses import ApiResponse
-from app.assistant.workflow.human_approval_runtime import submit_human_approval_decision
 from app.database import get_db
 
 router = APIRouter(prefix="/api/assistant-config", tags=["assistant-config"])
@@ -190,73 +187,6 @@ def move_target_folder(request: AssistantFolderMoveRequest, db: Session = Depend
     service = AssistantConfigService(db)
     service.move_target_folder(request)
     return ApiResponse.ok(None, "Folder moved")
-
-
-# ==================== Skills ====================
-
-@router.get("/skills", response_model=ApiResponse)
-def list_skills(
-    sync_system: bool = Query(False),
-    include_disabled: bool = Query(True),
-    db: Session = Depends(get_db),
-) -> ApiResponse:
-    service = AssistantConfigService(db)
-    skills = service.list_skills(sync_system=sync_system, include_disabled=include_disabled)
-    return ApiResponse.ok([
-        AssistantSkillResponse.model_validate(service.serialize_skill(s)).model_dump(by_alias=True)
-        for s in skills
-    ])
-
-
-@router.get("/skills/{id}", response_model=ApiResponse)
-def get_skill(id: UUID, db: Session = Depends(get_db)) -> ApiResponse:
-    service = AssistantConfigService(db)
-    skill = service.get_skill(id)
-    return ApiResponse.ok(
-        AssistantSkillResponse.model_validate(service.serialize_skill(skill)).model_dump(by_alias=True)
-    )
-
-
-@router.post("/skills", response_model=ApiResponse)
-def create_skill(request: AssistantSkillCreateRequest, db: Session = Depends(get_db)) -> ApiResponse:
-    service = AssistantConfigService(db)
-    skill = service.create_skill(request)
-    return ApiResponse.ok(
-        AssistantSkillResponse.model_validate(service.serialize_skill(skill)).model_dump(by_alias=True)
-    )
-
-
-@router.put("/skills/{id}", response_model=ApiResponse)
-def update_skill(id: UUID, request: AssistantSkillUpdateRequest, db: Session = Depends(get_db)) -> ApiResponse:
-    service = AssistantConfigService(db)
-    skill = service.update_skill(id, request)
-    return ApiResponse.ok(
-        AssistantSkillResponse.model_validate(service.serialize_skill(skill)).model_dump(by_alias=True)
-    )
-
-
-@router.post("/skills/{id}/reset", response_model=ApiResponse)
-def reset_skill(id: UUID, request: ResetSkillRequest, db: Session = Depends(get_db)) -> ApiResponse:
-    service = AssistantConfigService(db)
-    skill = service.reset_skill(id, confirm=request.confirm)
-    return ApiResponse.ok(
-        AssistantSkillResponse.model_validate(service.serialize_skill(skill)).model_dump(by_alias=True)
-    )
-
-
-@router.post("/skills/reset-all", response_model=ApiResponse)
-def reset_all_skills(request: ResetSkillRequest, db: Session = Depends(get_db)) -> ApiResponse:
-    """重置所有系统技能到默认配置，并清理已下线的系统技能"""
-    service = AssistantConfigService(db)
-    result = service.reset_all_system_skills(confirm=request.confirm)
-    return ApiResponse.ok(result)
-
-
-@router.delete("/skills/{id}", response_model=ApiResponse)
-def delete_skill(id: UUID, db: Session = Depends(get_db)) -> ApiResponse:
-    service = AssistantConfigService(db)
-    service.delete_skill(id)
-    return ApiResponse.ok(None, "Skill deleted")
 
 
 # ==================== System AI Behaviors ====================
@@ -702,70 +632,16 @@ def submit_run_approval_decision(
     request: HumanApprovalDecisionRequest,
     db: Session = Depends(get_db),
 ) -> ApiResponse:
-    try:
-        payload = submit_human_approval_decision(
-            db,
-            approval_id=approval_id,
-            decision=request.decision,
-            values=request.values,
-            comment=request.comment,
-            expected_run_id=run_id,
-        )
-    except ValueError as exc:
-        raise ApiException(
-            status_code=400,
-            code=42252,
-            message=str(exc),
-        ) from exc
-    return ApiResponse.ok(payload)
-
-
-# ==================== Compatibility Skill Workflow Routes ====================
-
-@router.put("/skills/{id}/workflow", response_model=ApiResponse)
-def update_workflow(
-    id: UUID,
-    request: WorkflowInput,
-    db: Session = Depends(get_db),
-) -> ApiResponse:
-    """仅更新 Skill 的工作流 DAG（nodes + edges + viewport）"""
-    service = AssistantConfigService(db)
-    skill = service.update_workflow(id, request)
-    return ApiResponse.ok(
-        AssistantSkillResponse.model_validate(service.serialize_skill(skill)).model_dump(by_alias=True)
-    )
-
-
-@router.post("/skills/{id}/validate-workflow", response_model=ApiResponse)
-def validate_workflow(
-    id: UUID,
-    request: WorkflowInput,
-    db: Session = Depends(get_db),
-) -> ApiResponse:
-    """兼容路由：按 skill 绑定的 workflow 做验证。"""
-    service = AssistantConfigService(db)
-    workflow = service.get_skill_workflow(id)
-    resp = _validate_workflow_payload(db, request, workflow=workflow)
-    return ApiResponse.ok(resp.model_dump(by_alias=True))
-
-
-@router.post("/skills/{id}/workflow/test-run")
-def test_run_workflow(
-    id: UUID,
-    request: WorkflowTestRunRequest,
-    db: Session = Depends(get_db),
-) -> StreamingResponse:
-    """在编辑器草稿上执行工作流测试运行（不持久化）。"""
-    service = WorkflowTestRunService(db)
-    prepared = service.prepare(id, request)
-    return StreamingResponse(
-        service.stream(prepared),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
+    """Legacy blocking approval API removed (Plan 10 B2)."""
+    _ = (run_id, approval_id, request, db)
+    raise ApiException(
+        status_code=410,
+        code=41011,
+        message=(
+            "Legacy blocking HumanLoop / assistant_human_approval is removed. "
+            "Use durable Main Agent interrupts."
+        ),
+        details={"legacyHitlRemoved": True, "replacement": "durable_interrupt"},
     )
 
 

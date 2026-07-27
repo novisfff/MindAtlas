@@ -1,37 +1,31 @@
 import { memo, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { ArrowRight, Workflow } from 'lucide-react'
-import type { AssistantSkill } from '../../api/skills'
 import type { AssistantWorkflow } from '../../api/workflows'
-import { deserializeFromSkill, deserializeFromWorkflow } from './serialization'
+import { deserializeFromWorkflow } from './serialization'
 import { WorkflowReadonlyCanvas } from './WorkflowReadonlyCanvas'
 
 type WorkflowReadonlyPreviewProps = {
-  skill?: AssistantSkill
   workflow?: AssistantWorkflow
   onOpenEditor: () => void
 }
 
-function WorkflowReadonlyPreviewInner({ skill, workflow, onOpenEditor }: WorkflowReadonlyPreviewProps) {
+function WorkflowReadonlyPreviewInner({ workflow, onOpenEditor }: WorkflowReadonlyPreviewProps) {
   const { t } = useTranslation()
   const previewSourceKey = workflow
     ? `workflow:${workflow.id}:${workflow.updatedAt}:${workflow.workflowVersion}`
-    : skill
-      ? `skill:${skill.id}:${skill.updatedAt}:${skill.workflowVersion ?? 'na'}`
-      : 'workflow-preview:empty'
+    : 'workflow-preview:empty'
 
   const { nodes, edges } = useMemo(() => {
-    if (!skill && !workflow) {
+    if (!workflow) {
       return { nodes: [], edges: [] }
     }
     try {
-      return workflow
-        ? deserializeFromWorkflow(workflow)
-        : deserializeFromSkill(skill as AssistantSkill)
+      return deserializeFromWorkflow(workflow)
     } catch {
       return { nodes: [], edges: [] }
     }
-  }, [skill, workflow])
+  }, [workflow])
 
   const isEmpty = nodes.length === 0
 

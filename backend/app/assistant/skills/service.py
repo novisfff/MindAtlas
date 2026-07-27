@@ -1176,8 +1176,6 @@ class AgentSkillService:
                 )
                 for a in aliases
             ],
-            legacy_skill_id=package.legacy_skill_id,
-            legacy_source_digest=package.legacy_source_digest,
         )
 
     def list_versions(self, package_id: UUID) -> list[SkillVersionSummary]:
@@ -1909,8 +1907,7 @@ class AgentSkillService:
                 message="skill alias namespace conflict",
             )
         if "assistant_skill_package" in msg and "unique" in msg:
-            # Non-canonical package uniqueness (e.g. legacy_skill_id) — not 40990.
-            return ApiException(
+                        return ApiException(
                 status_code=409,
                 code=40993,
                 message="skill package uniqueness conflict",
@@ -2758,8 +2755,6 @@ class MainAgentProfileService:
             aggregate_revision=int(getattr(profile, "aggregate_revision", 0) or 0),
             draft_version=draft,
             published_version=published,
-            legacy_skill_id=profile.legacy_skill_id,
-            legacy_source_digest=profile.legacy_source_digest,
             created_at=profile.created_at,
             updated_at=profile.updated_at,
         )

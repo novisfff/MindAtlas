@@ -1,0 +1,219 @@
+{
+  "environment": "test-fixture",
+  "database_fingerprint": "fixture-db-fp",
+  "schema_head": "027869a00a47",
+  "build_revision": "development",
+  "skills": [
+    {
+      "id": "11111111-1111-4111-8111-111111111111",
+      "name": "general_chat",
+      "enabled": true,
+      "is_system": true,
+      "workflow_id": null,
+      "agent_profile_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "system_prompt": "SYSTEM PROMPT SECRET do not leak",
+      "description": "default conversation skill"
+    },
+    {
+      "id": "22222222-2222-4222-8222-222222222222",
+      "name": "quick_stats",
+      "enabled": true,
+      "is_system": true,
+      "workflow_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      "agent_profile_id": null,
+      "system_prompt": null,
+      "description": "read-only stats"
+    },
+    {
+      "id": "33333333-3333-4333-8333-333333333333",
+      "name": "smart_capture",
+      "enabled": true,
+      "is_system": true,
+      "workflow_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      "agent_profile_id": null,
+      "system_prompt": null,
+      "description": "capture with write branches"
+    },
+    {
+      "id": "44444444-4444-4444-8444-444444444444",
+      "name": "periodic_review",
+      "enabled": true,
+      "is_system": true,
+      "workflow_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "agent_profile_id": null,
+      "system_prompt": null,
+      "description": "periodic review reports"
+    },
+    {
+      "id": "55555555-5555-4555-8555-555555555555",
+      "name": "custom_note_taker",
+      "enabled": true,
+      "is_system": false,
+      "workflow_id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "agent_profile_id": null,
+      "system_prompt": "custom prompt body",
+      "description": "user custom skill"
+    },
+    {
+      "id": "66666666-6666-4666-8666-666666666666",
+      "name": "retired_experiment",
+      "enabled": false,
+      "is_system": false,
+      "workflow_id": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+      "agent_profile_id": null,
+      "system_prompt": null,
+      "description": "disabled historical skill"
+    },
+    {
+      "id": "77777777-7777-4777-8777-777777777777",
+      "name": "brand_new_unknown_skill",
+      "enabled": true,
+      "is_system": false,
+      "unknown": true,
+      "workflow_id": "99999999-9999-4999-8999-999999999999",
+      "agent_profile_id": null,
+      "system_prompt": "unknown source prompt",
+      "description": "not in known migration map"
+    }
+  ],
+  "aliases": [
+    {
+      "id": "a1111111-1111-4111-8111-111111111111",
+      "package_id": "p1111111-1111-4111-8111-111111111111",
+      "alias": "quick-stats",
+      "alias_type": "legacy",
+      "canonical_name": "quick-stats"
+    },
+    {
+      "id": "a2222222-2222-4222-8222-222222222222",
+      "package_id": "p2222222-2222-4222-8222-222222222222",
+      "alias": "smart_capture",
+      "alias_type": "legacy",
+      "canonical_name": "smart-capture"
+    }
+  ],
+  "packages": [
+    {
+      "id": "p1111111-1111-4111-8111-111111111111",
+      "canonical_name": "quick-stats",
+      "published_version_id": "v1111111-1111-4111-8111-111111111111",
+      "catalog_enabled": false,
+      "migration_state": "shadow",
+      "is_system": true,
+      "legacy_skill_id": "22222222-2222-4222-8222-222222222222"
+    },
+    {
+      "id": "p2222222-2222-4222-8222-222222222222",
+      "canonical_name": "smart-capture",
+      "published_version_id": null,
+      "catalog_enabled": false,
+      "migration_state": "shadow",
+      "is_system": true,
+      "legacy_skill_id": "33333333-3333-4333-8333-333333333333"
+    }
+  ],
+  "profiles": [
+    {
+      "id": "mp111111-1111-4111-8111-111111111111",
+      "profile_key": "default",
+      "published_version_id": "mpv11111-1111-4111-8111-111111111111",
+      "runtime_enabled": false
+    }
+  ],
+  "l2_rows": [
+    {
+      "id": "l2111111-1111-4111-8111-111111111111",
+      "conversation_id": "c1111111-1111-4111-8111-111111111111",
+      "skill_name": "quick_stats",
+      "skill_package_id": null,
+      "memory_namespace": null,
+      "facts": ["user remembered their SSN 123-45-6789"]
+    },
+    {
+      "id": "l2222222-2222-4222-8222-222222222222",
+      "conversation_id": "c2222222-2222-4222-8222-222222222222",
+      "skill_name": "quick-stats",
+      "skill_package_id": "p1111111-1111-4111-8111-111111111111",
+      "memory_namespace": "default",
+      "facts": ["benign fact digest only"]
+    },
+    {
+      "id": "l2333333-3333-4333-8333-333333333333",
+      "conversation_id": "c3333333-3333-4333-8333-333333333333",
+      "skill_name": "smart-capture",
+      "skill_package_id": "p2222222-2222-4222-8222-222222222222",
+      "memory_namespace": "session-extra",
+      "facts": []
+    }
+  ],
+  "approvals": [
+    {
+      "id": "ap111111-1111-4111-8111-111111111111",
+      "run_id": "run-legacy-1",
+      "channel_type": "assistant_chat",
+      "status": "pending",
+      "skill_id": "33333333-3333-4333-8333-333333333333",
+      "node_id": "human_approve",
+      "request_payload": {"secret": "approve_payload_secret"}
+    },
+    {
+      "id": "ap222222-2222-4222-8222-222222222222",
+      "run_id": "run-legacy-2",
+      "channel_type": "workflow_test",
+      "status": "approved",
+      "skill_id": "33333333-3333-4333-8333-333333333333",
+      "node_id": "human_approve",
+      "request_payload": {"secret": "approve_payload_secret"}
+    }
+  ],
+  "entrypoints": [
+    {
+      "id": "ep-assistant-chat",
+      "name": "assistant_chat",
+      "runtime": "legacy_supervisor",
+      "supports_hitl": true
+    },
+    {
+      "id": "ep-workflow-test",
+      "name": "workflow_test",
+      "runtime": "legacy_workflow",
+      "supports_hitl": true
+    },
+    {
+      "id": "ep-main-agent",
+      "name": "main_agent_chat",
+      "runtime": "main_agent",
+      "supports_hitl": true
+    }
+  ],
+  "write_branches": [
+    {
+      "id": "wb-create-entry",
+      "skill_name": "smart_capture",
+      "branch": "create_entry",
+      "supported": true,
+      "plan08_evidence": true
+    },
+    {
+      "id": "wb-update-entry",
+      "skill_name": "smart_capture",
+      "branch": "update_entry",
+      "supported": true,
+      "plan08_evidence": false
+    },
+    {
+      "id": "wb-merge-entry",
+      "skill_name": "smart_capture",
+      "branch": "merge_entry",
+      "supported": true,
+      "plan08_evidence": false
+    },
+    {
+      "id": "wb-relation",
+      "skill_name": "smart_capture",
+      "branch": "relation_followup",
+      "supported": true,
+      "plan08_evidence": false
+    }
+  ]
+}

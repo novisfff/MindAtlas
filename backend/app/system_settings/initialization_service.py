@@ -494,7 +494,8 @@ class SystemInitializationService:
             self._align_relation_types(locale)
 
             assistant_config_service = AssistantConfigService(self.db)
-            assistant_config_service.reset_all_system_skills(confirm=True, commit=False)
+            # Plan 10: legacy skill rows are gone; re-seed workflows/agents via catalog sync.
+            assistant_config_service.ensure_system_catalog_synced()
             assistant_config_service.reset_all_system_behaviors(confirm=True, commit=False)
 
             runtime_service = SystemRuntimeConfigService(self.db)

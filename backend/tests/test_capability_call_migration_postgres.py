@@ -403,7 +403,7 @@ def test_stamped_plan08_database_upgrades_to_executable_attempt_lifecycle() -> N
         assert "MINDATLAS_PLAN08_ATTEMPT_APPEND_ONLY" in _error_text(exc_info.value)
         session.rollback()
 
-    command.upgrade(_alembic_config(), "head")
+    command.upgrade(_alembic_config(), PLAN09_HEAD)
 
     with _engine() as engine, _session(engine) as session:
         from app.assistant.capability_calls.repository import CapabilityCallRepository
@@ -437,7 +437,7 @@ def test_stamped_plan08_database_upgrades_to_executable_attempt_lifecycle() -> N
 def test_external_effect_boundary_survives_claim_and_dispatch_trigger() -> None:
     from alembic import command
 
-    command.upgrade(_alembic_config(), "head")
+    command.upgrade(_alembic_config(), PLAN09_HEAD)
     with _engine() as engine, _session(engine) as session:
         repo, attempt = _seed_claimed_attempt(
             session,
@@ -477,7 +477,7 @@ def test_attempt_lifecycle_downgrade_restores_unconditional_rejection() -> None:
             )
         assert "MINDATLAS_PLAN08_ATTEMPT_APPEND_ONLY" in _error_text(exc_info.value)
         session.rollback()
-    command.upgrade(_alembic_config(), "head")
+    command.upgrade(_alembic_config(), PLAN09_HEAD)
 
 
 def test_attempt_trigger_rejects_delete() -> None:

@@ -92,7 +92,6 @@ export interface SkillPackageSummary {
 export interface SkillPackageDetail extends SkillPackageSummary {
   aliases: SkillPackageAliasSummary[]
   legacySkillId?: string | null
-  legacySourceDigest?: string | null
 }
 
 export interface PageResult<T> {

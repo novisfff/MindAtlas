@@ -32,6 +32,7 @@ PLAN08_HEAD = "d7e8f9a0b1c3"
 PLAN09_LIFECYCLE_REVISION = "403414a62e55"
 PLAN09_EVAL_REVISION = "027869a00a47"
 PLAN09_HEAD = "027869a00a47"
+CURRENT_HEAD = "3bd7bc4257c9"
 DOWNGRADE_BLOCKED_TOKEN = "MINDATLAS_PLAN04_DOWNGRADE_BLOCKED_ENABLED_AGGREGATES"
 
 CATALOG_CHECK = "ck_assistant_skill_package_catalog_disabled"
@@ -394,13 +395,13 @@ def test_upgrade_drops_only_disabled_checks_and_preserves_defaults() -> None:
                         {"id": pkg_id},
                     )
 
-    _run_alembic("upgrade", "head")
+    _run_alembic("upgrade", PLAN09_HEAD)
     with _engine() as engine:
         assert _current_revision(engine) == PLAN09_HEAD
         from alembic.script import ScriptDirectory
 
         heads = ScriptDirectory.from_config(_alembic_config()).get_heads()
-        assert heads == [PLAN09_HEAD]
+        assert heads == [CURRENT_HEAD]
 
         with engine.begin() as conn:
             pkg_checks = _check_names(conn, "assistant_skill_package")
@@ -513,7 +514,7 @@ def test_data_preservation_across_upgrade() -> None:
                 {"id": profile_id},
             )
 
-    _run_alembic("upgrade", "head")
+    _run_alembic("upgrade", PLAN09_HEAD)
     with _engine() as engine:
         with engine.connect() as conn:
             pkg = conn.execute(
@@ -544,7 +545,7 @@ def test_data_preservation_across_upgrade() -> None:
 
 def test_downgrade_blocked_when_any_flag_true() -> None:
     _reset_to_plan03_parent()
-    _run_alembic("upgrade", "head")
+    _run_alembic("upgrade", PLAN09_HEAD)
 
     with _engine() as engine:
         with engine.begin() as conn:
@@ -616,7 +617,7 @@ def test_parent_head_parent_head_cycle_and_sole_head() -> None:
             pkg_id = _insert_package(conn, name=f"cycle-{uuid.uuid4().hex[:8]}")
             profile_id = _insert_profile(conn, key=f"cycle-{uuid.uuid4().hex[:8]}")
 
-    _run_alembic("upgrade", "head")
+    _run_alembic("upgrade", PLAN09_HEAD)
     with _engine() as engine:
         assert _current_revision(engine) == PLAN09_HEAD
         with engine.connect() as conn:
@@ -671,13 +672,13 @@ def test_parent_head_parent_head_cycle_and_sole_head() -> None:
                 == profile_id
             )
 
-    _run_alembic("upgrade", "head")
+    _run_alembic("upgrade", PLAN09_HEAD)
     with _engine() as engine:
         assert _current_revision(engine) == PLAN09_HEAD
         from alembic.script import ScriptDirectory
 
         heads = ScriptDirectory.from_config(_alembic_config()).get_heads()
-        assert heads == [PLAN09_HEAD]
+        assert heads == [CURRENT_HEAD]
         with engine.connect() as conn:
             assert CATALOG_CHECK not in _check_names(conn, "assistant_skill_package")
             assert RUNTIME_CHECK not in _check_names(

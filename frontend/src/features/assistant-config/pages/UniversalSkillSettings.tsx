@@ -100,11 +100,6 @@ export function UniversalSkillSettings() {
         <SettingsSection>
           <div role="alert" className="rounded-md border border-dashed p-6 text-sm text-muted-foreground">
             {t('settings.universalSkills.unavailableBody')}
-            <div className="mt-4">
-              <Button asChild variant="outline">
-                <Link to="/settings/assistant-skills">{t('settings.universalSkills.openLegacy')}</Link>
-              </Button>
-            </div>
           </div>
         </SettingsSection>
       </SettingsPageShell>
@@ -329,9 +324,6 @@ export function UniversalSkillSettings() {
           ))}
         </ul>
 
-        <p className="text-xs text-muted-foreground">
-          <Link to="/settings/assistant-skills" className="underline">{t('settings.universalSkills.openLegacy')}</Link>
-        </p>
       </SettingsSection>
     </SettingsPageShell>
   )

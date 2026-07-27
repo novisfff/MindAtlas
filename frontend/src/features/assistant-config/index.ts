@@ -1,5 +1,5 @@
 export * from './api/tools'
-export * from './api/skills'
+export type { SkillTargetType } from './components/skillTargetOptions'
 export * from './api/skill-packages'
 export {
   MAIN_AGENT_PROFILES_BASE,
@@ -21,9 +21,7 @@ export * from './api/agents'
 export * from './api/system-behaviors'
 export * from './queries'
 export { ToolManager } from './components/ToolManager'
-export { SkillManager } from './components/SkillManager'
 export { ToolSettings } from './pages/ToolSettings'
-export { SkillSettings } from './pages/SkillSettings'
 export { AssistantTargetsSettings } from './pages/AssistantTargetsSettings'
 export { SystemAiBehaviorsSettings } from './pages/SystemAiBehaviorsSettings'
 export { UniversalSkillSettings } from './pages/UniversalSkillSettings'

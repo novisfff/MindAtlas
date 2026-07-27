@@ -9,6 +9,7 @@ from tests._db import make_session
 bootstrap_backend_imports()
 
 
+@unittest.skip('assistant_human_approval table removed (Plan 10 B2)')
 class WorkflowHumanInLoopRuntimeTests(unittest.TestCase):
     def setUp(self) -> None:
         self.db = make_session()

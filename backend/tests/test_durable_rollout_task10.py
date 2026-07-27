@@ -131,12 +131,78 @@ class ModeTransitionRolloutTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.db.close()
 
+    def test_rollout_lookup_failure_does_not_fall_back_to_plan04(self) -> None:
+        from app.assistant.durable.admission import (
+            RuntimeAdmissionError,
+            admit_and_select_runtime,
+        )
+        from app.assistant.models import Conversation
+
+        conversation = Conversation(title="rollout-lookup-failure")
+        self.db.add(conversation)
+        self.db.commit()
+
+        with (
+            patch(
+                "app.assistant.migration.repository.RuntimeMigrationRepository."
+                "get_active_rollout_revision",
+                side_effect=RuntimeError("rollout database unavailable"),
+            ),
+            patch(
+                "app.assistant.durable.admission._admit_main_agent_candidate",
+                return_value=("main_agent", None, {"runtime_kind": "main_agent"}),
+            ) as legacy_fallback,
+        ):
+            with self.assertRaises(RuntimeAdmissionError) as ctx:
+                admit_and_select_runtime(
+                    self.db,
+                    conversation_id=conversation.id,
+                )
+
+        self.assertEqual(ctx.exception.reason_code, "rollout_infrastructure_unavailable")
+        legacy_fallback.assert_not_called()
+
+    def test_rollout_admission_failure_does_not_fall_back_to_candidate_path(self) -> None:
+        from app.assistant.durable.admission import (
+            RuntimeAdmissionError,
+            admit_and_select_runtime,
+        )
+        from app.assistant.models import Conversation
+
+        conversation = Conversation(title="rollout-admission-failure")
+        self.db.add(conversation)
+        self.db.commit()
+
+        with (
+            patch(
+                "app.assistant.migration.repository.RuntimeMigrationRepository."
+                "get_active_rollout_revision",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "app.assistant.migration.rollout.admit_with_rollout",
+                side_effect=RuntimeError("assignment insert failed"),
+            ),
+            patch(
+                "app.assistant.durable.admission._admit_main_agent_candidate",
+                return_value=("main_agent", None, {"runtime_kind": "main_agent"}),
+            ) as candidate_path,
+        ):
+            with self.assertRaises(RuntimeAdmissionError) as ctx:
+                admit_and_select_runtime(
+                    self.db,
+                    conversation_id=conversation.id,
+                )
+
+        self.assertEqual(ctx.exception.reason_code, "rollout_admission_failed")
+        candidate_path.assert_not_called()
+
     def test_mode_off_selects_legacy_only(self) -> None:
         from app.assistant.durable.admission import admit_and_select_runtime
 
         with patch("app.assistant.durable.admission.get_settings") as gs:
             settings = MagicMock()
-            settings.assistant_main_agent_mode = "off"
+            settings.assistant_runtime_mode = "legacy"
             settings.app_build_revision = BUILD_NEW
             settings.assistant_worker_registration_ttl_sec = 20
             gs.return_value = settings
@@ -169,7 +235,7 @@ class ModeTransitionRolloutTests(unittest.TestCase):
             ),
         ):
             settings = MagicMock()
-            settings.assistant_main_agent_mode = "read_only"
+            settings.assistant_runtime_mode = "main_agent"
             settings.app_build_revision = BUILD_NEW
             settings.assistant_worker_registration_ttl_sec = 60
             gs.return_value = settings
@@ -202,7 +268,7 @@ class ModeTransitionRolloutTests(unittest.TestCase):
 
         with patch("app.assistant.durable.admission.get_settings") as gs:
             settings = MagicMock()
-            settings.assistant_main_agent_mode = "off"
+            settings.assistant_runtime_mode = "legacy"
             settings.app_build_revision = BUILD_NEW
             settings.assistant_worker_registration_ttl_sec = 20
             gs.return_value = settings
@@ -248,7 +314,7 @@ class AdmissionNoCompatibleWorkerTests(unittest.TestCase):
             ),
         ):
             settings = MagicMock()
-            settings.assistant_main_agent_mode = "read_only"
+            settings.assistant_runtime_mode = "main_agent"
             settings.app_build_revision = BUILD_NEW
             settings.assistant_worker_registration_ttl_sec = 20
             gs.return_value = settings
@@ -290,7 +356,7 @@ class AdmissionNoCompatibleWorkerTests(unittest.TestCase):
             ),
         ):
             settings = MagicMock()
-            settings.assistant_main_agent_mode = "read_only"
+            settings.assistant_runtime_mode = "main_agent"
             settings.app_build_revision = BUILD_NEW
             settings.assistant_worker_registration_ttl_sec = 20
             gs.return_value = settings
@@ -317,7 +383,7 @@ class AdmissionNoCompatibleWorkerTests(unittest.TestCase):
             ),
         ):
             settings = MagicMock()
-            settings.assistant_main_agent_mode = "read_only"
+            settings.assistant_runtime_mode = "main_agent"
             settings.app_build_revision = BUILD_NEW
             settings.assistant_worker_registration_ttl_sec = 60
             gs.return_value = settings
@@ -349,7 +415,7 @@ class AdmissionNoCompatibleWorkerTests(unittest.TestCase):
             ),
         ):
             settings = MagicMock()
-            settings.assistant_main_agent_mode = "read_only"
+            settings.assistant_runtime_mode = "main_agent"
             settings.assistant_capability_ledger_mode = "enforced"
             settings.assistant_main_agent_write_mode = "off"
             settings.app_build_revision = BUILD_NEW
@@ -391,7 +457,7 @@ class AdmissionNoCompatibleWorkerTests(unittest.TestCase):
             ),
         ):
             settings = MagicMock()
-            settings.assistant_main_agent_mode = "read_only"
+            settings.assistant_runtime_mode = "main_agent"
             settings.assistant_capability_ledger_mode = "enforced"
             settings.assistant_main_agent_write_mode = "off"
             settings.app_build_revision = BUILD_NEW
@@ -428,7 +494,7 @@ class AdmissionNoCompatibleWorkerTests(unittest.TestCase):
             ),
         ):
             settings = MagicMock()
-            settings.assistant_main_agent_mode = "read_only"
+            settings.assistant_runtime_mode = "main_agent"
             settings.assistant_capability_ledger_mode = "legacy_read_only"
             settings.assistant_main_agent_write_mode = "golden"
             settings.app_build_revision = BUILD_NEW
@@ -591,7 +657,7 @@ class RollingDeployDrainTests(unittest.TestCase):
         # Rollback closes new durable admissions before any Run is inserted.
         with patch("app.assistant.durable.admission.get_settings") as gs:
             settings = MagicMock()
-            settings.assistant_main_agent_mode = "off"
+            settings.assistant_runtime_mode = "legacy"
             settings.assistant_capability_ledger_mode = "legacy_read_only"
             settings.assistant_main_agent_write_mode = "off"
             settings.app_build_revision = BUILD_NEW
@@ -663,12 +729,12 @@ class Plan07DurableInterruptCompatibilityTests(unittest.TestCase):
                 allowed_interrupt_modes=("none", "durable"),  # type: ignore[arg-type]
             )
 
-    def test_default_mode_remains_off(self) -> None:
+    def test_default_runtime_mode_remains_legacy(self) -> None:
         from app.config import get_settings
 
         reset_caches()
         settings = get_settings()
-        self.assertEqual(settings.assistant_main_agent_mode, "off")
+        self.assertEqual(settings.assistant_runtime_mode, "legacy")
 
 
 class ConfigAndArtifactPolicyEvidenceTests(unittest.TestCase):

@@ -708,68 +708,6 @@ class AgentPublishRequest(CamelModel):
     version_name: str | None = Field(default=None, max_length=255)
 
 
-class AssistantSkillCreateRequest(CamelModel):
-    name: str = Field(..., min_length=1, max_length=128)
-    description: str = Field(..., min_length=1, max_length=512)
-    intent_examples: list[str] = []
-    tools: list[str] = []
-    mode: SkillMode = "langgraph"
-    target_type: TargetType | None = None
-    workflow_id: UUID | None = None
-    agent_profile_id: UUID | None = None
-    langgraph_pattern: LanggraphPattern | None = None
-    system_prompt: str | None = Field(default=None, max_length=4096)
-    enabled: bool = True
-    kb_config: dict | None = None
-    workflow: WorkflowInput | None = None
-
-    @model_validator(mode="after")
-    def _validate(self) -> "AssistantSkillCreateRequest":
-        if self.mode != "langgraph":
-            raise ValueError("mode must be langgraph")
-        if self.workflow_id and self.agent_profile_id:
-            raise ValueError("workflow_id and agent_profile_id are mutually exclusive")
-        if self.target_type == "workflow" and self.agent_profile_id:
-            raise ValueError("target_type=workflow cannot set agent_profile_id")
-        if self.target_type == "agent" and self.workflow_id:
-            raise ValueError("target_type=agent cannot set workflow_id")
-        has_new_target = bool(self.target_type or self.workflow_id or self.agent_profile_id)
-        if not has_new_target and self.langgraph_pattern is None:
-            raise ValueError("target_type or langgraph_pattern is required")
-        if self.langgraph_pattern == "agent_loop" and not self.agent_profile_id and not (self.system_prompt or "").strip():
-            raise ValueError("agent_loop requires system_prompt")
-        return self
-
-
-class AssistantSkillUpdateRequest(CamelModel):
-    name: str | None = Field(default=None, min_length=1, max_length=128)
-    description: str | None = Field(default=None, min_length=1, max_length=512)
-    intent_examples: list[str] | None = None
-    tools: list[str] | None = None
-    mode: SkillMode | None = None
-    target_type: TargetType | None = None
-    workflow_id: UUID | None = None
-    agent_profile_id: UUID | None = None
-    langgraph_pattern: LanggraphPattern | None = None
-    system_prompt: str | None = Field(default=None, max_length=4096)
-    enabled: bool | None = None
-    kb_config: dict | None = None
-    workflow: WorkflowInput | None = None
-
-    @model_validator(mode="after")
-    def _validate(self) -> "AssistantSkillUpdateRequest":
-        if self.mode is not None and self.mode != "langgraph":
-            raise ValueError("mode must be langgraph")
-        if self.workflow_id and self.agent_profile_id:
-            raise ValueError("workflow_id and agent_profile_id are mutually exclusive")
-        if self.target_type == "workflow" and self.agent_profile_id:
-            raise ValueError("target_type=workflow cannot set agent_profile_id")
-        if self.target_type == "agent" and self.workflow_id:
-            raise ValueError("target_type=agent cannot set workflow_id")
-        if self.langgraph_pattern == "agent_loop" and self.system_prompt is not None:
-            if not self.system_prompt.strip():
-                raise ValueError("agent_loop requires system_prompt")
-        return self
 
 
 class ResetSkillRequest(CamelModel):
@@ -1010,25 +948,3 @@ class SkillTargetSummary(CamelModel):
     enabled: bool
 
 
-class AssistantSkillResponse(OrmModel):
-    id: UUID
-    name: str
-    description: str
-    intent_examples: list[str] | None
-    tools: list[str] | None
-    mode: str
-    target_type: TargetType | None = None
-    workflow_id: UUID | None = None
-    agent_profile_id: UUID | None = None
-    target_summary: SkillTargetSummary | None = None
-    langgraph_pattern: str | None = None
-    system_prompt: str | None
-    is_system: bool
-    enabled: bool
-    kb_config: dict | None
-    workflow_version: int = 1
-    workflow_viewport: dict | None = None
-    nodes: list[WorkflowNodeResponse] = []
-    edges: list[WorkflowEdgeResponse] = []
-    created_at: datetime
-    updated_at: datetime

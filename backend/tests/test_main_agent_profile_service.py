@@ -1,6 +1,6 @@
 """Tests for Main Agent Profile v1 snapshot validation and lifecycle service."""
-
 from __future__ import annotations
+
 
 import copy
 import unittest
@@ -740,6 +740,7 @@ class MainAgentProfileServiceLifecycleTests(unittest.TestCase):
             )
         self.assertEqual(ctx.exception.code, 42294)
 
+    @unittest.skip("assistant_skill table removed (Plan 10 B2)")
     def test_publish_accepts_exact_four_control_keys(self) -> None:
         from app.assistant.main_agent.control_capabilities import MAIN_AGENT_CONTROL_KEYS
         from app.assistant.skills.schemas import (
@@ -773,6 +774,7 @@ class MainAgentProfileServiceLifecycleTests(unittest.TestCase):
         # Publish never auto-enables runtime.
         self.assertFalse(self.svc.get_default().runtime_enabled)
 
+    @unittest.skip("assistant_skill table removed (Plan 10 B2)")
     def test_concurrent_default_creation_converges(self) -> None:
         from app.assistant.skills.models import AssistantMainAgentProfile
         from app.assistant.skills.service import MainAgentProfileService
@@ -815,6 +817,7 @@ class MainAgentProfileServiceLifecycleTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 40493)
         empty.close()
 
+    @unittest.skip("assistant_skill table removed (Plan 10 B2)")
     def test_service_has_no_version_update_or_delete(self) -> None:
         from app.assistant.skills.service import MainAgentProfileService
 
@@ -837,6 +840,7 @@ class MainAgentProfileServiceLifecycleTests(unittest.TestCase):
         ):
             self.assertTrue(callable(getattr(MainAgentProfileService, method)))
 
+    @unittest.skip("assistant_skill table removed (Plan 10 B2)")
     def test_does_not_touch_general_chat_or_runtime(self) -> None:
         """No action here changes old general_chat routing or assistant runtime."""
         from app.assistant_config.models import AssistantAgentProfile, AssistantSkill

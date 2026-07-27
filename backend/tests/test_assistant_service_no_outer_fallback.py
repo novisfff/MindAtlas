@@ -92,14 +92,16 @@ class AssistantServiceNoOuterFallbackTests(unittest.TestCase):
         svc = AssistantService(self.db)
         cfg = OpenAiFallbackConfig(api_key="k", base_url="https://x", model="m")
 
-        with patch.object(svc, "_get_openai_config", return_value=cfg), patch(
-            "app.assistant.orchestration.agent_runtime.AssistantAgent",
-            new=_FailingAgent,
-        ), patch.object(svc, "_openai_stream", side_effect=AssertionError("_openai_stream should not be called")):
-            out = list(svc._generate_response(self.conv.id))
-
-        text = "".join(out)
-        self.assertIn("处理您的请求时出现错误", text)
+        # Legacy AssistantAgent path is removed; generate_response fail-closes and
+        # must not call the outer OpenAI stream fallback.
+        with patch.object(svc, "_get_openai_config", return_value=cfg), patch.object(
+            svc, "_openai_stream", side_effect=AssertionError("_openai_stream should not be called")
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "Legacy AssistantAgent/Supervisor runtime is removed",
+            ):
+                list(svc._generate_response(self.conv.id))
 
 
 if __name__ == "__main__":
