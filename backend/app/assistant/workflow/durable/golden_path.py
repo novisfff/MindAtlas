@@ -421,21 +421,30 @@ def publish_durable_proposal_review(
         draft_id = detail.draft_version.id if detail.draft_version else None
     else:
         package_id = existing.id
+        rev = int(getattr(existing, "aggregate_revision", 0) or 0)
         draft = svc.save_draft(
             SaveSkillDraftCommand(
                 package_id=package_id,
                 parsed=parsed,
                 version_name="golden-draft",
                 origin="api",
+                expected_aggregate_revision=rev,
+                request_id=f"durable-golden-draft:{package_id}:{rev}",
             )
         )
         draft_id = draft.id
     if draft_id is None:
         raise RuntimeError("golden package has no draft to publish")
 
+    package_row = db.get(AssistantSkillPackage, package_id)
+    pub_rev = int(getattr(package_row, "aggregate_revision", 0) or 0) if package_row else 0
     published = svc.publish(
         package_id,
-        PublishSkillVersionCommand(draft_version_id=draft_id),
+        PublishSkillVersionCommand(
+            draft_version_id=draft_id,
+            request_id=f"durable-golden-publish:{package_id}:{draft_id}:{pub_rev}",
+            expected_aggregate_revision=pub_rev,
+        ),
         durable_capability_keys=(workflow.name,),
     )
     detail = svc.get_package(package_id)

@@ -282,7 +282,6 @@ export default function AgentEditorPage() {
       qc.invalidateQueries({ queryKey: ['assistant-agent-profile', agentProfileId] })
       qc.invalidateQueries({ queryKey: ['assistant-agent-versions', agentProfileId] })
       qc.invalidateQueries({ queryKey: ['assistant-agents'] })
-      qc.invalidateQueries({ queryKey: ['assistant-skills'] })
       toast.success(t('settings.skills.versioning.publishSuccess'))
     },
     onError: (error) => {

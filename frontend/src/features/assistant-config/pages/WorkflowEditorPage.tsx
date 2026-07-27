@@ -988,7 +988,6 @@ export default function WorkflowEditorPage() {
       store.resetDirty()
       qc.invalidateQueries({ queryKey: ['assistant-workflow', workflowId] })
       qc.invalidateQueries({ queryKey: ['assistant-workflows'] })
-      qc.invalidateQueries({ queryKey: ['assistant-skills'] })
       toast.success(t('settings.skills.workflowSaved'))
     },
     onError: (err) => {
@@ -1017,7 +1016,6 @@ export default function WorkflowEditorPage() {
       qc.invalidateQueries({ queryKey: ['assistant-workflow', workflowId] })
       qc.invalidateQueries({ queryKey: ['assistant-workflow-versions', workflowId] })
       qc.invalidateQueries({ queryKey: ['assistant-workflows'] })
-      qc.invalidateQueries({ queryKey: ['assistant-skills'] })
       toast.success(t('settings.skills.versioning.publishSuccess'))
     },
     onError: (err) => {

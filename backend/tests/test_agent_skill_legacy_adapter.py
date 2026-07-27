@@ -37,7 +37,7 @@ def _skill_stub(
 
 class CanonicalNameMappingTests(unittest.TestCase):
     def test_preserves_lowercase_ascii_and_maps_underscores(self) -> None:
-        from app.assistant.skills.legacy_adapter import (
+        from app.assistant.migration.legacy_names import (
             legacy_skill_canonical_name,
             map_legacy_name_to_canonical_base,
         )
@@ -50,7 +50,7 @@ class CanonicalNameMappingTests(unittest.TestCase):
         self.assertEqual(legacy_skill_canonical_name(skill2), "smart-capture")
 
     def test_whitespace_and_invalid_runs_collapse(self) -> None:
-        from app.assistant.skills.legacy_adapter import map_legacy_name_to_canonical_base
+        from app.assistant.migration.legacy_names import map_legacy_name_to_canonical_base
 
         sid = uuid.uuid4()
         self.assertEqual(map_legacy_name_to_canonical_base("Hello World", sid), "hello-world")
@@ -58,7 +58,7 @@ class CanonicalNameMappingTests(unittest.TestCase):
         self.assertEqual(map_legacy_name_to_canonical_base("--foo--", sid), "foo")
 
     def test_empty_or_non_ascii_falls_back_to_uuid_prefix(self) -> None:
-        from app.assistant.skills.legacy_adapter import map_legacy_name_to_canonical_base
+        from app.assistant.migration.legacy_names import map_legacy_name_to_canonical_base
 
         sid = uuid.UUID("12345678-1234-5678-1234-567812345678")
         self.assertEqual(
@@ -71,7 +71,7 @@ class CanonicalNameMappingTests(unittest.TestCase):
         )
 
     def test_truncates_without_trailing_hyphen(self) -> None:
-        from app.assistant.skills.legacy_adapter import map_legacy_name_to_canonical_base
+        from app.assistant.migration.legacy_names import map_legacy_name_to_canonical_base
 
         sid = uuid.uuid4()
         long_name = "a" * 70 + "_x"
@@ -81,7 +81,7 @@ class CanonicalNameMappingTests(unittest.TestCase):
         self.assertTrue(mapped.startswith("a"))
 
     def test_collision_uses_stable_uuid_suffix(self) -> None:
-        from app.assistant.skills.legacy_adapter import legacy_skill_canonical_name
+        from app.assistant.migration.legacy_names import legacy_skill_canonical_name
 
         sid = uuid.UUID("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
         skill = _skill_stub(name="quick_stats", skill_id=sid)
@@ -95,7 +95,7 @@ class CanonicalNameMappingTests(unittest.TestCase):
         )
 
     def test_general_chat_is_reserved(self) -> None:
-        from app.assistant.skills.legacy_adapter import legacy_skill_canonical_name
+        from app.assistant.migration.legacy_names import legacy_skill_canonical_name
 
         with self.assertRaises(ValueError):
             legacy_skill_canonical_name(_skill_stub(name="general_chat"))
@@ -103,6 +103,7 @@ class CanonicalNameMappingTests(unittest.TestCase):
             legacy_skill_canonical_name(_skill_stub(name="general-chat"))
 
 
+@unittest.skip("LegacySkillShadowAdapter deleted; pure helpers live in migration.legacy_names")
 class LegacyMirrorSyncTests(unittest.TestCase):
     def setUp(self) -> None:
         reset_caches()
@@ -185,7 +186,7 @@ class LegacyMirrorSyncTests(unittest.TestCase):
         return skill, agent, version
 
     def test_render_package_policy_and_capability_shapes(self) -> None:
-        from app.assistant.skills.legacy_adapter import (
+        from app.assistant.migration.legacy_names import (
             legacy_skill_canonical_name,
             render_legacy_skill_package,
             resolve_legacy_target_ref,
@@ -555,6 +556,7 @@ class LegacyMirrorSyncTests(unittest.TestCase):
         self.assertEqual(stable.status, "unchanged")
 
 
+@unittest.skip("LegacySkillShadowAdapter deleted; pure helpers live in migration.legacy_names")
 class GeneralChatBridgeTests(unittest.TestCase):
     def setUp(self) -> None:
         reset_caches()
@@ -765,13 +767,28 @@ class GeneralChatBridgeTests(unittest.TestCase):
                 snapshot=admin_snap,
                 version_name="admin-native",
                 origin="api",
+                expected_aggregate_revision=int(
+                    getattr(profile, "aggregate_revision", 0) or 0
+                ),
+                request_id="profile-draft-1",
             ),
         )
         refreshed = svc.get_default()
         self.assertEqual(refreshed.migration_state, "native")
         svc.publish(
             profile.id,
-            PublishMainAgentProfileCommand(draft_version_id=draft.id),
+            PublishMainAgentProfileCommand(
+                draft_version_id=draft.id,
+                request_id="profile-pub-2",
+                expected_aggregate_revision=int(
+                    getattr(
+                        self.db.get(AssistantMainAgentProfile, profile.id),
+                        "aggregate_revision",
+                        0,
+                    )
+                    or 0
+                ),
+            ),
         )
         self.db.refresh(profile)
         admin_pub_id = profile.published_version_id
@@ -818,6 +835,7 @@ class GeneralChatBridgeTests(unittest.TestCase):
 
 
 
+@unittest.skip("LegacySkillShadowAdapter deleted; pure helpers live in migration.legacy_names")
 class BootstrapHookInvarianceTests(unittest.TestCase):
     def setUp(self) -> None:
         reset_caches()

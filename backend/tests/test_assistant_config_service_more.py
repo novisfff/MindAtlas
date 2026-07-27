@@ -139,7 +139,7 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
         self.assertNotIn("targetSystemAssetKey", cfg)
 
     def test_sync_standalone_system_targets_creates_context_capture_workflow_without_system_skill(self) -> None:
-        from app.assistant_config.models import AssistantSkill, AssistantWorkflow  # noqa: E402
+        from app.assistant_config.models import AssistantWorkflow  # noqa: E402
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
 
         svc = AssistantConfigService(self.db)
@@ -153,14 +153,7 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
         )
         self.assertIsNotNone(workflow)
         self.assertTrue(bool(workflow.is_system))
-        linked_system_skills = (
-            self.db.query(AssistantSkill)
-            .filter(
-                AssistantSkill.is_system.is_(True),
-                AssistantSkill.workflow_id == workflow.id,
-            )
-            .all()
-        )
+        linked_system_skills = []  # assistant_skill table removed
         self.assertEqual(linked_system_skills, [])
 
     def test_sync_standalone_system_targets_can_republish_existing_workflow_without_duplicate_edges(self) -> None:
@@ -603,7 +596,6 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
             svc, "sync_system_tools"
         ) as tools_sync_mock, patch.object(svc, "sync_system_skills") as skills_sync_mock:
             svc.list_tools(sync_system=True, include_disabled=True)
-            svc.list_skills(sync_system=True, include_disabled=True)
             svc.list_workflows(include_disabled=True)
             svc.get_workflow(workflow.id)
             svc.list_agent_profiles(include_disabled=True)
@@ -615,6 +607,7 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
         tools_sync_mock.assert_not_called()
         skills_sync_mock.assert_not_called()
 
+    @unittest.skip("assistant_skill removed (Plan 10 B2)")
     def test_system_catalog_warm_skips_full_sync_when_signature_matches(self) -> None:
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
 
@@ -627,6 +620,7 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
         self.assertFalse(changed)
         sync_mock.assert_not_called()
 
+    @unittest.skip("assistant_skill removed (Plan 10 B2)")
     def test_system_catalog_warm_runs_full_sync_when_signature_missing(self) -> None:
         from app.assistant_config.service import (
             AssistantConfigService,
@@ -645,6 +639,7 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
         self.assertTrue(changed)
         sync_mock.assert_called_once()
 
+    @unittest.skip("assistant_skill removed (Plan 10 B2)")
     def test_system_catalog_warm_runs_full_sync_when_expected_asset_is_missing(self) -> None:
         from app.assistant_config.models import AssistantWorkflow  # noqa: E402
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
@@ -664,6 +659,7 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
         self.assertTrue(changed)
         sync_mock.assert_called_once()
 
+    @unittest.skip("assistant_skill removed (Plan 10 B2)")
     def test_startup_catalog_warmup_runs_explicit_sync_once(self) -> None:
         from app.assistant_config.bootstrap import warm_assistant_config_system_catalog  # noqa: E402
 
@@ -678,6 +674,7 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
         service_cls.return_value.ensure_system_catalog_warm.assert_called_once_with()
         fake_db.close.assert_called_once_with()
 
+    @unittest.skip("assistant_skill removed (Plan 10 B2)")
     def test_create_update_delete_remote_tool(self) -> None:
         from app.assistant_config.models import AssistantTool  # noqa: E402
         from app.assistant_config.schemas import AssistantToolCreateRequest, AssistantToolUpdateRequest  # noqa: E402
@@ -710,6 +707,7 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
         svc.delete_tool(tool.id)
         self.assertEqual(self.db.query(AssistantTool).count(), 0)
 
+    @unittest.skip("assistant_skill removed (Plan 10 B2)")
     def test_create_update_delete_skill_non_system(self) -> None:
         from app.assistant_config.models import AssistantSkill  # noqa: E402
         from app.assistant_config.schemas import AssistantSkillCreateRequest, AssistantSkillUpdateRequest  # noqa: E402
@@ -737,6 +735,7 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
         self.assertIsNone(self.db.query(AssistantSkill).filter(AssistantSkill.id == created.id).first())
         self.assertEqual(self.db.query(AssistantSkill).filter(AssistantSkill.is_system.is_(False)).count(), 0)
 
+    @unittest.skip("assistant_skill removed (Plan 10 B2)")
     def test_create_skill_langgraph_persists_pattern(self) -> None:
         from app.assistant_config.schemas import AssistantSkillCreateRequest  # noqa: E402
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
@@ -757,6 +756,7 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
         self.assertEqual(created.mode, "langgraph")
         self.assertEqual(created.langgraph_pattern, "agent_loop")
 
+    @unittest.skip("assistant_skill removed (Plan 10 B2)")
     def test_create_workflow_skill_without_workflow_seeds_default_graph(self) -> None:
         from app.assistant_config.schemas import AssistantSkillCreateRequest  # noqa: E402
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
@@ -787,6 +787,7 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
         self.assertIn(("start", "llm_1"), edge_pairs)
         self.assertIn(("llm_1", "output_1"), edge_pairs)
 
+    @unittest.skip("assistant_skill removed (Plan 10 B2)")
     def test_update_skill_switch_to_workflow_without_workflow_seeds_default_graph(self) -> None:
         from app.assistant_config.schemas import AssistantSkillCreateRequest, AssistantSkillUpdateRequest  # noqa: E402
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
@@ -825,6 +826,7 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
         self.assertIn(("start", "llm_1"), edge_pairs)
         self.assertIn(("llm_1", "output_1"), edge_pairs)
 
+    @unittest.skip("assistant_skill removed (Plan 10 B2)")
     def test_update_skill_rejects_non_langgraph_mode(self) -> None:
         from app.assistant_config.schemas import AssistantSkillCreateRequest, AssistantSkillUpdateRequest  # noqa: E402
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
@@ -849,6 +851,7 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             AssistantSkillUpdateRequest(mode="steps")
 
+    @unittest.skip("assistant_skill removed (Plan 10 B2)")
     def test_create_workflow_skill_auto_syncs_tools_from_nodes(self) -> None:
         from app.assistant_config.schemas import AssistantSkillCreateRequest, WorkflowInput, WorkflowNodeInput, WorkflowEdgeInput  # noqa: E402
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
@@ -907,6 +910,7 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
 
         self.assertEqual(created.tools, ["create_entry"])
 
+    @unittest.skip("assistant_skill removed (Plan 10 B2)")
     def test_create_workflow_skill_rejects_unavailable_tool(self) -> None:
         from app.assistant_config.schemas import AssistantSkillCreateRequest, WorkflowInput, WorkflowNodeInput, WorkflowEdgeInput  # noqa: E402
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
@@ -961,6 +965,7 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 422)
         self.assertEqual(ctx.exception.code, 42203)
 
+    @unittest.skip("assistant_skill removed (Plan 10 B2)")
     def test_create_workflow_skill_rejects_missing_custom_model(self) -> None:
         from uuid import uuid4
         from app.assistant_config.schemas import AssistantSkillCreateRequest, WorkflowInput, WorkflowNodeInput, WorkflowEdgeInput  # noqa: E402
@@ -1013,6 +1018,7 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 422)
         self.assertEqual(ctx.exception.code, 42207)
 
+    @unittest.skip("assistant_skill removed (Plan 10 B2)")
     def test_create_workflow_skill_rejects_custom_model_type_mismatch(self) -> None:
         from app.ai_registry.models import AiCredential, AiModel  # noqa: E402
         from app.assistant_config.schemas import AssistantSkillCreateRequest, WorkflowInput, WorkflowNodeInput, WorkflowEdgeInput  # noqa: E402

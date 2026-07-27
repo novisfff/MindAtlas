@@ -397,8 +397,11 @@ class WorkflowCapabilityAdapter:
             _emit("capability.failed", safe_status="failed", metrics=result.metrics)
             return result
 
-        # Human-in-the-loop: durable interrupt is out of scope; legacy_blocking is
-        # OpenClaw-compat only. Future Main Agent never blocks.
+        # Human-in-the-loop: durable interrupt routes to Plan 07 port when present.
+        # Plan 10 Task 4: legacy_blocking is never admitted for new work on the
+        # shared capability path (including OpenClaw). Entrypoints without an
+        # authenticated durable decision channel classify as unsupported_interrupt
+        # and must not fall back to blocking HumanLoopRuntime.
         interrupt_mode = str(descriptor.behavior.interrupt_mode or "none")
         if interrupt_mode == "durable":
             if ports.durable_workflow is not None:
@@ -414,7 +417,7 @@ class WorkflowCapabilityAdapter:
             result = failed_result(error=error, metrics=_metrics())
             _emit("capability.failed", safe_status="unsupported_interrupt", metrics=result.metrics)
             return result
-        if interrupt_mode == "legacy_blocking" and not _is_openclaw_compat(request):
+        if interrupt_mode == "legacy_blocking":
             error = CapabilityError(
                 error_type="unsupported_interrupt",
                 safe_code="unsupported_interrupt",
@@ -654,28 +657,24 @@ class WorkflowCapabilityAdapter:
             if structured_input is not None:
                 runtime_context["structured_input"] = structured_input
 
-            if interrupt_mode_is_legacy_blocking := (
-                str(descriptor.behavior.interrupt_mode or "none") == "legacy_blocking"
-            ):
-                # Emit a single compatibility diagnostic; blocking remains only for OpenClaw.
-                if _is_openclaw_compat(request):
-                    ports.events.emit(
-                        CapabilityRuntimeEvent(
-                            event_type="capability.child_event",
-                            call_id=call_id,
-                            capability_key=descriptor.capability_key,
-                            target_identity=target_identity,
-                            capability_type="workflow",
-                            safe_status="legacy_blocking",
-                            child_event_type="interrupt_compatibility",
-                            metadata=CapabilityEventMetadata(
-                                binding_contract_digest=descriptor.binding_contract_digest,
-                                dependency_closure_digest=descriptor.dependency_closure_digest,
-                                compatibility_only=True,
-                            ),
-                        )
-                    )
-                _ = interrupt_mode_is_legacy_blocking
+            # legacy_blocking is rejected above; keep a fail-closed pin so a
+            # future classification slip cannot re-enable HumanLoopRuntime here.
+            if str(descriptor.behavior.interrupt_mode or "none") == "legacy_blocking":
+                error = CapabilityError(
+                    error_type="unsupported_interrupt",
+                    safe_code="unsupported_interrupt",
+                    safe_message="legacy blocking interrupt is unavailable",
+                    retry_disposition="never",
+                    target_identity=target_identity,
+                    call_id=call_id,
+                )
+                result = failed_result(error=error, metrics=_metrics())
+                _emit(
+                    "capability.failed",
+                    safe_status="unsupported_interrupt",
+                    metrics=result.metrics,
+                )
+                return result
 
             chunks: list[str] = []
             try:

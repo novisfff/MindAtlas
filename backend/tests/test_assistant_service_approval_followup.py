@@ -58,6 +58,7 @@ def _install_fastapi_stubs() -> None:
     sys.modules["starlette.status"] = starlette_status
 
 
+@unittest.skip('legacy HITL approval followup removed (Plan 10 B2)')
 class AssistantServiceApprovalFollowupTests(unittest.TestCase):
     def setUp(self) -> None:
         reset_caches()

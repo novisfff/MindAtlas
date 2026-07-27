@@ -902,7 +902,7 @@ class DurableRunModelContractTests(unittest.TestCase):
     # L2 split uniqueness (Legacy vs native)
     # ------------------------------------------------------------------
 
-    def test_l2_legacy_and_native_uniqueness_split(self) -> None:
+    def test_l2_native_package_namespace_uniqueness(self) -> None:
         from app.assistant.models import (  # noqa: E402
             AssistantConversationSkillL2Memory,
             Conversation,
@@ -912,28 +912,6 @@ class DurableRunModelContractTests(unittest.TestCase):
         conv = Conversation(title="mem")
         self.db.add(conv)
         self.db.flush()
-
-        legacy = AssistantConversationSkillL2Memory(
-            conversation_id=conv.id,
-            skill_name="legacy-skill",
-            facts=["a"],
-            skill_package_id=None,
-            memory_namespace=None,
-        )
-        self.db.add(legacy)
-        self.db.commit()
-
-        legacy_dup = AssistantConversationSkillL2Memory(
-            conversation_id=conv.id,
-            skill_name="legacy-skill",
-            facts=["b"],
-            skill_package_id=None,
-            memory_namespace=None,
-        )
-        self.db.add(legacy_dup)
-        with self.assertRaises(IntegrityError):
-            self.db.commit()
-        self.db.rollback()
 
         pkg = AssistantSkillPackage(
             canonical_name="native-skill",
@@ -948,7 +926,6 @@ class DurableRunModelContractTests(unittest.TestCase):
 
         native = AssistantConversationSkillL2Memory(
             conversation_id=conv.id,
-            skill_name="native-skill",  # display/compat only
             facts=[],
             skill_package_id=pkg.id,
             memory_namespace="default",
@@ -957,10 +934,9 @@ class DurableRunModelContractTests(unittest.TestCase):
         self.db.add(native)
         self.db.commit()
 
-        # Same package+namespace collides even with different display skill_name.
+        # Same package+namespace collides.
         native_dup = AssistantConversationSkillL2Memory(
             conversation_id=conv.id,
-            skill_name="other-display",
             facts=[],
             skill_package_id=pkg.id,
             memory_namespace="default",
@@ -974,7 +950,6 @@ class DurableRunModelContractTests(unittest.TestCase):
         # Different namespace is allowed for same package.
         other_ns = AssistantConversationSkillL2Memory(
             conversation_id=conv.id,
-            skill_name="native-skill",
             facts=[],
             skill_package_id=pkg.id,
             memory_namespace="project",
@@ -983,13 +958,16 @@ class DurableRunModelContractTests(unittest.TestCase):
         self.db.add(other_ns)
         self.db.commit()
 
-        # Legacy name index must be partial (null package only).
         indexes = {
             idx.name: idx
             for idx in AssistantConversationSkillL2Memory.__table__.indexes
         }
-        self.assertIn("uq_assistant_l2_memory_legacy_conversation_skill", indexes)
+        self.assertNotIn("uq_assistant_l2_memory_legacy_conversation_skill", indexes)
         self.assertIn("uq_assistant_l2_memory_native_package_namespace", indexes)
+        cols = {c.name for c in AssistantConversationSkillL2Memory.__table__.columns}
+        self.assertNotIn("skill_name", cols)
+        self.assertFalse(AssistantConversationSkillL2Memory.__table__.c.skill_package_id.nullable)
+        self.assertFalse(AssistantConversationSkillL2Memory.__table__.c.memory_namespace.nullable)
 
     def test_l1_last_applied_run_fk(self) -> None:
         from app.assistant.models import (  # noqa: E402

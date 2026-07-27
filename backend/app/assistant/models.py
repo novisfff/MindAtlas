@@ -390,12 +390,11 @@ class AssistantConversationL1Memory(UuidPrimaryKeyMixin, TimestampMixin, Base):
 
 
 class AssistantConversationSkillL2Memory(UuidPrimaryKeyMixin, TimestampMixin, Base):
-    """Conversation+skill scoped L2 facts memory.
+    """Conversation+package scoped L2 facts memory (Plan 10 Deploy B2).
 
-    Plan 06 splits uniqueness:
-    - Legacy: unique (conversation_id, skill_name) where skill_package_id IS NULL
-    - Native: unique (conversation_id, skill_package_id, memory_namespace)
-      where skill_package_id IS NOT NULL
+    Native identity is the triple
+    ``(conversation_id, skill_package_id, memory_namespace)``.
+    Legacy ``skill_name`` column is removed after package-ID backfill.
     """
 
     __tablename__ = "assistant_conversation_skill_l2_memory"
@@ -405,15 +404,14 @@ class AssistantConversationSkillL2Memory(UuidPrimaryKeyMixin, TimestampMixin, Ba
         ForeignKey("assistant_conversation.id", ondelete="CASCADE"),
         nullable=False,
     )
-    skill_name = Column(String(100), nullable=False)
     facts = Column(JSON, nullable=False, default=list)
     version = Column(Integer, nullable=False, default=1)
     skill_package_id = Column(
         UUID(as_uuid=True),
-        ForeignKey("assistant_skill_package.id", ondelete="SET NULL"),
-        nullable=True,
+        ForeignKey("assistant_skill_package.id", ondelete="RESTRICT"),
+        nullable=False,
     )
-    memory_namespace = Column(String(128), nullable=True)
+    memory_namespace = Column(String(128), nullable=False)
     facts_v2 = Column(JSON, nullable=True)
     last_applied_run_id = Column(
         UUID(as_uuid=True),
@@ -424,24 +422,11 @@ class AssistantConversationSkillL2Memory(UuidPrimaryKeyMixin, TimestampMixin, Ba
     conversation = relationship("Conversation", back_populates="l2_memories")
 
     __table_args__ = (
-        # Native rows require a nonempty namespace when package is set (DB-level).
         CheckConstraint(
-            "("
-            "  skill_package_id IS NULL AND memory_namespace IS NULL"
-            ") OR ("
-            "  skill_package_id IS NOT NULL"
-            "  AND memory_namespace IS NOT NULL"
-            "  AND length(trim(memory_namespace)) > 0"
-            ")",
-            name="ck_assistant_l2_memory_package_namespace_shape",
-        ),
-        Index(
-            "uq_assistant_l2_memory_legacy_conversation_skill",
-            "conversation_id",
-            "skill_name",
-            unique=True,
-            postgresql_where=text("skill_package_id IS NULL"),
-            sqlite_where=text("skill_package_id IS NULL"),
+            "skill_package_id IS NOT NULL"
+            " AND memory_namespace IS NOT NULL"
+            " AND length(trim(memory_namespace)) > 0",
+            name="ck_assistant_l2_memory_package_namespace_required",
         ),
         Index(
             "uq_assistant_l2_memory_native_package_namespace",
@@ -449,8 +434,6 @@ class AssistantConversationSkillL2Memory(UuidPrimaryKeyMixin, TimestampMixin, Ba
             "skill_package_id",
             "memory_namespace",
             unique=True,
-            postgresql_where=text("skill_package_id IS NOT NULL"),
-            sqlite_where=text("skill_package_id IS NOT NULL"),
         ),
     )
 

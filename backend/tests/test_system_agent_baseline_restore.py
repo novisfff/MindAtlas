@@ -18,23 +18,21 @@ class SystemAgentBaselineRestoreTests(unittest.TestCase):
         self.db.close()
 
     def _create_system_agent_with_legacy_baseline(self):
-        from app.assistant_config.models import AssistantSkill  # noqa: E402
+        from app.assistant_config.models import AssistantAgentProfile  # noqa: E402
         from app.assistant_config.schemas import AgentPublishDraftInput  # noqa: E402
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
 
         svc = AssistantConfigService(self.db)
         svc.sync_system_skills()
-        skill = (
-            self.db.query(AssistantSkill)
+        profile = (
+            self.db.query(AssistantAgentProfile)
             .filter(
-                AssistantSkill.name == "general_chat",
-                AssistantSkill.is_system.is_(True),
+                AssistantAgentProfile.name == "general_chat__agent",
+                AssistantAgentProfile.is_system.is_(True),
             )
             .first()
         )
-        self.assertIsNotNone(skill)
-        self.assertIsNotNone(skill.agent_profile)
-        profile = skill.agent_profile
+        self.assertIsNotNone(profile)
 
         legacy_draft = AgentPublishDraftInput.model_validate(
             {
@@ -102,6 +100,7 @@ class SystemAgentBaselineRestoreTests(unittest.TestCase):
         self.assertEqual(list((remaining_versions[0].snapshot or {}).get("tools") or []), list(canonical.tools or []))
 
 
+    @unittest.skip("legacy AssistantSkill shadow bridge removed (Plan 10 B2)")
     def test_general_chat_legacy_row_unaffected_by_shadow_bridge(self) -> None:
         """Legacy runtime invariance: general_chat remains the old-runtime skill."""
         from app.assistant.skills.legacy_adapter import LegacySkillShadowAdapter

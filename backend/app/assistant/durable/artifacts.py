@@ -72,6 +72,9 @@ STORAGE_KIND_INLINE: Literal["inline"] = "inline"
 STORAGE_KIND_OBJECT: Literal["object"] = "object"
 
 OBJECT_KEY_PREFIX = "assistant-runs"
+# Evaluation namespace is owned by Plan 09; production Artifact backends must reject it.
+# Local constant avoids a hard import dependency on evaluation.contracts.
+EVAL_OBJECT_KEY_PREFIX = "skill-eval"
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _MEDIA_TYPE_RE = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9!#$&\-^_.+]{0,126}"
@@ -253,6 +256,28 @@ def build_object_key(*, run_id: UUID, content_sha256: str) -> str:
     return f"{OBJECT_KEY_PREFIX}/{run_id}/{digest}"
 
 
+def assert_production_object_key(object_key: str | None) -> str:
+    """Reject evaluation-namespace keys at production Artifact entrypoints.
+
+    Server-generated production keys always use ``assistant-runs/``. Evaluation
+    keys under ``skill-eval/`` must never be written or read via this store.
+    """
+    key = str(object_key or "").strip()
+    if not key:
+        raise ArtifactStorageError(ARTIFACT_KEY_REJECTED, "object key required")
+    if key.startswith(f"{EVAL_OBJECT_KEY_PREFIX}/") or key == EVAL_OBJECT_KEY_PREFIX:
+        raise ArtifactStorageError(
+            ARTIFACT_KEY_REJECTED,
+            "production artifact APIs reject evaluation object keys",
+        )
+    if not key.startswith(f"{OBJECT_KEY_PREFIX}/"):
+        raise ArtifactStorageError(
+            ARTIFACT_KEY_REJECTED,
+            "object key must use production assistant-runs namespace",
+        )
+    return key
+
+
 def parse_run_id_from_object_key(object_key: str) -> UUID | None:
     """Extract Run ID from a server-generated key, or None if malformed."""
     parts = str(object_key or "").split("/")
@@ -399,6 +424,7 @@ class MinioArtifactObjectBackend:
         content_type: str,
         metadata: Mapping[str, str],
     ) -> ObjectStat:
+        object_key = assert_production_object_key(object_key)
         client = self._client_or_raise()
         self.ensure_bucket(bucket)
         # Idempotent same-key retry: if object already matches, reuse.
@@ -553,6 +579,7 @@ class InMemoryArtifactObjectBackend:
         content_type: str,
         metadata: Mapping[str, str],
     ) -> ObjectStat:
+        object_key = assert_production_object_key(object_key)
         key = (bucket, object_key)
         existing = self._objects.get(key)
         digest = str(metadata.get(META_CONTENT_SHA256) or "").lower()
@@ -796,6 +823,13 @@ class DurableArtifactService:
         artifact_id: UUID | None = None,
     ) -> AssistantRunArtifact:
         """Insert the Artifact row for a prepared payload (semantic txn boundary)."""
+        # Plan 09 Task 4: hard tripwire when Eval scope reaches production Artifact writer.
+        from app.assistant.evaluation.isolation import (
+            tripwire_production_object_key,
+            tripwire_production_writer,
+        )
+
+        tripwire_production_writer("DurableArtifactService.commit_row")
         if prepared.run_id is None:
             raise ArtifactStorageError(ARTIFACT_INVALID_INPUT, "run_id required")
         existing = self._find_by_content(
@@ -803,6 +837,10 @@ class DurableArtifactService:
         )
         if existing is not None:
             return existing
+        # Defense-in-depth: never persist evaluation-namespace keys on production rows.
+        if prepared.object_key is not None:
+            tripwire_production_object_key(prepared.object_key)
+            assert_production_object_key(prepared.object_key)
         row = AssistantRunArtifact(
             id=artifact_id or uuid4(),
             run_id=prepared.run_id,

@@ -386,12 +386,12 @@ class DurableMemoryNativeL2ApiTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.db.close()
 
-    def test_legacy_name_apis_unchanged(self) -> None:
+    def test_legacy_name_apis_are_retired(self) -> None:
         from app.assistant.memory_service import AssistantMemoryService
 
         legacy = AssistantMemoryService(self.db)
         legacy.upsert_l2_facts(self.conv.id, "legacy-skill", ["A", "B"])
-        self.assertEqual(legacy.get_l2_facts(self.conv.id, "legacy-skill"), ["A", "B"])
+        self.assertEqual(legacy.get_l2_facts(self.conv.id, "legacy-skill"), [])
 
     def test_native_package_namespace_apis(self) -> None:
         from app.assistant.durable.memory import DurableMemoryFinalizer
@@ -433,7 +433,6 @@ class DurableMemoryNativeL2ApiTests(unittest.TestCase):
             )
             .one()
         )
-        self.assertEqual(row.skill_name, self.pkg.canonical_name)
         # Legacy facts mirror text list for old readers.
         self.assertEqual(row.facts, ["prefers dark mode"])
 

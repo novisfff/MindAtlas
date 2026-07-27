@@ -428,11 +428,9 @@ class DurableRunStreamingTests(unittest.TestCase):
         ).filter_by(conversation_id=conv.id).count()
         self.assertEqual(before, after)
 
-        # Non-active Main Agent Run: still no attachment-based short-circuit —
-        # followup is allowed because the Run is not active.
+        # Non-active Main Agent Run: legacy approval follow-up remains removed.
         run.status = "completed"
         self.db.commit()
-        # Attachment still set; Main Agent path must not use it to suppress followup.
         before = after
         svc._ensure_disconnected_approval_followup(
             conversation_id=conv.id,
@@ -445,7 +443,7 @@ class DurableRunStreamingTests(unittest.TestCase):
         after = self.db.query(
             __import__("app.assistant.models", fromlist=["Message"]).Message
         ).filter_by(conversation_id=conv.id).count()
-        self.assertEqual(after, before + 1)
+        self.assertEqual(after, before)
 
     def test_legacy_stream_preserves_event_names_without_forcing_event_key(self) -> None:
         from app.assistant.models import AssistantChatRun, Conversation, Message

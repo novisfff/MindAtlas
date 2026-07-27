@@ -11,6 +11,12 @@ from tests._bootstrap import bootstrap_backend_imports, reset_caches
 bootstrap_backend_imports()
 reset_caches()
 
+
+def _current_pkg_rev(db, package_id) -> int:
+    from app.assistant.skills.models import AssistantSkillPackage
+    row = db.get(AssistantSkillPackage, package_id)
+    return int(getattr(row, "aggregate_revision", 0) or 0) if row is not None else 0
+
 # Fixed revision for code-native tool publication tests.
 os.environ.setdefault("APP_BUILD_REVISION", "test-build-c25d03f")
 os.environ.setdefault("APP_ENV", "test")
@@ -327,7 +333,7 @@ class PublishLifecycleTests(unittest.TestCase):
         )
 
     def test_publish_creates_new_row_and_keeps_draft_and_catalog_disabled(self) -> None:
-        from app.assistant.skills.models import AssistantSkillVersion
+        from app.assistant.skills.models import AssistantSkillPackage, AssistantSkillVersion
         from app.assistant.skills.schemas import PublishSkillVersionCommand
         from tests.agent_skill_test_support import create_default_model_binding
 
@@ -343,10 +349,11 @@ class PublishLifecycleTests(unittest.TestCase):
         assert draft_before is not None
         draft_digest = draft_before.content_digest
         draft_seq = draft_before.sequence_no
+        rev_before = _current_pkg_rev(self.db, package.id)
 
         published = self.svc.publish(
             package.id,
-            PublishSkillVersionCommand(draft_version_id=draft_id),  # type: ignore[arg-type]
+            PublishSkillVersionCommand(draft_version_id=draft_id, request_id="pub-req-1", expected_aggregate_revision=0),  # type: ignore[arg-type]
         )
         self.assertEqual(published.version_source, "publish")
         self.assertEqual(published.source_draft_version_id, draft_id)
@@ -364,6 +371,58 @@ class PublishLifecycleTests(unittest.TestCase):
         detail = self.svc.get_package(package.id)
         self.assertFalse(detail.catalog_enabled)
         self.assertEqual(detail.published_version.id if detail.published_version else None, published.id)
+        # Ungated bootstrap publish still advances CAS + stamps request evidence.
+        row = self.db.get(AssistantSkillPackage, package.id)
+        assert row is not None
+        self.assertEqual(int(row.aggregate_revision or 0), rev_before + 1)
+        self.assertEqual(row.last_admin_request_id, "pub-req-1")
+        self.assertIsNotNone(row.last_admin_request_digest)
+        self.assertEqual(len(row.last_admin_request_digest or ""), 64)
+
+    def test_publish_request_id_idempotent_and_payload_conflict(self) -> None:
+        from app.assistant.skills.schemas import PublishSkillVersionCommand
+        from app.common.exceptions import ApiException
+        from tests.agent_skill_test_support import create_default_model_binding
+
+        create_default_model_binding(self.db)
+        self.db.commit()
+        package = self._create_package(
+            "pub-skill-idem",
+            "  - type: tool\n    key: search_entries\n",
+        )
+        draft_id = package.draft_version.id  # type: ignore[union-attr]
+        first = self.svc.publish(
+            package.id,
+            PublishSkillVersionCommand(
+                draft_version_id=draft_id,
+                request_id="pub-idem-1",
+                expected_aggregate_revision=0,
+            ),
+        )
+        rev_after = _current_pkg_rev(self.db, package.id)
+        # Exact replay returns the same published version without advancing further.
+        replay = self.svc.publish(
+            package.id,
+            PublishSkillVersionCommand(
+                draft_version_id=draft_id,
+                request_id="pub-idem-1",
+                expected_aggregate_revision=0,
+            ),
+        )
+        self.assertEqual(replay.id, first.id)
+        self.assertEqual(_current_pkg_rev(self.db, package.id), rev_after)
+
+        with self.assertRaises(ApiException) as ctx:
+            self.svc.publish(
+                package.id,
+                PublishSkillVersionCommand(
+                    draft_version_id=draft_id,
+                    request_id="pub-idem-1",
+                    expected_aggregate_revision=rev_after,  # different payload
+                ),
+            )
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertEqual(ctx.exception.code, 40997)
 
     def test_publish_twice_creates_two_auditable_sequences(self) -> None:
         from app.assistant.skills.schemas import PublishSkillVersionCommand
@@ -377,10 +436,14 @@ class PublishLifecycleTests(unittest.TestCase):
         )
         draft_id = package.draft_version.id  # type: ignore[union-attr]
         first = self.svc.publish(
-            package.id, PublishSkillVersionCommand(draft_version_id=draft_id)
+            package.id, PublishSkillVersionCommand(draft_version_id=draft_id, request_id="pub-req-2", expected_aggregate_revision=0)
         )
         second = self.svc.publish(
-            package.id, PublishSkillVersionCommand(draft_version_id=draft_id)
+            package.id, PublishSkillVersionCommand(
+                draft_version_id=draft_id,
+                request_id="pub-req-3",
+                expected_aggregate_revision=_current_pkg_rev(self.db, package.id),
+            )
         )
         self.assertNotEqual(first.id, second.id)
         self.assertEqual(first.content_digest, second.content_digest)
@@ -410,7 +473,7 @@ class PublishLifecycleTests(unittest.TestCase):
         )
         draft_id = package.draft_version.id  # type: ignore[union-attr]
         first = self.svc.publish(
-            package.id, PublishSkillVersionCommand(draft_version_id=draft_id)
+            package.id, PublishSkillVersionCommand(draft_version_id=draft_id, request_id="pub-req-4", expected_aggregate_revision=0)
         )
         cfg = AssistantConfigService(self.db)
         cfg.update_tool(
@@ -418,7 +481,7 @@ class PublishLifecycleTests(unittest.TestCase):
             AssistantToolUpdateRequest(timeout_seconds=30),
         )
         second = self.svc.publish(
-            package.id, PublishSkillVersionCommand(draft_version_id=draft_id)
+            package.id, PublishSkillVersionCommand(draft_version_id=draft_id, request_id="pub-req-5", expected_aggregate_revision=_current_pkg_rev(self.db, package.id))
         )
         self.assertEqual(first.content_digest, second.content_digest)
         self.assertNotEqual(first.binding_set_digest, second.binding_set_digest)
@@ -442,9 +505,7 @@ class PublishLifecycleTests(unittest.TestCase):
         with self.assertRaises(ApiException) as ctx:
             self.svc.publish(
                 a.id,
-                PublishSkillVersionCommand(
-                    draft_version_id=b.draft_version.id  # type: ignore[union-attr]
-                ),
+                PublishSkillVersionCommand(draft_version_id=b.draft_version.id, request_id="pub-req-6", expected_aggregate_revision=0),  # type: ignore[union-attr]
             )
         self.assertEqual(ctx.exception.code, 40491)
 
@@ -465,7 +526,7 @@ class PublishLifecycleTests(unittest.TestCase):
         )
         draft_id = package.draft_version.id  # type: ignore[union-attr]
         published = self.svc.publish(
-            package.id, PublishSkillVersionCommand(draft_version_id=draft_id)
+            package.id, PublishSkillVersionCommand(draft_version_id=draft_id, request_id="pub-req-7", expected_aggregate_revision=0)
         )
         bindings = (
             self.db.query(AssistantSkillCapabilityBinding)
@@ -902,7 +963,7 @@ class ProtectedHistoryTests(unittest.TestCase):
         )
         self.svc.publish(
             package.id,
-            PublishSkillVersionCommand(draft_version_id=package.draft_version.id),  # type: ignore[union-attr]
+            PublishSkillVersionCommand(draft_version_id=package.draft_version.id, request_id="pub-req-8", expected_aggregate_revision=0),  # type: ignore[union-attr]
         )
         # Advance aggregate to V2 after skill freeze of V1.
         workflow.published_version_id = v2.id
@@ -963,7 +1024,7 @@ class ProtectedHistoryTests(unittest.TestCase):
         )
         published = self.svc.publish(
             package.id,
-            PublishSkillVersionCommand(draft_version_id=package.draft_version.id),  # type: ignore[union-attr]
+            PublishSkillVersionCommand(draft_version_id=package.draft_version.id, request_id="pub-req-9", expected_aggregate_revision=0),  # type: ignore[union-attr]
         )
         workflow.published_version_id = v2.id
         self.db.commit()
@@ -1038,7 +1099,7 @@ class ProtectedHistoryTests(unittest.TestCase):
         )
         published = self.svc.publish(
             package.id,
-            PublishSkillVersionCommand(draft_version_id=package.draft_version.id),  # type: ignore[union-attr]
+            PublishSkillVersionCommand(draft_version_id=package.draft_version.id, request_id="pub-req-10", expected_aggregate_revision=0),  # type: ignore[union-attr]
         )
         nested_dep = (
             self.db.query(AssistantSkillCapabilityDependency)
@@ -1104,7 +1165,7 @@ class ProtectedHistoryTests(unittest.TestCase):
         )
         self.svc.publish(
             package.id,
-            PublishSkillVersionCommand(draft_version_id=package.draft_version.id),  # type: ignore[union-attr]
+            PublishSkillVersionCommand(draft_version_id=package.draft_version.id, request_id="pub-req-11", expected_aggregate_revision=0),  # type: ignore[union-attr]
         )
         cfg = AssistantConfigService(self.db)
         with self.assertRaises(ApiException) as ctx:

@@ -1,0 +1,1480 @@
+"""Plan 09 Task 2 — safe skill package import preview / apply (create|append|fork)."""
+
+from __future__ import annotations
+
+import ast
+import hashlib
+import inspect
+import io
+import zipfile
+from pathlib import Path
+from uuid import uuid4
+
+import pytest
+
+from tests._bootstrap import bootstrap_backend_imports, reset_caches
+
+bootstrap_backend_imports()
+reset_caches()
+
+
+def _current_pkg_rev(db, package_id) -> int:
+    from app.assistant.skills.models import AssistantSkillPackage
+    row = db.get(AssistantSkillPackage, package_id)
+    return int(getattr(row, "aggregate_revision", 0) or 0) if row is not None else 0
+
+
+
+FIXTURE_ROOT = (
+    Path(__file__).resolve().parent / "fixtures" / "agent_skills" / "valid-weekly-review"
+)
+
+
+def _minimal_skill_md(
+    *,
+    name: str = "weekly-review",
+    description: str = (
+        "Review MindAtlas entries over a time range; use for weekly summaries and retrospectives."
+    ),
+    body: str = "# Weekly review\n\nBody.\n",
+) -> bytes:
+    return (
+        f"---\nname: {name}\ndescription: {description}\n---\n\n{body}"
+    ).encode("utf-8")
+
+
+def _mindatlas_yaml(
+    *,
+    display_name: str = "周度回顾",
+    legacy_aliases: list[str] | None = None,
+) -> bytes:
+    aliases = legacy_aliases if legacy_aliases is not None else ["weekly_review"]
+    alias_block = "\n".join(f"  - {a}" for a in aliases) if aliases else "  []"
+    return (
+        "version: 1\n"
+        f"display_name: {display_name}\n"
+        f"legacy_aliases:\n{alias_block}\n"
+        "\n"
+        "routing:\n"
+        "  include_examples: []\n"
+        "  exclude_examples: []\n"
+        "  conflict_rules: []\n"
+        "\n"
+        "capabilities:\n"
+        "  - type: tool\n"
+        "    key: search_entries\n"
+        "\n"
+        "policy:\n"
+        "  allowed_side_effects:\n"
+        "    - read\n"
+        "    - compute\n"
+        "  max_skill_calls: 16\n"
+        "  max_same_read_calls: 3\n"
+        "  requires_terminal_output: true\n"
+        "  terminal_text_allowed: true\n"
+        "\n"
+        "provider_aliases: {}\n"
+        "metadata: {}\n"
+    ).encode("utf-8")
+
+
+def _zip_bytes(
+    members: dict[str, bytes],
+    *,
+    compress_type: int = zipfile.ZIP_STORED,
+    external_attr: dict[str, int] | None = None,
+) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for name, content in members.items():
+            info = zipfile.ZipInfo(name)
+            info.compress_type = compress_type
+            info.external_attr = (external_attr or {}).get(name, 0o100644 << 16)
+            zf.writestr(info, content)
+    return buf.getvalue()
+
+
+def _valid_zip(
+    *,
+    name: str = "weekly-review",
+    root: str | None = None,
+    skill_md: bytes | None = None,
+    mindatlas: bytes | None = None,
+    resources: dict[str, bytes] | None = None,
+    aliases: list[str] | None = None,
+) -> bytes:
+    root_name = root if root is not None else name
+    members: dict[str, bytes] = {
+        f"{root_name}/SKILL.md": skill_md
+        if skill_md is not None
+        else _minimal_skill_md(name=name),
+        f"{root_name}/mindatlas.yaml": mindatlas
+        if mindatlas is not None
+        else _mindatlas_yaml(legacy_aliases=aliases),
+    }
+    if resources:
+        for path, content in resources.items():
+            members[f"{root_name}/{path}"] = content
+    return _zip_bytes(members)
+
+
+def _operator(principal_id: str = "op-import-1"):
+    from app.assistant.skills.principal import OperatorPrincipal
+
+    return OperatorPrincipal(principal_id=principal_id, role="operator")
+
+
+def _viewer(principal_id: str = "viewer-import-1"):
+    from app.assistant.skills.principal import OperatorPrincipal
+
+    return OperatorPrincipal(principal_id=principal_id, role="viewer")
+
+
+def _sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Malicious archive corpus — rejected at preview (via Plan 01 parser)
+# ---------------------------------------------------------------------------
+
+
+class TestMaliciousArchiveCorpus:
+    def setup_method(self) -> None:
+        reset_caches()
+        from tests._db import make_session
+        from app.assistant.skills.import_preview import (
+            ImportPreviewService,
+            clear_import_preview_store_for_tests,
+        )
+
+        clear_import_preview_store_for_tests()
+        self.db = make_session()
+        self.svc = ImportPreviewService(self.db)
+        self.principal = _operator()
+
+    def teardown_method(self) -> None:
+        self.db.close()
+
+    def _preview_create(self, raw: bytes):
+        from app.common.exceptions import ApiException
+
+        with pytest.raises(ApiException) as ctx:
+            self.svc.preview(
+                raw_zip=raw,
+                mode="create",
+                principal=self.principal,
+            )
+        return ctx.value
+
+    def test_traversal_path_rejected(self) -> None:
+        raw = _zip_bytes(
+            {
+                "evil/../SKILL.md": _minimal_skill_md(name="evil"),
+            }
+        )
+        # top-level may be "evil" with rel "../SKILL.md" or multi top-level
+        exc = self._preview_create(raw)
+        assert exc.status_code in {400, 422}
+
+    def test_absolute_path_rejected(self) -> None:
+        raw = _zip_bytes({"/tmp/SKILL.md": _minimal_skill_md(name="abs-pack")})
+        exc = self._preview_create(raw)
+        assert exc.status_code in {400, 422}
+
+    def test_symlink_entry_rejected(self) -> None:
+        root = "sym-pack"
+        members = {
+            f"{root}/SKILL.md": _minimal_skill_md(name=root),
+            f"{root}/link": b"target",
+        }
+        raw = _zip_bytes(members, external_attr={f"{root}/link": 0o120777 << 16})
+        exc = self._preview_create(raw)
+        assert exc.status_code in {400, 422}
+
+    def test_duplicate_normalized_path_rejected(self) -> None:
+        root = "dup-pack"
+        # Two entries that normalize to the same path are rejected by Plan 01.
+        # Using identical archive paths is the portable form of this check.
+        raw = _zip_bytes(
+            {
+                f"{root}/SKILL.md": _minimal_skill_md(name=root),
+                f"{root}/refs/a.md": b"# a\n",
+            }
+        )
+        # Manually craft a ZIP with two members sharing the same relative path
+        # after stripping the top-level directory (impossible via _zip_bytes
+        # dict). Force via ZipFile double-write of same name is still one
+        # entry; use path variants that normalize equal if allowed — Plan 01
+        # rejects non-normalized forms, so any ".." or "./" form fails.
+        raw = _zip_bytes(
+            {
+                f"{root}/SKILL.md": _minimal_skill_md(name=root),
+                f"{root}/./refs/a.md": b"# a\n",
+            }
+        )
+        exc = self._preview_create(raw)
+        assert exc.status_code in {400, 422}
+
+    def test_zip_bomb_entry_count_rejected(self) -> None:
+        from app.assistant.skills.package_io import MAX_ENTRIES
+
+        root = "bomb-count"
+        members = {f"{root}/SKILL.md": _minimal_skill_md(name=root)}
+        for i in range(MAX_ENTRIES + 5):
+            members[f"{root}/refs/f{i}.md"] = b"x"
+        raw = _zip_bytes(members)
+        exc = self._preview_create(raw)
+        assert exc.status_code in {400, 413, 422}
+
+    def test_spoofed_mime_still_sniffed(self) -> None:
+        # HTML bytes under .png extension — parser still sniffs; must not crash.
+        # Acceptance: either rejects as unsafe active content or stores with sniffed type.
+        root = "mime-pack"
+        raw = _valid_zip(
+            name=root,
+            resources={"assets/fake.png": b"<!DOCTYPE html><script>alert(1)</script>"},
+        )
+        # Preview may succeed with sniffed media type — apply must never execute.
+        # At minimum preview must not leak raw archive into response.
+        try:
+            result = self.svc.preview(
+                raw_zip=raw,
+                mode="create",
+                principal=self.principal,
+            )
+            payload = result.model_dump(by_alias=True, mode="json")
+            blob = str(payload)
+            assert "alert(1)" not in blob
+            assert raw[:8].hex() not in blob
+        except Exception as exc:  # ApiException or ValueError mapped
+            from app.common.exceptions import ApiException
+
+            assert isinstance(exc, ApiException)
+
+    def test_executable_bit_discarded_not_stored(self) -> None:
+        root = "exec-pack"
+        members = {
+            f"{root}/SKILL.md": _minimal_skill_md(name=root),
+            f"{root}/mindatlas.yaml": _mindatlas_yaml(legacy_aliases=[]),
+            f"{root}/scripts/run.sh": b"#!/bin/sh\necho hi\n",
+        }
+        raw = _zip_bytes(
+            members,
+            external_attr={f"{root}/scripts/run.sh": 0o100755 << 16},
+        )
+        result = self.svc.preview(
+            raw_zip=raw,
+            mode="create",
+            principal=self.principal,
+        )
+        # Resource index must report non-executable.
+        for entry in result.resource_index:
+            if entry.get("path") == "scripts/run.sh" or (
+                isinstance(entry, dict) and entry.get("path") == "scripts/run.sh"
+            ):
+                assert entry.get("executable") in (False, None)
+            elif hasattr(entry, "path") and entry.path == "scripts/run.sh":
+                assert getattr(entry, "executable", False) is False
+
+    def test_active_html_svg_not_injected_in_preview_payload(self) -> None:
+        root = "active-pack"
+        raw = _valid_zip(
+            name=root,
+            resources={
+                "assets/page.html": b"<html><script>document.cookie</script></html>",
+                "assets/icon.svg": b'<svg onload="alert(1)"></svg>',
+            },
+        )
+        result = self.svc.preview(
+            raw_zip=raw,
+            mode="create",
+            principal=self.principal,
+        )
+        payload = result.model_dump(by_alias=True, mode="json")
+        text = str(payload)
+        assert "document.cookie" not in text
+        assert "onload=" not in text
+        assert "<script" not in text
+
+
+# ---------------------------------------------------------------------------
+# Two-step preview → apply modes
+# ---------------------------------------------------------------------------
+
+
+class TestImportPreviewApplyModes:
+    def setup_method(self) -> None:
+        reset_caches()
+        from tests._db import make_session
+        from app.assistant.skills.import_preview import (
+            ImportPreviewService,
+            clear_import_preview_store_for_tests,
+        )
+        from app.assistant.skills.service import AgentSkillService
+
+        clear_import_preview_store_for_tests()
+        self.db = make_session()
+        self.svc = ImportPreviewService(self.db)
+        self.pkg_svc = AgentSkillService(self.db)
+        self.principal = _operator()
+
+    def teardown_method(self) -> None:
+        self.db.close()
+
+    def test_create_preview_then_apply_draft_only(self) -> None:
+        name = f"create-{uuid4().hex[:8]}"
+        raw = _valid_zip(name=name, aliases=[])
+        preview = self.svc.preview(
+            raw_zip=raw,
+            mode="create",
+            principal=self.principal,
+        )
+        assert preview.mode == "create"
+        assert preview.candidate_canonical_name == name
+        assert preview.upload_digest == _sha256(raw)
+        assert preview.candidate_content_digest
+        assert preview.preview_id is not None
+        assert preview.expires_at is not None
+        # No package yet
+        from app.assistant.skills.models import AssistantSkillPackage
+
+        assert (
+            self.db.query(AssistantSkillPackage)
+            .filter(AssistantSkillPackage.canonical_name == name)
+            .one_or_none()
+            is None
+        )
+
+        applied = self.svc.apply(
+            preview_id=preview.preview_id,
+            request_id=f"req-create-{name}",
+            principal=self.principal,
+        )
+        assert applied.package.canonical_name == name
+        assert applied.package.catalog_enabled is False
+        assert applied.package.published_version is None
+        assert applied.package.draft_version is not None
+        assert applied.package.draft_version.origin == "import"
+        assert applied.package.draft_version.content_digest == preview.candidate_content_digest
+        assert applied.mode == "create"
+
+    def test_append_replaces_complete_snapshot_no_file_merge(self) -> None:
+        name = f"append-{uuid4().hex[:8]}"
+        # Seed existing package with resource A.
+        from app.assistant.skills.schemas import CreateSkillPackageCommand
+        from app.assistant.skills.package_io import parse_skill_directory_files
+
+        seed_files = {
+            "SKILL.md": _minimal_skill_md(name=name, body="# v1\n"),
+            "mindatlas.yaml": _mindatlas_yaml(legacy_aliases=[]),
+            "references/old.md": b"# old resource\n",
+        }
+        seed = parse_skill_directory_files(seed_files, expected_root_name=None)
+        detail = self.pkg_svc.create_native_package(
+            CreateSkillPackageCommand(parsed=seed, version_name="draft-1", origin="api")
+        )
+        rev = detail.aggregate_revision
+
+        # Append ZIP has different body + only resource B (no old.md).
+        raw = _valid_zip(
+            name=name,
+            skill_md=_minimal_skill_md(name=name, body="# v2 append body\n"),
+            aliases=[],
+            resources={"references/new.md": b"# new only\n"},
+        )
+        preview = self.svc.preview(
+            raw_zip=raw,
+            mode="append_to_existing",
+            principal=self.principal,
+            target_package_id=detail.id,
+            expected_aggregate_revision=rev,
+        )
+        assert preview.mode == "append_to_existing"
+        assert preview.target_package_id == detail.id
+        assert preview.candidate_canonical_name == name
+
+        applied = self.svc.apply(
+            preview_id=preview.preview_id,
+            request_id=f"req-append-{name}",
+            principal=self.principal,
+        )
+        assert applied.package.id == detail.id
+        draft = applied.package.draft_version
+        assert draft is not None
+        assert draft.content_digest == preview.candidate_content_digest
+        # Full snapshot replace: old resource gone, new resource present.
+        version = self.pkg_svc.get_version(detail.id, draft.id)
+        paths = {r.path for r in (version.resources or [])} if hasattr(version, "resources") else set()
+        # Use resource index from version summary / re-export.
+        exported = self.pkg_svc.export_version(package_id=detail.id, version_id=draft.id)
+        with zipfile.ZipFile(io.BytesIO(exported)) as zf:
+            names = [n for n in zf.namelist() if not n.endswith("/")]
+        assert any(n.endswith("references/new.md") for n in names)
+        assert not any(n.endswith("references/old.md") for n in names)
+        # Aggregate revision advanced.
+        refreshed = self.pkg_svc.get_package(detail.id)
+        assert refreshed.aggregate_revision == rev + 1
+        assert refreshed.catalog_enabled is False
+        assert refreshed.published_version is None
+
+    def test_append_on_catalog_enabled_package_keeps_catalog_enabled(self) -> None:
+        """Append must not force catalog_enabled=false or clear publish evidence."""
+        from app.assistant.skills.schemas import (
+            CreateSkillPackageCommand,
+            PublishSkillVersionCommand,
+        )
+        from app.assistant.skills.package_io import parse_skill_directory_files
+        from app.assistant.skills.models import AssistantSkillPackage
+
+        name = f"append-cat-{uuid4().hex[:8]}"
+        seed = parse_skill_directory_files(
+            {
+                "SKILL.md": _minimal_skill_md(name=name, body="# v1 published\n"),
+                "mindatlas.yaml": _mindatlas_yaml(legacy_aliases=[]),
+            },
+            expected_root_name=None,
+        )
+        detail = self.pkg_svc.create_native_package(
+            CreateSkillPackageCommand(parsed=seed, version_name="draft-1", origin="api")
+        )
+        published = self.pkg_svc.publish(
+            detail.id,
+            PublishSkillVersionCommand(draft_version_id=detail.draft_version.id, request_id="pub-req-1", expected_aggregate_revision=0),  # type: ignore[union-attr]
+        )
+        # Plan 09: catalog enable requires a matching gate (no Plan 01 bypass).
+        from app.assistant.skills.admin_service import SkillAdminService
+        from app.assistant.skills.schemas import AggregateRevisionCommand
+        from tests.test_agent_skill_admin_service import _create_passing_enable_gate
+
+        version = self.db.get(
+            __import__(
+                "app.assistant.skills.models", fromlist=["AssistantSkillVersion"]
+            ).AssistantSkillVersion,
+            published.id,
+        )
+        assert version is not None
+        gate = _create_passing_enable_gate(
+            self.db,
+            package_id=detail.id,
+            version_id=published.id,
+            content_digest=str(version.content_digest),
+            binding_digest=str(version.binding_set_digest or ("b" * 64)),
+            package_canonical_name=name,
+        )
+        admin = SkillAdminService(self.db)
+        post_pub = self.pkg_svc.get_package(detail.id)
+        enabled = admin.enable_catalog(
+            detail.id,
+            AggregateRevisionCommand(
+                request_id=f"en-append-cat-{name}",
+                expected_aggregate_revision=int(post_pub.aggregate_revision),
+                gate_id=gate.id,
+            ),
+            principal=self.principal,
+            expected_published_version_id=published.id,
+            gate_id=gate.id,
+        )
+        assert enabled.catalog_enabled is True
+        # Capture evidence fields before append.
+        pkg_row = self.db.get(AssistantSkillPackage, detail.id)
+        assert pkg_row is not None
+        prior_enabled_at = pkg_row.catalog_enabled_at
+        prior_enabled_by = pkg_row.catalog_enabled_by
+        prior_published_id = pkg_row.published_version_id
+        rev = int(pkg_row.aggregate_revision or 0)
+
+        raw = _valid_zip(
+            name=name,
+            skill_md=_minimal_skill_md(name=name, body="# v2 append while catalog on\n"),
+            aliases=[],
+        )
+        preview = self.svc.preview(
+            raw_zip=raw,
+            mode="append_to_existing",
+            principal=self.principal,
+            target_package_id=detail.id,
+            expected_aggregate_revision=rev,
+        )
+        applied = self.svc.apply(
+            preview_id=preview.preview_id,
+            request_id=f"req-append-cat-{name}",
+            principal=self.principal,
+        )
+        assert applied.package.catalog_enabled is True
+        assert applied.package.published_version is not None
+        assert applied.package.published_version.id == prior_published_id
+        assert applied.package.draft_version is not None
+        assert (
+            applied.package.draft_version.content_digest
+            == preview.candidate_content_digest
+        )
+        assert applied.package.aggregate_revision == rev + 1
+
+        refreshed_row = self.db.get(AssistantSkillPackage, detail.id)
+        assert refreshed_row is not None
+        assert refreshed_row.catalog_enabled is True
+        assert refreshed_row.catalog_enabled_at == prior_enabled_at
+        assert refreshed_row.catalog_enabled_by == prior_enabled_by
+        assert refreshed_row.published_version_id == prior_published_id
+
+    def test_fork_rewrites_only_name_field_and_revalidates(self) -> None:
+        source_name = f"src-{uuid4().hex[:8]}"
+        fork_name = f"fork-{uuid4().hex[:8]}"
+        raw = _valid_zip(name=source_name, aliases=[])
+        preview = self.svc.preview(
+            raw_zip=raw,
+            mode="fork_as_new",
+            principal=self.principal,
+            fork_canonical_name=fork_name,
+        )
+        assert preview.mode == "fork_as_new"
+        assert preview.candidate_canonical_name == fork_name
+        # Content digest must differ from unforked parse (name rewrite).
+        from app.assistant.skills.package_io import parse_skill_zip
+
+        original = parse_skill_zip(io.BytesIO(raw), compressed_size=len(raw))
+        assert preview.candidate_content_digest != original.content_digest
+
+        applied = self.svc.apply(
+            preview_id=preview.preview_id,
+            request_id=f"req-fork-{fork_name}",
+            principal=self.principal,
+        )
+        assert applied.package.canonical_name == fork_name
+        assert applied.package.catalog_enabled is False
+        assert applied.package.published_version is None
+        exported = self.pkg_svc.export_version(
+            package_id=applied.package.id,
+            version_id=applied.package.draft_version.id,
+        )
+        with zipfile.ZipFile(io.BytesIO(exported)) as zf:
+            skill_md = zf.read(f"{fork_name}/SKILL.md").decode("utf-8")
+        assert f"name: {fork_name}" in skill_md
+        assert source_name not in skill_md.split("---")[1]
+
+    def test_append_name_mismatch_rejected(self) -> None:
+        from app.assistant.skills.schemas import CreateSkillPackageCommand
+        from app.assistant.skills.package_io import parse_skill_directory_files
+        from app.common.exceptions import ApiException
+
+        name = f"append-mm-{uuid4().hex[:8]}"
+        seed = parse_skill_directory_files(
+            {
+                "SKILL.md": _minimal_skill_md(name=name),
+                "mindatlas.yaml": _mindatlas_yaml(legacy_aliases=[]),
+            },
+            expected_root_name=None,
+        )
+        detail = self.pkg_svc.create_native_package(
+            CreateSkillPackageCommand(parsed=seed, version_name="draft-1")
+        )
+        raw = _valid_zip(name="other-name-xyz", aliases=[])
+        with pytest.raises(ApiException) as ctx:
+            self.svc.preview(
+                raw_zip=raw,
+                mode="append_to_existing",
+                principal=self.principal,
+                target_package_id=detail.id,
+                expected_aggregate_revision=detail.aggregate_revision,
+            )
+        assert ctx.value.status_code in {409, 422}
+
+    def test_create_name_collision_rejected_at_preview(self) -> None:
+        from app.assistant.skills.schemas import CreateSkillPackageCommand
+        from app.assistant.skills.package_io import parse_skill_directory_files
+        from app.common.exceptions import ApiException
+
+        name = f"collide-{uuid4().hex[:8]}"
+        seed = parse_skill_directory_files(
+            {
+                "SKILL.md": _minimal_skill_md(name=name),
+                "mindatlas.yaml": _mindatlas_yaml(legacy_aliases=[]),
+            },
+            expected_root_name=None,
+        )
+        self.pkg_svc.create_native_package(
+            CreateSkillPackageCommand(parsed=seed, version_name="draft-1")
+        )
+        raw = _valid_zip(name=name, aliases=[])
+        with pytest.raises(ApiException) as ctx:
+            self.svc.preview(
+                raw_zip=raw,
+                mode="create",
+                principal=self.principal,
+            )
+        assert ctx.value.status_code == 409
+
+    def test_fork_alias_collision_rejected(self) -> None:
+        from app.assistant.skills.schemas import CreateSkillPackageCommand
+        from app.assistant.skills.package_io import parse_skill_directory_files
+        from app.common.exceptions import ApiException
+
+        existing = f"exist-{uuid4().hex[:8]}"
+        seed = parse_skill_directory_files(
+            {
+                "SKILL.md": _minimal_skill_md(name=existing),
+                "mindatlas.yaml": _mindatlas_yaml(legacy_aliases=["shared-alias-x"]),
+            },
+            expected_root_name=None,
+        )
+        self.pkg_svc.create_native_package(
+            CreateSkillPackageCommand(parsed=seed, version_name="draft-1")
+        )
+        fork_name = f"forkc-{uuid4().hex[:8]}"
+        raw = _valid_zip(
+            name=f"src-{uuid4().hex[:8]}",
+            aliases=["shared-alias-x"],
+        )
+        with pytest.raises(ApiException) as ctx:
+            self.svc.preview(
+                raw_zip=raw,
+                mode="fork_as_new",
+                principal=self.principal,
+                fork_canonical_name=fork_name,
+            )
+        assert ctx.value.status_code == 409
+
+
+# ---------------------------------------------------------------------------
+# Token binding, expiry, CAS, idempotency
+# ---------------------------------------------------------------------------
+
+
+class TestPreviewTokenAndIdempotency:
+    def setup_method(self) -> None:
+        reset_caches()
+        from tests._db import make_session
+        from app.assistant.skills.import_preview import (
+            ImportPreviewService,
+            clear_import_preview_store_for_tests,
+        )
+
+        clear_import_preview_store_for_tests()
+        self.db = make_session()
+        self.svc = ImportPreviewService(self.db)
+        self.principal = _operator()
+
+    def teardown_method(self) -> None:
+        self.db.close()
+
+    def test_missing_principal_rejected(self) -> None:
+        from app.common.exceptions import ApiException
+
+        raw = _valid_zip(name=f"nop-{uuid4().hex[:8]}", aliases=[])
+        with pytest.raises(ApiException) as ctx:
+            self.svc.preview(raw_zip=raw, mode="create", principal=None)
+        assert ctx.value.status_code == 401
+
+    def test_actor_mismatch_on_apply_rejected(self) -> None:
+        from app.common.exceptions import ApiException
+
+        name = f"actor-{uuid4().hex[:8]}"
+        raw = _valid_zip(name=name, aliases=[])
+        preview = self.svc.preview(
+            raw_zip=raw, mode="create", principal=self.principal
+        )
+        other = _operator("op-other")
+        with pytest.raises(ApiException) as ctx:
+            self.svc.apply(
+                preview_id=preview.preview_id,
+                request_id=f"req-{name}",
+                principal=other,
+            )
+        assert ctx.value.status_code in {401, 403, 409}
+
+    def test_stale_aggregate_revision_rejected_on_apply(self) -> None:
+        from app.assistant.skills.service import AgentSkillService
+        from app.assistant.skills.schemas import CreateSkillPackageCommand
+        from app.assistant.skills.package_io import parse_skill_directory_files
+        from app.assistant.skills.admin_service import SkillAdminService
+        from app.assistant.skills.schemas import UpdateSkillPackageMetadataCommand
+        from app.common.exceptions import ApiException
+
+        pkg_svc = AgentSkillService(self.db)
+        name = f"stale-{uuid4().hex[:8]}"
+        seed = parse_skill_directory_files(
+            {
+                "SKILL.md": _minimal_skill_md(name=name),
+                "mindatlas.yaml": _mindatlas_yaml(legacy_aliases=[]),
+            },
+            expected_root_name=None,
+        )
+        detail = pkg_svc.create_native_package(
+            CreateSkillPackageCommand(parsed=seed, version_name="draft-1")
+        )
+        raw = _valid_zip(
+            name=name,
+            skill_md=_minimal_skill_md(name=name, body="# changed\n"),
+            aliases=[],
+        )
+        preview = self.svc.preview(
+            raw_zip=raw,
+            mode="append_to_existing",
+            principal=self.principal,
+            target_package_id=detail.id,
+            expected_aggregate_revision=detail.aggregate_revision,
+        )
+        # Bump revision under the operator.
+        admin = SkillAdminService(self.db)
+        admin.update_metadata(
+            detail.id,
+            UpdateSkillPackageMetadataCommand(
+                request_id=f"bump-{name}",
+                expected_aggregate_revision=detail.aggregate_revision,
+                display_name="bumped",
+            ),
+            principal=self.principal,
+        )
+        with pytest.raises(ApiException) as ctx:
+            self.svc.apply(
+                preview_id=preview.preview_id,
+                request_id=f"req-stale-{name}",
+                principal=self.principal,
+            )
+        assert ctx.value.status_code == 409
+        assert ctx.value.code in {40994, 40993, 40997}
+
+    def test_identical_request_id_retry_returns_persisted(self) -> None:
+        name = f"idem-{uuid4().hex[:8]}"
+        raw = _valid_zip(name=name, aliases=[])
+        preview = self.svc.preview(
+            raw_zip=raw, mode="create", principal=self.principal
+        )
+        req = f"req-idem-{name}"
+        first = self.svc.apply(
+            preview_id=preview.preview_id,
+            request_id=req,
+            principal=self.principal,
+        )
+        second = self.svc.apply(
+            preview_id=preview.preview_id,
+            request_id=req,
+            principal=self.principal,
+        )
+        assert first.package.id == second.package.id
+        assert first.package.draft_version.id == second.package.draft_version.id
+        # Only one package row.
+        from app.assistant.skills.models import AssistantSkillPackage
+
+        rows = (
+            self.db.query(AssistantSkillPackage)
+            .filter(AssistantSkillPackage.canonical_name == name)
+            .all()
+        )
+        assert len(rows) == 1
+
+    def test_create_apply_stamps_last_admin_request_id_in_one_shot(self) -> None:
+        """Create apply must stamp last_admin_request_* with the package insert."""
+        from app.assistant.skills.models import AssistantSkillPackage
+
+        name = f"stamp-{uuid4().hex[:8]}"
+        raw = _valid_zip(name=name, aliases=[])
+        preview = self.svc.preview(
+            raw_zip=raw, mode="create", principal=self.principal
+        )
+        req = f"req-stamp-{name}"
+        applied = self.svc.apply(
+            preview_id=preview.preview_id,
+            request_id=req,
+            principal=self.principal,
+        )
+        package = (
+            self.db.query(AssistantSkillPackage)
+            .filter(AssistantSkillPackage.id == applied.package.id)
+            .one()
+        )
+        assert package.last_admin_request_id == req
+        assert package.last_admin_request_digest is not None
+        assert len(package.last_admin_request_digest) == 64
+        assert package.catalog_enabled is False
+        assert package.published_version_id is None
+
+    def test_create_cold_index_retry_returns_package_by_last_admin_request(
+        self,
+    ) -> None:
+        """After durable success, process-local clear still returns the package.
+
+        Preview/apply state lives in the DB; clear_import_preview_store_for_tests
+        is a no-op that proves process memory is irrelevant.
+        """
+        from app.assistant.skills.import_preview import (
+            clear_import_preview_store_for_tests,
+        )
+        from app.assistant.skills.models import AssistantSkillPackage
+
+        name = f"cold-{uuid4().hex[:8]}"
+        raw = _valid_zip(name=name, aliases=[])
+        preview = self.svc.preview(
+            raw_zip=raw, mode="create", principal=self.principal
+        )
+        req = f"req-cold-{name}"
+        first = self.svc.apply(
+            preview_id=preview.preview_id,
+            request_id=req,
+            principal=self.principal,
+        )
+        package = (
+            self.db.query(AssistantSkillPackage)
+            .filter(AssistantSkillPackage.id == first.package.id)
+            .one()
+        )
+        assert package.last_admin_request_id == req
+        stamped_digest = package.last_admin_request_digest
+        assert stamped_digest and len(stamped_digest) == 64
+
+        clear_import_preview_store_for_tests()
+
+        second = self.svc.apply(
+            preview_id=preview.preview_id,
+            request_id=req,
+            principal=self.principal,
+        )
+        assert second.package.id == first.package.id
+        assert second.package.draft_version.id == first.package.draft_version.id
+        rows = (
+            self.db.query(AssistantSkillPackage)
+            .filter(AssistantSkillPackage.canonical_name == name)
+            .all()
+        )
+        assert len(rows) == 1
+        assert rows[0].last_admin_request_id == req
+        assert rows[0].last_admin_request_digest == stamped_digest
+
+    def test_request_id_reuse_different_payload_conflicts(self) -> None:
+        from app.common.exceptions import ApiException
+
+        name_a = f"reqa-{uuid4().hex[:8]}"
+        name_b = f"reqb-{uuid4().hex[:8]}"
+        raw_a = _valid_zip(name=name_a, aliases=[])
+        raw_b = _valid_zip(name=name_b, aliases=[])
+        p_a = self.svc.preview(raw_zip=raw_a, mode="create", principal=self.principal)
+        p_b = self.svc.preview(raw_zip=raw_b, mode="create", principal=self.principal)
+        req = f"shared-req-{uuid4().hex[:8]}"
+        self.svc.apply(
+            preview_id=p_a.preview_id, request_id=req, principal=self.principal
+        )
+        with pytest.raises(ApiException) as ctx:
+            self.svc.apply(
+                preview_id=p_b.preview_id, request_id=req, principal=self.principal
+            )
+        assert ctx.value.status_code == 409
+        assert ctx.value.code == 40997
+
+    def test_consumed_preview_different_request_id_conflicts_cleanly(self) -> None:
+        """After apply nulls archive_bytes, a new requestId must 40997 — not re-parse."""
+        from app.common.exceptions import ApiException
+
+        name = f"consumed-{uuid4().hex[:8]}"
+        raw = _valid_zip(name=name, aliases=[])
+        preview = self.svc.preview(
+            raw_zip=raw, mode="create", principal=self.principal
+        )
+        first = self.svc.apply(
+            preview_id=preview.preview_id,
+            request_id=f"req-first-{name}",
+            principal=self.principal,
+        )
+        assert first.package.canonical_name == name
+        record = self.svc._get_record(preview.preview_id)
+        assert record.consumed is True
+        assert record.archive_bytes is None
+
+        with pytest.raises(ApiException) as ctx:
+            self.svc.apply(
+                preview_id=preview.preview_id,
+                request_id=f"req-second-{name}",
+                principal=self.principal,
+            )
+        assert ctx.value.status_code == 409
+        assert ctx.value.code == 40997
+        # Must not surface archive/validation errors from empty bytes.
+        msg = (ctx.value.message or "").lower()
+        assert "zip" not in msg
+        assert "archive" not in msg
+        assert "empty" not in msg
+
+    def test_stale_bytes_after_preview_rejected(self) -> None:
+        from app.common.exceptions import ApiException
+
+        name = f"stalebytes-{uuid4().hex[:8]}"
+        raw = _valid_zip(name=name, aliases=[])
+        preview = self.svc.preview(
+            raw_zip=raw, mode="create", principal=self.principal
+        )
+        record = self.svc._get_record(preview.preview_id)
+        # Mutate stored bytes after preview binding (digest no longer matches).
+        record.archive_bytes = b"PK\x03\x04not-a-real-skill-zip-payload"
+        self.db.commit()
+
+        with pytest.raises(ApiException) as ctx:
+            self.svc.apply(
+                preview_id=preview.preview_id,
+                request_id=f"req-stalebytes-{name}",
+                principal=self.principal,
+            )
+        assert ctx.value.status_code == 409
+        assert ctx.value.code in {40993, 40997}
+
+    def test_request_id_reservation_released_on_failure(self) -> None:
+        """Failed apply does not consume requestId so a retry can proceed."""
+        from app.common.exceptions import ApiException
+
+        name = f"resfail-{uuid4().hex[:8]}"
+        raw = _valid_zip(name=name, aliases=[])
+        preview = self.svc.preview(
+            raw_zip=raw, mode="create", principal=self.principal
+        )
+        req = f"req-resfail-{name}"
+        record = self.svc._get_record(preview.preview_id)
+        # Force a stale-bytes failure; request must remain reusable.
+        record.archive_bytes = b"PK\x03\x04corrupted"
+        self.db.commit()
+
+        with pytest.raises(ApiException) as ctx:
+            self.svc.apply(
+                preview_id=preview.preview_id,
+                request_id=req,
+                principal=self.principal,
+            )
+        assert ctx.value.status_code == 409
+        record = self.svc._get_record(preview.preview_id)
+        assert record.consumed is False
+        assert record.applied_request_id is None
+
+        # Restore bytes and retry with same requestId succeeds.
+        record.archive_bytes = raw
+        self.db.commit()
+        applied = self.svc.apply(
+            preview_id=preview.preview_id,
+            request_id=req,
+            principal=self.principal,
+        )
+        assert applied.package.canonical_name == name
+
+    def test_expired_preview_rejected(self, monkeypatch) -> None:
+        from datetime import datetime, timedelta, timezone
+        from app.common.exceptions import ApiException
+
+        name = f"exp-{uuid4().hex[:8]}"
+        raw = _valid_zip(name=name, aliases=[])
+        preview = self.svc.preview(
+            raw_zip=raw, mode="create", principal=self.principal
+        )
+        # Manually expire the stored durable row.
+        record = self.svc._get_record(preview.preview_id)
+        record.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        self.db.commit()
+        with pytest.raises(ApiException) as ctx:
+            self.svc.apply(
+                preview_id=preview.preview_id,
+                request_id=f"req-exp-{name}",
+                principal=self.principal,
+            )
+        assert ctx.value.status_code in {409, 410, 422}
+
+    def test_unknown_preview_id_rejected(self) -> None:
+        from app.common.exceptions import ApiException
+        from uuid import uuid4 as u4
+
+        with pytest.raises(ApiException) as ctx:
+            self.svc.apply(
+                preview_id=u4(),
+                request_id="req-missing",
+                principal=self.principal,
+            )
+        assert ctx.value.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Durable cross-session / expiry (process memory irrelevant)
+# ---------------------------------------------------------------------------
+
+
+class TestDurableImportPreviewStore:
+    def setup_method(self) -> None:
+        reset_caches()
+        from tests._db import make_session
+        from app.assistant.skills.import_preview import clear_import_preview_store_for_tests
+
+        clear_import_preview_store_for_tests()
+        # One shared SQLite file with two independent sessions.
+        self._seed = make_session()
+        from sqlalchemy.orm import sessionmaker
+
+        self._factory = sessionmaker(
+            bind=self._seed.get_bind(),
+            autoflush=True,
+            autocommit=False,
+            future=True,
+        )
+        self.principal = _operator()
+
+    def teardown_method(self) -> None:
+        self._seed.close()
+
+    def test_preview_created_in_one_session_applies_in_another(self) -> None:
+        from app.assistant.skills.import_preview import (
+            ImportPreviewService,
+            clear_import_preview_store_for_tests,
+        )
+
+        archive = _valid_zip(name="valid-weekly-review", aliases=[])
+        with self._factory() as first:
+            preview = ImportPreviewService(first).preview(
+                raw_zip=archive,
+                mode="create",
+                principal=self.principal,
+            )
+        clear_import_preview_store_for_tests()  # proves process memory is irrelevant
+        with self._factory() as second:
+            result = ImportPreviewService(second).apply(
+                preview_id=preview.preview_id,
+                preview_digest=preview.preview_digest,
+                request_id="import-1",
+                principal=self.principal,
+            )
+        assert result.package.canonical_name == "valid-weekly-review"
+
+    def test_expired_preview_drops_archive_but_retains_request_audit(self) -> None:
+        from datetime import timedelta
+
+        from app.assistant.skills.import_preview import (
+            ImportPreviewService,
+            expire_import_previews,
+        )
+        from app.assistant.skills.models import AssistantSkillImportPreview
+        from app.common.time import utcnow
+
+        archive = _valid_zip(name=f"expire-{uuid4().hex[:8]}", aliases=[])
+        with self._factory() as session:
+            preview = ImportPreviewService(session).preview(
+                raw_zip=archive,
+                mode="create",
+                principal=self.principal,
+            )
+            preview_row = session.get(AssistantSkillImportPreview, preview.preview_id)
+            assert preview_row is not None
+            assert preview_row.archive_bytes is not None
+            # Force expiry at "now" for the cleanup helper.
+            preview_row.expires_at = utcnow() - timedelta(seconds=1)
+            session.commit()
+            session.refresh(preview_row)
+
+            expire_import_previews(session, now=preview_row.expires_at)
+            session.refresh(preview_row)
+            assert preview_row.archive_bytes is None
+            assert preview_row.upload_digest is not None
+            assert preview_row.preview_digest is not None
+            assert preview_row.consumed is False
+
+    def test_apply_package_and_preview_consume_are_same_transaction(self) -> None:
+        """Package insert + preview stamp share one commit; failure rolls both back."""
+        from app.assistant.skills.import_preview import ImportPreviewService
+        from app.assistant.skills.models import (
+            AssistantSkillImportPreview,
+            AssistantSkillPackage,
+        )
+        from app.common.exceptions import ApiException
+
+        name = f"atomic-{uuid4().hex[:8]}"
+        archive = _valid_zip(name=name, aliases=[])
+        with self._factory() as session:
+            preview = ImportPreviewService(session).preview(
+                raw_zip=archive,
+                mode="create",
+                principal=self.principal,
+            )
+
+        with self._factory() as session:
+            svc = ImportPreviewService(session)
+            real_commit = session.commit
+            calls = {"n": 0}
+
+            def boom_commit() -> None:
+                calls["n"] += 1
+                # Fail the apply unit-of-work commit only (preview() already committed).
+                raise RuntimeError("simulated crash before durable apply commit")
+
+            session.commit = boom_commit  # type: ignore[method-assign]
+            with pytest.raises(RuntimeError, match="simulated crash"):
+                svc.apply(
+                    preview_id=preview.preview_id,
+                    preview_digest=preview.preview_digest,
+                    request_id=f"req-atomic-{name}",
+                    principal=self.principal,
+                )
+            session.commit = real_commit  # type: ignore[method-assign]
+            session.rollback()
+
+        with self._factory() as session:
+            packages = (
+                session.query(AssistantSkillPackage)
+                .filter(AssistantSkillPackage.canonical_name == name)
+                .all()
+            )
+            assert packages == []
+            row = session.get(AssistantSkillImportPreview, preview.preview_id)
+            assert row is not None
+            assert row.consumed is False
+            assert row.applied_request_id is None
+            assert row.archive_bytes is not None
+
+            # Recovery: same requestId applies cleanly after the failed attempt.
+            result = ImportPreviewService(session).apply(
+                preview_id=preview.preview_id,
+                preview_digest=preview.preview_digest,
+                request_id=f"req-atomic-{name}",
+                principal=self.principal,
+            )
+            assert result.package.canonical_name == name
+            session.refresh(row)
+            assert row.consumed is True
+            assert row.archive_bytes is None
+            assert row.applied_request_id == f"req-atomic-{name}"
+
+    def test_concurrent_same_request_id_create_conflicts_or_idempotent(
+        self,
+    ) -> None:
+        """Two workers, same requestId: at most one package; conflict or identical retry."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        from app.assistant.skills.import_preview import ImportPreviewService
+        from app.assistant.skills.models import AssistantSkillPackage
+        from app.common.exceptions import ApiException
+
+        name_a = f"cna-{uuid4().hex[:8]}"
+        name_b = f"cnb-{uuid4().hex[:8]}"
+        raw_a = _valid_zip(name=name_a, aliases=[])
+        raw_b = _valid_zip(name=name_b, aliases=[])
+        req = f"shared-conc-{uuid4().hex[:8]}"
+
+        with self._factory() as session:
+            p_a = ImportPreviewService(session).preview(
+                raw_zip=raw_a, mode="create", principal=self.principal
+            )
+            p_b = ImportPreviewService(session).preview(
+                raw_zip=raw_b, mode="create", principal=self.principal
+            )
+
+        def _apply(preview_id, preview_digest):
+            with self._factory() as session:
+                try:
+                    result = ImportPreviewService(session).apply(
+                        preview_id=preview_id,
+                        preview_digest=preview_digest,
+                        request_id=req,
+                        principal=self.principal,
+                    )
+                    return ("ok", str(result.package.id), result.package.canonical_name)
+                except ApiException as exc:
+                    return ("err", exc.code, exc.status_code)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futs = [
+                pool.submit(_apply, p_a.preview_id, p_a.preview_digest),
+                pool.submit(_apply, p_b.preview_id, p_b.preview_digest),
+            ]
+            outcomes = [f.result() for f in as_completed(futs)]
+
+        oks = [o for o in outcomes if o[0] == "ok"]
+        errs = [o for o in outcomes if o[0] == "err"]
+        # Different payloads: exactly one success and one 40997, or both conflict
+        # if the second also races after rollback (must never double-create).
+        assert len(oks) <= 1
+        if len(oks) == 1:
+            assert len(errs) == 1
+            assert errs[0][1] == 40997
+            assert errs[0][2] == 409
+        else:
+            assert all(o[1] == 40997 for o in errs)
+
+        with self._factory() as session:
+            rows = (
+                session.query(AssistantSkillPackage)
+                .filter(AssistantSkillPackage.last_admin_request_id == req)
+                .all()
+            )
+            assert len(rows) <= 1
+            # Never both namespaces under the same requestId.
+            names = {
+                r.canonical_name
+                for r in session.query(AssistantSkillPackage)
+                .filter(AssistantSkillPackage.canonical_name.in_([name_a, name_b]))
+                .all()
+            }
+            assert len(names) <= 1
+
+
+# ---------------------------------------------------------------------------
+# Deterministic export after import; scripts non-executable
+# ---------------------------------------------------------------------------
+
+
+class TestExportAfterImport:
+    def setup_method(self) -> None:
+        reset_caches()
+        from tests._db import make_session
+        from app.assistant.skills.import_preview import (
+            ImportPreviewService,
+            clear_import_preview_store_for_tests,
+        )
+        from app.assistant.skills.service import AgentSkillService
+
+        clear_import_preview_store_for_tests()
+        self.db = make_session()
+        self.svc = ImportPreviewService(self.db)
+        self.pkg_svc = AgentSkillService(self.db)
+        self.principal = _operator()
+
+    def teardown_method(self) -> None:
+        self.db.close()
+
+    def test_import_export_preserves_script_bytes_without_exec_bit(self) -> None:
+        name = f"expscript-{uuid4().hex[:8]}"
+        script = b"#!/usr/bin/env python3\nprint('hello')\n"
+        raw = _valid_zip(
+            name=name,
+            aliases=[],
+            resources={"scripts/hello.py": script},
+        )
+        # Force executable bit on the script entry.
+        members = {
+            f"{name}/SKILL.md": _minimal_skill_md(name=name),
+            f"{name}/mindatlas.yaml": _mindatlas_yaml(legacy_aliases=[]),
+            f"{name}/scripts/hello.py": script,
+        }
+        raw = _zip_bytes(
+            members,
+            external_attr={f"{name}/scripts/hello.py": 0o100755 << 16},
+        )
+        preview = self.svc.preview(
+            raw_zip=raw, mode="create", principal=self.principal
+        )
+        applied = self.svc.apply(
+            preview_id=preview.preview_id,
+            request_id=f"req-{name}",
+            principal=self.principal,
+        )
+        exported = self.pkg_svc.export_version(
+            package_id=applied.package.id,
+            version_id=applied.package.draft_version.id,
+        )
+        with zipfile.ZipFile(io.BytesIO(exported)) as zf:
+            info = zf.getinfo(f"{name}/scripts/hello.py")
+            mode = (info.external_attr >> 16) & 0o777
+            assert mode == 0o644
+            assert zf.read(info) == script
+            # Deterministic timestamps
+            assert info.date_time == (1980, 1, 1, 0, 0, 0)
+        # Byte-identical re-export
+        exported2 = self.pkg_svc.export_version(
+            package_id=applied.package.id,
+            version_id=applied.package.draft_version.id,
+        )
+        assert _sha256(exported) == _sha256(exported2)
+
+
+# ---------------------------------------------------------------------------
+# Safety: no leaks of temp path / raw archive / secrets into responses
+# ---------------------------------------------------------------------------
+
+
+class TestResponseSafety:
+    def setup_method(self) -> None:
+        reset_caches()
+        from tests._db import make_session
+        from app.assistant.skills.import_preview import (
+            ImportPreviewService,
+            clear_import_preview_store_for_tests,
+        )
+
+        clear_import_preview_store_for_tests()
+        self.db = make_session()
+        self.svc = ImportPreviewService(self.db)
+        self.principal = _operator()
+
+    def teardown_method(self) -> None:
+        self.db.close()
+
+    def test_preview_response_excludes_raw_bytes_and_temp_paths(self) -> None:
+        name = f"safe-{uuid4().hex[:8]}"
+        raw = _valid_zip(name=name, aliases=[])
+        preview = self.svc.preview(
+            raw_zip=raw, mode="create", principal=self.principal
+        )
+        payload = preview.model_dump(by_alias=True, mode="json")
+        text = str(payload)
+        assert "tmp" not in text.lower() or "timestamp" in text.lower()
+        # No raw ZIP magic / full body
+        assert "PK\x03\x04" not in text
+        assert raw.hex() not in text
+        # No credential-looking fields
+        for banned in ("password", "api_key", "authorization", "secret_key"):
+            assert banned not in text.lower() or banned in (
+                "authorization",  # may appear in docs; ensure no values
+            )
+
+    def test_apply_response_is_package_detail_only(self) -> None:
+        name = f"safe2-{uuid4().hex[:8]}"
+        raw = _valid_zip(name=name, aliases=[])
+        preview = self.svc.preview(
+            raw_zip=raw, mode="create", principal=self.principal
+        )
+        applied = self.svc.apply(
+            preview_id=preview.preview_id,
+            request_id=f"req-{name}",
+            principal=self.principal,
+        )
+        payload = applied.model_dump(by_alias=True, mode="json")
+        text = str(payload)
+        assert "PK\x03\x04" not in text
+        assert raw.hex() not in text
+        assert "/tmp/" not in text
+
+
+# ---------------------------------------------------------------------------
+# Architecture: reuse Plan 01 parser; no duplicate normalization
+# ---------------------------------------------------------------------------
+
+
+def test_import_preview_reuses_plan01_parser_no_duplicate_normalization() -> None:
+    """import_preview must call package_io helpers; must not reimplement them."""
+    import app.assistant.skills.import_preview as mod
+
+    source = inspect.getsource(mod)
+    # Must reference Plan 01 entry points.
+    assert "parse_skill_zip" in source
+    assert "package_io" in source or "from app.assistant.skills.package_io" in source
+
+    # Must not redefine path normalization / zip security.
+    tree = ast.parse(source)
+    defined = {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    forbidden_defs = {
+        "normalize_package_path",
+        "parse_skill_zip",
+        "parse_skill_directory_files",
+        "detect_media_type",
+        "_reject_special_zip_entry",
+        "export_skill_package",
+    }
+    overlap = defined & forbidden_defs
+    assert not overlap, f"import_preview redefines Plan 01 symbols: {overlap}"
+
+    # No local reimplementation of path traversal checks.
+    for banned in (
+        "posixpath.normpath",
+        "os.path.normpath",
+        "ZipFile(",
+        "zipfile.ZipFile",
+    ):
+        # ZipFile may appear only if re-exporting; forbid local archive open.
+        if banned in ("ZipFile(", "zipfile.ZipFile"):
+            # Allow imports of package_io only — scan for direct zipfile use.
+            assert "zipfile.ZipFile" not in source
+            assert "ZipFile(" not in source
+
+
+def test_rewrite_skill_md_name_only_changes_name_field() -> None:
+    from app.assistant.skills.package_io import (
+        rewrite_skill_md_frontmatter_name,
+        parse_skill_md,
+        parse_skill_directory_files,
+    )
+
+    original = _minimal_skill_md(name="old-name", body="# Keep body\n\nstable.\n")
+    rewritten = rewrite_skill_md_frontmatter_name(original, new_name="new-name")
+    fm = parse_skill_md(rewritten)
+    assert fm.name == "new-name"
+    assert b"# Keep body" in rewritten
+    # Full package revalidation succeeds under new name.
+    pkg = parse_skill_directory_files(
+        {
+            "SKILL.md": rewritten,
+            "mindatlas.yaml": _mindatlas_yaml(legacy_aliases=[]),
+        },
+        expected_root_name="new-name",
+    )
+    assert pkg.canonical_name == "new-name"
+
+
+# ---------------------------------------------------------------------------
+# Admin router endpoints (trusted mount)
+# ---------------------------------------------------------------------------
+
+
+class TestImportPreviewAdminRoutes:
+    def setup_method(self) -> None:
+        reset_caches()
+        import os
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from app.assistant.skills.admin_router import (
+            TRUSTED_MOUNT_ENV,
+            mount_skill_admin_router,
+        )
+        from app.common.exceptions import register_exception_handlers
+        from app.database import get_db
+        from tests._db import make_session
+
+        os.environ[TRUSTED_MOUNT_ENV] = "1"
+        os.environ["APP_ENV"] = "development"
+        self.db = make_session()
+        app = FastAPI()
+        register_exception_handlers(app)
+
+        def _override():
+            try:
+                yield self.db
+            finally:
+                pass
+
+        app.dependency_overrides[get_db] = _override
+        assert mount_skill_admin_router(app, app_env="development") is True
+        self.client = TestClient(app)
+        self.headers = {
+            "X-MindAtlas-Operator-Id": "op-route-1",
+            "X-MindAtlas-Operator-Role": "operator",
+        }
+
+    def teardown_method(self) -> None:
+        import os
+        from app.assistant.skills.admin_router import TRUSTED_MOUNT_ENV
+
+        os.environ.pop(TRUSTED_MOUNT_ENV, None)
+        os.environ.pop("APP_ENV", None)
+        self.db.close()
+
+    def test_preview_and_apply_http_create(self) -> None:
+        name = f"http-{uuid4().hex[:8]}"
+        raw = _valid_zip(name=name, aliases=[])
+        resp = self.client.post(
+            "/api/assistant-config/skill-admin/skill-packages/import/preview",
+            headers=self.headers,
+            files={"file": ("pack.zip", raw, "application/zip")},
+            data={"mode": "create", "expectedAggregateRevision": "0"},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()["data"]
+        assert body["mode"] == "create"
+        assert body["candidateCanonicalName"] == name
+        preview_id = body["previewId"]
+
+        apply_resp = self.client.post(
+            "/api/assistant-config/skill-admin/skill-packages/import/apply",
+            headers=self.headers,
+            json={
+                "previewId": preview_id,
+                "requestId": f"req-http-{name}",
+            },
+        )
+        assert apply_resp.status_code == 200, apply_resp.text
+        pkg = apply_resp.json()["data"]["package"]
+        assert pkg["canonicalName"] == name
+        assert pkg["catalogEnabled"] is False
+        assert pkg["publishedVersion"] is None
+        assert pkg["draftVersion"] is not None

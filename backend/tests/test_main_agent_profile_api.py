@@ -34,6 +34,12 @@ EXPECTED_MAIN_AGENT_PATHS = {
     ("POST", "/api/assistant-config/main-agent-profiles/default/publish"),
 }
 
+# Production / always-mounted surface must not expose version detail (Plan 09
+# moves that route under the trusted skill-admin parent prefix).
+PROTECTED_PROFILE_VERSION_DETAIL = (
+    "/api/assistant-config/main-agent-profiles/default/versions/{version_id}"
+)
+
 
 def _snapshot_payload(**overrides: Any) -> dict[str, Any]:
     payload = copy.deepcopy(default_main_agent_profile_snapshot().normalized_payload())
@@ -100,17 +106,35 @@ class MainAgentProfileApiTests(unittest.TestCase):
         self.assertNotIn("activate", json.dumps(data).lower())
         self.assertNotIn("runtime_enabled", json.dumps(data))  # camelCase only
 
+    def test_production_openapi_omits_profile_version_detail(self) -> None:
+        """Always-mounted production surface omits protected version detail."""
+        schema = self.client.get("/openapi.json").json()
+        paths = schema["paths"]
+        self.assertNotIn(PROTECTED_PROFILE_VERSION_DETAIL, paths)
+        for expected in EXPECTED_MAIN_AGENT_PATHS:
+            method, path = expected
+            self.assertIn(path, paths)
+            self.assertIn(method.lower(), {m.lower() for m in paths[path]})
+
     def test_save_draft_list_versions_publish(self) -> None:
         # Ensure default exists.
         profile = self.client.get(
             "/api/assistant-config/main-agent-profiles/default"
         ).json()["data"]
         self.assertFalse(profile["runtimeEnabled"])
+        rev = int(profile.get("aggregateRevision") or 0)
 
         snap = _snapshot_payload(basePrompt="Updated main agent prompt for draft.")
         saved = self.client.put(
             "/api/assistant-config/main-agent-profiles/default/draft",
-            content=json.dumps({"snapshot": snap, "versionName": "admin-draft"}),
+            content=json.dumps(
+                {
+                    "snapshot": snap,
+                    "versionName": "admin-draft",
+                    "expectedAggregateRevision": rev,
+                    "requestId": f"profile-draft-{uuid4().hex[:8]}",
+                }
+            ),
             headers={"Content-Type": "application/json"},
         )
         self.assertEqual(saved.status_code, 200, saved.text)
@@ -132,9 +156,17 @@ class MainAgentProfileApiTests(unittest.TestCase):
         self.assertGreaterEqual(page["total"], 1)
         self.assertTrue(any(item["id"] == draft_id for item in page["items"]))
 
+        after_draft = self.client.get(
+            "/api/assistant-config/main-agent-profiles/default"
+        ).json()["data"]
+        pub_rev = int(after_draft.get("aggregateRevision") or 0)
         published = self.client.post(
             "/api/assistant-config/main-agent-profiles/default/publish",
-            json={"draftVersionId": draft_id},
+            json={
+                "draftVersionId": draft_id,
+                "requestId": f"profile-pub-{uuid4().hex[:8]}",
+                "expectedAggregateRevision": pub_rev,
+            },
         )
         self.assertEqual(published.status_code, 200, published.text)
         pub = published.json()["data"]
@@ -147,11 +179,50 @@ class MainAgentProfileApiTests(unittest.TestCase):
         self.assertIsNotNone(after["publishedVersion"])
         self.assertFalse(after["runtimeEnabled"])
 
+    def test_publish_without_expected_aggregate_revision_is_422(self) -> None:
+        profile = self.client.get(
+            "/api/assistant-config/main-agent-profiles/default"
+        ).json()["data"]
+        rev = int(profile.get("aggregateRevision") or 0)
+        snap = _snapshot_payload(basePrompt="draft for publish cas body check")
+        saved = self.client.put(
+            "/api/assistant-config/main-agent-profiles/default/draft",
+            content=json.dumps(
+                {
+                    "snapshot": snap,
+                    "versionName": "cas-check",
+                    "expectedAggregateRevision": rev,
+                    "requestId": f"profile-draft-{uuid4().hex[:8]}",
+                }
+            ),
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(saved.status_code, 200, saved.text)
+        draft_id = saved.json()["data"]["id"]
+        missing = self.client.post(
+            "/api/assistant-config/main-agent-profiles/default/publish",
+            json={
+                "draftVersionId": draft_id,
+                "requestId": f"profile-pub-missing-rev-{uuid4().hex[:8]}",
+            },
+        )
+        self.assertEqual(missing.status_code, 422, missing.text)
+
     def test_invalid_snapshot_fields_rejected(self) -> None:
+        profile = self.client.get(
+            "/api/assistant-config/main-agent-profiles/default"
+        ).json()["data"]
+        rev = int(profile.get("aggregateRevision") or 0)
         bad = _snapshot_payload(schemaVersion=2)
         resp = self.client.put(
             "/api/assistant-config/main-agent-profiles/default/draft",
-            content=json.dumps({"snapshot": bad}),
+            content=json.dumps(
+                {
+                    "snapshot": bad,
+                    "expectedAggregateRevision": rev,
+                    "requestId": f"bad-snap-{uuid4().hex[:8]}",
+                }
+            ),
             headers={"Content-Type": "application/json"},
         )
         self.assertEqual(resp.status_code, 422)
@@ -161,7 +232,13 @@ class MainAgentProfileApiTests(unittest.TestCase):
         unknown["unknownField"] = "nope"
         resp2 = self.client.put(
             "/api/assistant-config/main-agent-profiles/default/draft",
-            content=json.dumps({"snapshot": unknown}),
+            content=json.dumps(
+                {
+                    "snapshot": unknown,
+                    "expectedAggregateRevision": rev,
+                    "requestId": f"unknown-snap-{uuid4().hex[:8]}",
+                }
+            ),
             headers={"Content-Type": "application/json"},
         )
         self.assertEqual(resp2.status_code, 422)
@@ -171,7 +248,11 @@ class MainAgentProfileApiTests(unittest.TestCase):
         self.client.get("/api/assistant-config/main-agent-profiles/default")
         resp = self.client.post(
             "/api/assistant-config/main-agent-profiles/default/publish",
-            json={"draftVersionId": str(uuid4())},
+            json={
+                "draftVersionId": str(uuid4()),
+                "requestId": f"missing-draft-{uuid4().hex[:8]}",
+                "expectedAggregateRevision": 0,
+            },
         )
         self.assertEqual(resp.status_code, 404)
         self.assertEqual(resp.json()["code"], 40493)
@@ -182,18 +263,20 @@ class MainAgentProfileApiTests(unittest.TestCase):
         joined = " ".join(main_paths).lower()
         self.assertNotIn("activate", joined)
         self.assertNotIn("enable", joined)
-        # Only the four locked relative routes under /default.
+        # Locked relative routes under /default (always-mounted):
+        # GET /default, PUT /default/draft, GET /default/versions,
+        # POST /default/publish. Version detail is Plan 09 protected only.
         self.assertEqual(len(main_paths), 4)
+        self.assertFalse(
+            any("/default/versions/{version_id}" in p for p in main_paths),
+            main_paths,
+        )
 
-    def test_legacy_skills_still_present(self) -> None:
+    def test_legacy_skills_route_is_gone(self) -> None:
         schema = self.client.get("/openapi.json").json()
-        self.assertIn("/api/assistant-config/skills", schema["paths"])
+        self.assertNotIn("/api/assistant-config/skills", schema["paths"])
         resp = self.client.get("/api/assistant-config/skills")
-        self.assertEqual(resp.status_code, 200)
-        payload = resp.json()
-        self.assertTrue(payload["success"])
-        self.assertEqual(payload["code"], 0)
-        self.assertIsInstance(payload["data"], list)
+        self.assertEqual(resp.status_code, 404)
 
 
 if __name__ == "__main__":

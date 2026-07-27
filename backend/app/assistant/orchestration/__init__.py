@@ -1,27 +1,27 @@
 """Assistant orchestration package.
 
-Keep package exports lazy so importing light submodules like
-`app.assistant.orchestration.chat_events` does not eagerly pull in the full
-agent runtime and workflow engine during API startup.
+Legacy Supervisor/IntentRouter/AssistantAgent were removed in Plan 10 B2.
+Shared light helpers (chat events, OpenAI fallback client) remain.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-__all__ = ["AssistantAgent", "ChatEventAdapter", "SkillRouter"]
+__all__ = ["ChatEventAdapter"]
 
 _EXPORTS: dict[str, tuple[str, str]] = {
-    "AssistantAgent": ("app.assistant.orchestration.agent_runtime", "AssistantAgent"),
     "ChatEventAdapter": ("app.assistant.orchestration.chat_events", "ChatEventAdapter"),
-    "SkillRouter": ("app.assistant.orchestration.intent_router", "SkillRouter"),
 }
 
 
 def __getattr__(name: str) -> Any:
     target = _EXPORTS.get(name)
     if target is None:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+        raise AttributeError(
+            f"module {__name__!r} has no attribute {name!r} "
+            f"(legacy Supervisor/IntentRouter removed in Plan 10 B2)"
+        )
     module_name, attr_name = target
     module = __import__(module_name, fromlist=[attr_name])
     value = getattr(module, attr_name)

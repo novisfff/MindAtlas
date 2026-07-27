@@ -39,19 +39,15 @@ class WorkflowTestRunServiceTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.db.close()
 
-    def _create_workflow_skill(self):
-        from app.assistant_config.schemas import AssistantSkillCreateRequest
+    def _create_workflow(self):
+        from app.assistant_config.schemas import AssistantWorkflowCreateRequest
         from app.assistant_config.service import AssistantConfigService
 
         service = AssistantConfigService(self.db)
-        return service.create_skill(
-            AssistantSkillCreateRequest(
+        return service.create_workflow(
+            AssistantWorkflowCreateRequest(
                 name="wf_test_runner",
                 description="workflow test",
-                intent_examples=[],
-                tools=[],
-                mode="langgraph",
-                langgraph_pattern="workflow_dag",
                 enabled=True,
             )
         )
@@ -115,7 +111,7 @@ class WorkflowTestRunServiceTests(unittest.TestCase):
         from app.assistant_config.workflow_test_service import WorkflowTestRunService
         from app.common.exceptions import ApiException
 
-        skill = self._create_workflow_skill()
+        workflow = self._create_workflow()
         service = WorkflowTestRunService(self.db)
 
         bad_request = WorkflowTestRunRequest(
@@ -131,7 +127,7 @@ class WorkflowTestRunServiceTests(unittest.TestCase):
         )
 
         with self.assertRaises(ApiException) as ctx:
-            service.prepare(skill.id, bad_request)
+            service.prepare_for_workflow(workflow.id, bad_request)
 
         self.assertEqual(ctx.exception.status_code, 422)
         self.assertIn("Invalid workflow topology", ctx.exception.message)
@@ -142,9 +138,12 @@ class WorkflowTestRunServiceTests(unittest.TestCase):
             WorkflowTestRunService,
         )
 
-        skill = self._create_workflow_skill()
+        workflow = self._create_workflow()
         service = WorkflowTestRunService(self.db)
-        prepared = service.prepare(skill.id, self._valid_request(stream_output=True))
+        prepared = service.prepare_for_workflow(
+            workflow.id,
+            self._valid_request(stream_output=True),
+        )
 
         class _FakeEngine:
             def execute(self, *args, **kwargs):  # noqa: ANN002, ANN003
@@ -248,10 +247,13 @@ class WorkflowTestRunServiceTests(unittest.TestCase):
         )
         from app.system_settings.service import SystemSettingsService
 
-        skill = self._create_workflow_skill()
+        workflow = self._create_workflow()
         SystemSettingsService(self.db).set_locale("en")
         service = WorkflowTestRunService(self.db)
-        prepared = service.prepare(skill.id, self._valid_request(stream_output=False))
+        prepared = service.prepare_for_workflow(
+            workflow.id,
+            self._valid_request(stream_output=False),
+        )
         captured_runtime_context: dict[str, object] = {}
 
         class _FakeEngine:
@@ -280,9 +282,12 @@ class WorkflowTestRunServiceTests(unittest.TestCase):
             WorkflowTestRunService,
         )
 
-        skill = self._create_workflow_skill()
+        workflow = self._create_workflow()
         service = WorkflowTestRunService(self.db)
-        prepared = service.prepare(skill.id, self._valid_request(stream_output=False))
+        prepared = service.prepare_for_workflow(
+            workflow.id,
+            self._valid_request(stream_output=False),
+        )
 
         class _FakeEngine:
             def execute(self, *args, **kwargs):  # noqa: ANN002, ANN003
@@ -334,9 +339,12 @@ class WorkflowTestRunServiceTests(unittest.TestCase):
             WorkflowTestRunService,
         )
 
-        skill = self._create_workflow_skill()
+        workflow = self._create_workflow()
         service = WorkflowTestRunService(self.db)
-        prepared = service.prepare(skill.id, self._valid_request(stream_output=False))
+        prepared = service.prepare_for_workflow(
+            workflow.id,
+            self._valid_request(stream_output=False),
+        )
 
         class _FakeEngine:
             def execute(self, *args, **kwargs):  # noqa: ANN002, ANN003
@@ -395,9 +403,12 @@ class WorkflowTestRunServiceTests(unittest.TestCase):
             WorkflowTestRunService,
         )
 
-        skill = self._create_workflow_skill()
+        workflow = self._create_workflow()
         service = WorkflowTestRunService(self.db)
-        prepared = service.prepare(skill.id, self._valid_request(stream_output=True))
+        prepared = service.prepare_for_workflow(
+            workflow.id,
+            self._valid_request(stream_output=True),
+        )
         token_count = 200
 
         class _FakeEngine:
@@ -442,9 +453,12 @@ class WorkflowTestRunServiceTests(unittest.TestCase):
     def test_stream_emits_bootstrap_error_when_no_model_config(self) -> None:
         from app.assistant_config.workflow_test_service import WorkflowTestRunService
 
-        skill = self._create_workflow_skill()
+        workflow = self._create_workflow()
         service = WorkflowTestRunService(self.db)
-        prepared = service.prepare(skill.id, self._valid_request(stream_output=False))
+        prepared = service.prepare_for_workflow(
+            workflow.id,
+            self._valid_request(stream_output=False),
+        )
 
         with patch(
             "app.assistant_config.workflow_test_service.resolve_openai_compat_config",
@@ -464,9 +478,12 @@ class WorkflowTestRunServiceTests(unittest.TestCase):
     def test_stream_emits_bootstrap_error_when_config_resolution_raises(self) -> None:
         from app.assistant_config.workflow_test_service import WorkflowTestRunService
 
-        skill = self._create_workflow_skill()
+        workflow = self._create_workflow()
         service = WorkflowTestRunService(self.db)
-        prepared = service.prepare(skill.id, self._valid_request(stream_output=True))
+        prepared = service.prepare_for_workflow(
+            workflow.id,
+            self._valid_request(stream_output=True),
+        )
 
         with patch(
             "app.assistant_config.workflow_test_service.resolve_openai_compat_config",
@@ -537,7 +554,7 @@ class WorkflowTestRunServiceTests(unittest.TestCase):
             WorkflowTestRunService,
         )
 
-        skill = self._create_workflow_skill()
+        workflow = self._create_workflow()
         service = WorkflowTestRunService(self.db)
         base_request = self._valid_request(stream_output=True)
         request = WorkflowTestRunRequest(
@@ -554,7 +571,7 @@ class WorkflowTestRunServiceTests(unittest.TestCase):
                 "skillFacts": ["事实A"],
             },
         )
-        prepared = service.prepare(skill.id, request)
+        prepared = service.prepare_for_workflow(workflow.id, request)
         captured_kwargs: dict[str, object] = {}
 
         class _FakeEngine:
@@ -608,7 +625,7 @@ class WorkflowTestRunServiceTests(unittest.TestCase):
         from app.assistant_config.schemas import WorkflowTestRunRequest
         from app.assistant_config.workflow_test_service import WorkflowTestRunService
 
-        skill = self._create_workflow_skill()
+        workflow = self._create_workflow()
         service = WorkflowTestRunService(self.db)
         base_request = self._valid_request(stream_output=False)
         request = WorkflowTestRunRequest(
@@ -620,7 +637,7 @@ class WorkflowTestRunServiceTests(unittest.TestCase):
                 "skillFacts": ["事实A"],
             },
         )
-        prepared = service.prepare(skill.id, request)
+        prepared = service.prepare_for_workflow(workflow.id, request)
 
         class _FakeEngine:
             def execute(self, *args, **kwargs):  # noqa: ANN002, ANN003
@@ -660,7 +677,7 @@ class WorkflowTestRunServiceTests(unittest.TestCase):
         )
         from app.assistant_config.workflow_test_service import WorkflowTestRunService
 
-        workflow = WorkflowInput(
+        draft_workflow = WorkflowInput(
             nodes=[
                 WorkflowNodeInput(
                     node_id="start",
@@ -691,14 +708,14 @@ class WorkflowTestRunServiceTests(unittest.TestCase):
             ],
         )
 
-        skill = self._create_workflow_skill()
+        workflow = self._create_workflow()
         service = WorkflowTestRunService(self.db)
         request = WorkflowTestRunRequest(
-            workflow=workflow,
+            workflow=draft_workflow,
             structured_input={"title": "hello"},
             session_id=uuid4(),
         )
-        prepared = service.prepare(skill.id, request)
+        prepared = service.prepare_for_workflow(workflow.id, request)
         captured_runtime_context: dict[str, object] = {}
         captured_session_memory_before: dict[str, object] = {}
 

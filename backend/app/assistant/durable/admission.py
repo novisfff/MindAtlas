@@ -3,6 +3,10 @@
 Selects immutable ``runtime_kind`` after conversation/message preparation and
 Main Agent + compatible-worker preflight. A permitted Legacy fallback happens
 only before the durable Run row exists.
+
+Plan 10 Task 6: when ``conversation_id`` is provided and an active rollout
+revision exists, freeze the durable assignment first and apply pre-insert-only
+fallback. Post-insert failures never open the fallback path.
 """
 
 from __future__ import annotations
@@ -10,12 +14,21 @@ from __future__ import annotations
 import logging
 from datetime import timedelta
 from typing import Any
+from uuid import UUID
 
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
+
+
+class RuntimeAdmissionError(RuntimeError):
+    """Fail-closed runtime selection failure before durable Run insertion."""
+
+    def __init__(self, reason_code: str, message: str) -> None:
+        super().__init__(message)
+        self.reason_code = reason_code
 
 
 def admit_and_select_runtime(
@@ -25,19 +38,96 @@ def admit_and_select_runtime(
     execution_kind: str = "production",
     app_build_revision: str | None = None,
     require_compatible_worker: bool = True,
+    conversation_id: UUID | None = None,
+    request_id: str | None = None,
+    principal_scope_digest: str | None = None,
+    chat_run_already_inserted: bool = False,
+    use_rollout_assignment: bool = True,
 ) -> tuple[str, str | None, dict[str, Any]]:
     """Return ``(runtime_kind, reason_code, create_run_kwargs)``.
 
     - ``runtime_kind`` is ``legacy`` or ``main_agent`` (immutable once inserted).
     - On Main Agent admission failure in read_only mode, returns legacy with a
       reason when automatic pre-insert fallback is allowed.
+    - When ``conversation_id`` is set and an active Plan 10 rollout revision
+      exists, freezes assignment and may return pre-insert fallback metadata in
+      ``create_run_kwargs`` (``_preinsert_fallback`` / ``_rollout_decision``).
     - Raises only for hard configuration errors that must fail the request.
     """
+    # Plan 10: prefer durable rollout assignment when available.
+    if (
+        use_rollout_assignment
+        and conversation_id is not None
+        and not chat_run_already_inserted
+    ):
+        try:
+            from app.assistant.migration.repository import RuntimeMigrationRepository
+
+            active = RuntimeMigrationRepository(db).get_active_rollout_revision()
+        except Exception as exc:
+            logger.exception("rollout revision lookup failed; admission denied")
+            raise RuntimeAdmissionError(
+                "rollout_infrastructure_unavailable",
+                "durable rollout revision lookup failed",
+            ) from exc
+        if active is not None:
+            try:
+                from app.assistant.migration.rollout import admit_with_rollout
+
+                kind, reason, kwargs, _decision = admit_with_rollout(
+                    db,
+                    conversation_id=conversation_id,
+                    request_id=request_id,
+                    execution_kind=execution_kind,
+                    app_build_revision=app_build_revision,
+                    require_compatible_worker=require_compatible_worker,
+                    principal_scope_digest=principal_scope_digest,
+                    chat_run_already_inserted=False,
+                )
+                return kind, reason, kwargs
+            except Exception as exc:
+                logger.exception("rollout admission failed; admission denied")
+                raise RuntimeAdmissionError(
+                    "rollout_admission_failed",
+                    "durable rollout admission failed",
+                ) from exc
+
+        settings = get_settings()
+        runtime_mode = str(
+            getattr(settings, "assistant_runtime_mode", "legacy") or "legacy"
+        ).strip().lower()
+        if runtime_mode != "legacy":
+            raise RuntimeAdmissionError(
+                "runtime_rollout_revision_missing",
+                "native Main Agent mode requires an active durable rollout revision",
+            )
+        return "legacy", "no_active_rollout", {}
+
+    return _admit_main_agent_candidate(
+        db,
+        mode=mode,
+        execution_kind=execution_kind,
+        app_build_revision=app_build_revision,
+        require_compatible_worker=require_compatible_worker,
+    )
+
+
+def _admit_main_agent_candidate(
+    db: Session,
+    *,
+    mode: str | None = None,
+    execution_kind: str = "production",
+    app_build_revision: str | None = None,
+    require_compatible_worker: bool = True,
+) -> tuple[str, str | None, dict[str, Any]]:
+    """Main Agent candidate admission for explicit internal/evaluation calls."""
     settings = get_settings()
-    main_agent_mode = str(
-        mode if mode is not None else getattr(settings, "assistant_main_agent_mode", "off")
-        or "off"
-    ).strip().lower()
+    if mode is None:
+        native_mode = str(
+            getattr(settings, "assistant_runtime_mode", "legacy") or "legacy"
+        ).strip().lower()
+        mode = "read_only" if native_mode == "main_agent" else "off"
+    main_agent_mode = str(mode or "off").strip().lower()
     build = (
         app_build_revision
         or getattr(settings, "app_build_revision", None)

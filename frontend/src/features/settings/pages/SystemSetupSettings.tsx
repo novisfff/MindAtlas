@@ -1,6 +1,6 @@
 import { useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Bot, BrainCircuit, FileType2, Languages, Loader2, Network, Settings2, Sparkles } from 'lucide-react'
+import { Bot, FileType2, Languages, Loader2, Network, Package, Settings2, Sparkles } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { Button } from '@/components/ui/button'
 import { uiChrome } from '@/components/ui/styles'
@@ -255,8 +255,8 @@ export function SystemSetupSettingsPage() {
             </div>
 
             <div className="flex flex-wrap items-center gap-3">
-              <Button type="button" variant="outline" onClick={() => navigate('/settings/assistant-skills')}>
-                <BrainCircuit className="h-4 w-4" />
+              <Button type="button" variant="outline" onClick={() => navigate('/settings/universal-skills')}>
+                <Package className="h-4 w-4" />
                 {t('systemSetup.actions.openAiSkills')}
               </Button>
               <Button type="button" variant="outline" onClick={() => navigate('/settings/system-ai-behaviors')}>

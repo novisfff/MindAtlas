@@ -119,16 +119,10 @@ class WorkflowStateNonserializableFieldEnumeration(unittest.TestCase):
         # session_factory is a lambda — may unpickle as a hollow function object
         self.assertTrue(callable(restored._session_factory))
 
-    def test_coordinator_events_are_process_local(self) -> None:
+    def test_removed_coordinator_retains_no_process_local_waiters(self) -> None:
         coordinator = HumanLoopCoordinator()
-        coordinator.register("approval-1")
-        self.assertTrue(coordinator.has_waiter("approval-1"))
-        # threading.Event is not JSON-serializable
-        with self.assertRaises((TypeError, ValueError)):
-            _json_roundtrip({"waiters": coordinator._waiters})
-        # A fresh coordinator (simulating process restart) has no waiter.
-        restarted = HumanLoopCoordinator()
-        self.assertFalse(restarted.has_waiter("approval-1"))
+        coordinator.register("approval-1", threading.Event())
+        self.assertEqual(coordinator._waiters, {})
 
     def test_stream_callbacks_not_json_serializable(self) -> None:
         metadata = {

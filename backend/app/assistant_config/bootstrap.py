@@ -7,21 +7,15 @@ from app.database import SessionLocal
 
 
 def warm_assistant_config_system_catalog() -> None:
-    """Warm legacy system catalog, then mirror into disabled v2 shadow packages.
+    """Warm system Tools / Workflows / Agents catalog at startup.
 
-    Order is intentional:
-    1. system Tools / Workflows / Agents and legacy Skills are restored;
-    2. published target versions exist;
-    3. best-effort LegacySkillShadowAdapter.sync_all runs (authoritative repair).
+    Legacy Skill rows and shadow package sync were removed in Plan 10 B2.
+    Universal skill packages are managed via Plan 09 admin, not bootstrap mirror.
     """
     logger = logging.getLogger("app.startup")
     db = SessionLocal()
     try:
         AssistantConfigService(db).ensure_system_catalog_warm()
-        # Shadow sync is best-effort and must not fail startup after legacy warm.
-        from app.assistant.skills.legacy_adapter import best_effort_sync_all
-
-        best_effort_sync_all(db)
     except Exception:
         db.rollback()
         logger.exception("assistant_config_system_catalog_sync_failed")

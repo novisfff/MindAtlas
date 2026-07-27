@@ -17,6 +17,7 @@ from app.assistant.workflow.human_fields import validate_human_field_date_value,
 from app.assistant.workflow.engine.state import NodeOutput, WorkflowState
 from app.assistant.workflow.human_approval_runtime import HumanLoopRuntime
 
+
 def build_human_in_loop_node(
     node_id: str,
     node_cfg: dict[str, Any],
@@ -24,20 +25,16 @@ def build_human_in_loop_node(
 ) -> Callable[[WorkflowState], dict]:
     def human_in_loop_node(state: WorkflowState) -> dict:
         # Durable interrupt is out of Plan 02; Capability mode must not invent waiting.
-        # OpenClaw legacy_blocking is gated by the adapter before engine entry.
         if execution_scope is not None and not getattr(execution_scope, "allow_ambient_memory", True):
-            # still allow legacy blocking when the adapter explicitly permitted OpenClaw compat
-            # and attached a HumanLoopRuntime; otherwise fail closed without blocking.
-            metadata_probe = state.get("metadata", {}) if isinstance(state.get("metadata"), dict) else {}
-            if not isinstance(metadata_probe.get("human_loop_runtime"), HumanLoopRuntime):
-                raise RuntimeError(
-                    f"DAG human_in_loop node {node_id}: unsupported under capability scope"
-                )
+            raise RuntimeError(
+                f"DAG human_in_loop node {node_id}: unsupported under capability scope"
+            )
         metadata = state.get("metadata", {})
         runtime = metadata.get("human_loop_runtime")
         if not isinstance(runtime, HumanLoopRuntime):
             raise RuntimeError(
-                f"DAG human_in_loop node {node_id}: human loop runtime is unavailable"
+                f"DAG human_in_loop node {node_id}: human loop runtime is unavailable "
+                f"(legacy blocking HITL removed; use durable interrupts)"
             )
 
         node_outputs = dict(state.get("node_outputs", {}))

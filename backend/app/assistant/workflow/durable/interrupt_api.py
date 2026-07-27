@@ -270,8 +270,21 @@ def _authorize_run(
     conversation_id: UUID,
     run_id: UUID,
 ) -> AssistantChatRun:
+    from app.assistant.evaluation.contracts import reraise_evaluation_id_as_not_found
+
     run_svc = AssistantChatRunService(db)
-    run = run_svc.get_run(conversation_id=conversation_id, run_id=run_id)
+    try:
+        run = run_svc.get_run(conversation_id=conversation_id, run_id=run_id)
+    except ValueError as exc:
+        # Eval-namespace IDs must surface as production not-found (404), not 500.
+        reraise_evaluation_id_as_not_found(
+            exc,
+            not_found=DurableInterruptApiError(
+                CODE_DURABLE_INTERRUPT_NOT_FOUND,
+                f"run not found: {run_id}",
+                status_code=404,
+            ),
+        )
     if run is None:
         # Distinguish missing run vs conversation mismatch.
         raw = db.get(AssistantChatRun, run_id)

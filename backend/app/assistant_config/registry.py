@@ -7,7 +7,6 @@ from typing import Any, get_args, get_origin
 from sqlalchemy.orm import Session, joinedload
 
 from app.assistant_config.models import (
-    AssistantSkill,
     AssistantTool,
     AssistantWorkflow,
 )
@@ -971,23 +970,9 @@ class SkillRegistry(_BaseRegistry):
         self,
         include_workflow: bool = False,
         include_disabled: bool = False,
-    ) -> list[AssistantSkill]:
-        """获取数据库 Skills。
-
-        Args:
-            include_workflow: 是否预加载 workflow nodes/edges。
-            include_disabled: 是否包含禁用技能。
-        """
-        query = self.db.query(AssistantSkill)
-        if not include_disabled:
-            query = query.filter(AssistantSkill.enabled.is_(True))
-        if include_workflow:
-            query = query.options(
-                joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.draft_version),
-                joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.published_version),
-                joinedload(AssistantSkill.agent_profile),
-            )
-        return query.order_by(AssistantSkill.created_at.desc()).all()
+    ) -> list[Any]:
+        """Legacy assistant_skill table removed (Plan 10 B2). Always empty."""
+        return []
 
     def list_db_skill_definitions(
         self,
@@ -1004,9 +989,9 @@ class SkillRegistry(_BaseRegistry):
             for skill in skills
         ]
 
-    def list_enabled_db_skills(self, include_workflow: bool = False) -> list[AssistantSkill]:
-        """获取启用的数据库 Skills。"""
-        return self.list_db_skills(include_workflow=include_workflow, include_disabled=False)
+    def list_enabled_db_skills(self, include_workflow: bool = False) -> list[Any]:
+        """Legacy assistant_skill table removed (Plan 10 B2). Always empty."""
+        return []
 
     def resolve(
         self,
@@ -1015,53 +1000,7 @@ class SkillRegistry(_BaseRegistry):
         *,
         locale: str | None = None,
     ) -> Any | None:
-        """解析 Skill - 优先从数据库查找，未命中时回退到系统定义。
-
-        逻辑:
-        1. 查询数据库中是否存在该 Skill（不管启用状态）
-        2. 如果存在且被禁用，返回 None（不回退到系统 Skill）
-           例外：默认 Skill (general_chat) 不可被禁用，始终回退到系统定义
-        3. 如果存在且启用，返回对应 DB SkillDefinition
-        4. 如果不存在，回退到系统 Skill
-
-        Args:
-            skill_name: Skill 名称。
-            include_workflow: 是否加载 workflow nodes/edges 并进行完整转换。
-        """
-        from app.assistant.skill_catalog.base import DEFAULT_SKILL_NAME
-
-        query = self.db.query(AssistantSkill)
-        if include_workflow:
-            query = query.options(
-                # Avoid joined-loading multiple collection relationships in one query,
-                # which can create large cartesian result sets and stall skill execution.
-                joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.draft_version),
-                joinedload(AssistantSkill.workflow).joinedload(AssistantWorkflow.published_version),
-                joinedload(AssistantSkill.agent_profile),
-            )
-        record = query.filter(AssistantSkill.name == skill_name).first()
-
-        if record:
-            if not record.enabled:
-                # 默认 Skill 不可被禁用，回退到系统定义
-                if skill_name == DEFAULT_SKILL_NAME:
-                    return self.resolve_system_skill(skill_name, locale=locale)
-                return None
-
-            from app.assistant.skill_catalog.converters import (
-                db_skill_to_definition,
-                db_skill_to_definition_light,
-            )
-
-            if include_workflow:
-                try:
-                    return db_skill_to_definition(record)
-                except ValueError as exc:
-                    raise ValueError(
-                        f"Skill '{record.name}' has an invalid workflow definition: {exc}"
-                    ) from exc
-            return db_skill_to_definition_light(record)
-
+        """Resolve Skill from system definitions only (legacy DB skills dropped)."""
         return self.resolve_system_skill(skill_name, locale=locale)
 
     def get_skill_by_name(

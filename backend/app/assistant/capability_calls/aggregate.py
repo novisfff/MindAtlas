@@ -1201,6 +1201,10 @@ class DurableCapabilityLedgerAggregate:
 
     def commit_pause(self, continuation: Any, provider_messages: Any = ()) -> None:
         """Commit call + Interrupt + transcript + waiting Checkpoint in one Run CAS."""
+        # Plan 09 Task 4: hard tripwire when Eval scope reaches ledger pause commit.
+        from app.assistant.evaluation.isolation import tripwire_production_writer
+
+        tripwire_production_writer("DurableCapabilityLedgerAggregate.commit")
         staged = self._pending_pause
         if staged is None:
             raise CapabilityCallConflict(
@@ -1568,6 +1572,10 @@ class DurableCapabilityLedgerAggregate:
     def commit_result(
         self, outcome: LedgerPrepareOutcome, result: ProviderDispatchResult
     ) -> ProviderDispatchResult:
+        # Plan 09 Task 4: hard tripwire when Eval scope reaches ledger commit.
+        from app.assistant.evaluation.isolation import tripwire_production_writer
+
+        tripwire_production_writer("DurableCapabilityLedgerAggregate.commit")
         call_hint = self.calls.get_call(outcome.call_id)
         if call_hint is None or outcome.attempt_id is None:
             raise CapabilityCallConflict("call_not_found", "dispatch call is unavailable")

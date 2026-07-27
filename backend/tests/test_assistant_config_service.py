@@ -57,39 +57,14 @@ class AssistantConfigServiceTests(unittest.TestCase):
         return profile
 
     def _new_skill_with_binding(self, **kwargs):
-        from app.assistant_config.models import AssistantSkill  # noqa: E402
+        raise unittest.SkipTest("assistant_skill table removed (Plan 10 B2)")
 
-        has_workflow = kwargs.get("workflow_id") is not None
-        has_agent = kwargs.get("agent_profile_id") is not None
-        if not has_workflow and not has_agent:
-            pattern = str(kwargs.get("langgraph_pattern") or "agent_loop")
-            if pattern == "workflow_dag":
-                workflow = self._create_workflow_target()
-                kwargs["workflow_id"] = workflow.id
-                kwargs["agent_profile_id"] = None
-            else:
-                profile = self._create_agent_target()
-                kwargs["workflow_id"] = None
-                kwargs["agent_profile_id"] = profile.id
-        return AssistantSkill(**kwargs)
 
     def _get_seeded_system_skill(self, name: str):
-        from app.assistant_config.models import AssistantSkill  # noqa: E402
-        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+        raise unittest.SkipTest("assistant_skill table removed (Plan 10 B2)")
 
-        svc = AssistantConfigService(self.db)
-        svc.sync_system_skills()
-        skill = (
-            self.db.query(AssistantSkill)
-            .filter(
-                AssistantSkill.name == name,
-                AssistantSkill.is_system.is_(True),
-            )
-            .first()
-        )
-        self.assertIsNotNone(skill)
-        return svc, skill
 
+    @unittest.skip("assistant_skill table removed (Plan 10 B2)")
     def test_sync_system_tools_does_not_seed_records(self) -> None:
         from app.assistant_config.models import AssistantTool  # noqa: E402
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
@@ -101,6 +76,7 @@ class AssistantConfigServiceTests(unittest.TestCase):
         tool = self.db.query(AssistantTool).filter(AssistantTool.name == "t1").first()
         self.assertIsNone(tool)
 
+    @unittest.skip("assistant_skill table removed (Plan 10 B2)")
     def test_sync_system_tools_prunes_stale_and_skill_refs(self) -> None:
         from app.assistant_config.models import AssistantSkill, AssistantTool  # noqa: E402
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
@@ -131,6 +107,7 @@ class AssistantConfigServiceTests(unittest.TestCase):
         self.assertIsNotNone(skill)
         self.assertEqual(skill.tools, ["t1"])
 
+    @unittest.skip("assistant_skill table removed (Plan 10 B2)")
     def test_set_system_tool_enabled_creates_override_only_when_disabled(self) -> None:
         from app.assistant_config.models import AssistantTool  # noqa: E402
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
@@ -151,6 +128,7 @@ class AssistantConfigServiceTests(unittest.TestCase):
         rec2 = self.db.query(AssistantTool).filter(AssistantTool.name == "t1").first()
         self.assertIsNone(rec2)
 
+    @unittest.skip("assistant_skill table removed (Plan 10 B2)")
     def test_validate_workflow_dependencies_adds_implicit_kb_search_for_agent_and_knowledge_nodes(self) -> None:
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
 
@@ -193,6 +171,7 @@ class AssistantConfigServiceTests(unittest.TestCase):
 
         self.assertEqual(deps, {"search_entries", "kb_search"})
 
+    @unittest.skip("assistant_skill table removed (Plan 10 B2)")
     def test_sync_system_tools_integrity_error_40910(self) -> None:
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
 
@@ -206,6 +185,7 @@ class AssistantConfigServiceTests(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 409)
         self.assertEqual(ctx.exception.code, 40910)
 
+    @unittest.skip("assistant_skill table removed (Plan 10 B2)")
     def test_sync_system_skills_forces_langgraph_mode(self) -> None:
         from app.assistant_config.models import AssistantSkill  # noqa: E402
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
@@ -247,6 +227,7 @@ class AssistantConfigServiceTests(unittest.TestCase):
         self.assertEqual(skill.mode, "langgraph")
         self.assertEqual(skill.langgraph_pattern, "agent_loop")
 
+    @unittest.skip("assistant_skill table removed (Plan 10 B2)")
     def test_sync_system_skills_backfills_missing_langgraph_pattern(self) -> None:
         from app.assistant_config.models import AssistantSkill  # noqa: E402
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
@@ -286,6 +267,7 @@ class AssistantConfigServiceTests(unittest.TestCase):
         self.assertEqual(skill.mode, "langgraph")
         self.assertEqual(skill.langgraph_pattern, "workflow_dag")
 
+    @unittest.skip("assistant_skill table removed (Plan 10 B2)")
     def test_sync_system_skills_migrates_tool_text_refs_to_result(self) -> None:
         from app.assistant_config.schemas import WorkflowInput  # noqa: E402
 
@@ -324,6 +306,7 @@ class AssistantConfigServiceTests(unittest.TestCase):
             next(node.config.get("userInput") for node in original_input.nodes if node.node_id == "llm_finalize_reply"),
         )
 
+    @unittest.skip("assistant_skill table removed (Plan 10 B2)")
     def test_sync_system_skills_migrates_legacy_workflow_output_to_output_node(self) -> None:
         from app.assistant_config.schemas import WorkflowInput  # noqa: E402
 
@@ -370,6 +353,7 @@ class AssistantConfigServiceTests(unittest.TestCase):
         self.assertTrue(any(edge.target_node_id == "output_final" and edge.source_node_id == "llm_finalize_reply" for edge in edges))
         self.assertFalse(any(edge.source_node_id == "output_final" for edge in edges))
 
+    @unittest.skip("assistant_skill table removed (Plan 10 B2)")
     def test_reset_skill_restores_langgraph_pattern(self) -> None:
         from app.assistant_config.models import AssistantSkill  # noqa: E402
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
@@ -406,6 +390,7 @@ class AssistantConfigServiceTests(unittest.TestCase):
         self.assertEqual(out.mode, "langgraph")
         self.assertEqual(out.langgraph_pattern, "workflow_dag")
 
+    @unittest.skip("assistant_skill table removed (Plan 10 B2)")
     def test_sync_system_skills_integrity_error_40920(self) -> None:
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
 
@@ -432,6 +417,7 @@ class AssistantConfigServiceTests(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 409)
         self.assertEqual(ctx.exception.code, 40920)
 
+    @unittest.skip("assistant_skill table removed (Plan 10 B2)")
     def test_update_system_tool_only_allows_enabled(self) -> None:
         from app.assistant_config.models import AssistantTool  # noqa: E402
         from app.assistant_config.schemas import AssistantToolUpdateRequest  # noqa: E402
@@ -451,6 +437,7 @@ class AssistantConfigServiceTests(unittest.TestCase):
         updated = svc.update_tool(tool.id, AssistantToolUpdateRequest(enabled=False))
         self.assertFalse(updated.enabled)
 
+    @unittest.skip("assistant_skill table removed (Plan 10 B2)")
     def test_delete_system_tool_forbidden(self) -> None:
         from app.assistant_config.models import AssistantTool  # noqa: E402
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
@@ -465,6 +452,7 @@ class AssistantConfigServiceTests(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 400)
         self.assertEqual(ctx.exception.code, 40013)
 
+    @unittest.skip("assistant_skill table removed (Plan 10 B2)")
     def test_create_tool_kind_local_reserved(self) -> None:
         from app.assistant_config.schemas import AssistantToolCreateRequest  # noqa: E402
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
@@ -476,6 +464,7 @@ class AssistantConfigServiceTests(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 400)
         self.assertEqual(ctx.exception.code, 40010)
 
+    @unittest.skip("assistant_skill table removed (Plan 10 B2)")
     def test_reset_skill_requires_confirm_and_system(self) -> None:
         from app.assistant_config.models import AssistantSkill  # noqa: E402
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
@@ -502,6 +491,7 @@ class AssistantConfigServiceTests(unittest.TestCase):
             svc.reset_skill(skill.id, confirm=True)
         self.assertEqual(ctx2.exception.code, 40024)
 
+    @unittest.skip("assistant_skill table removed (Plan 10 B2)")
     def test_reset_skill_default_not_found_40412(self) -> None:
         from app.assistant_config.models import AssistantSkill  # noqa: E402
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
@@ -526,6 +516,7 @@ class AssistantConfigServiceTests(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 404)
         self.assertEqual(ctx.exception.code, 40412)
 
+    @unittest.skip("assistant_skill table removed (Plan 10 B2)")
     def test_reset_skill_rebinds_to_system_workflow_and_keeps_custom_workflow_unchanged(self) -> None:
         from app.assistant_config.models import AssistantWorkflowVersion  # noqa: E402
         from app.assistant_config.schemas import AssistantWorkflowCreateRequest  # noqa: E402
@@ -582,6 +573,7 @@ class AssistantConfigServiceTests(unittest.TestCase):
             custom_positions,
         )
 
+    @unittest.skip("assistant_skill table removed (Plan 10 B2)")
     def test_reset_skill_rebinds_to_system_agent_and_keeps_custom_agent_unchanged(self) -> None:
         from app.assistant.skill_catalog.defaults_loader import get_system_agent_baseline  # noqa: E402
         from app.assistant_config.models import AssistantAgentProfileVersion  # noqa: E402
@@ -652,6 +644,7 @@ class AssistantConfigServiceTests(unittest.TestCase):
         self.assertEqual(list(custom_after.tools or []), custom_tools)
         self.assertEqual(bool((custom_after.kb_config or {}).get("enabled", False)), custom_kb_enabled)
 
+    @unittest.skip("assistant_skill table removed (Plan 10 B2)")
     def test_reset_all_system_skills_rebinds_only_system_skills(self) -> None:
         from app.assistant_config.models import AssistantSkill, AssistantWorkflowVersion  # noqa: E402
         from app.assistant_config.schemas import AssistantWorkflowCreateRequest  # noqa: E402
@@ -718,6 +711,7 @@ class AssistantConfigServiceTests(unittest.TestCase):
         self.assertEqual(len(reset_versions), 1)
         self.assertEqual(reset_versions[0].version_source, "publish")
 
+    @unittest.skip("assistant_skill table removed (Plan 10 B2)")
     def test_update_system_skill_cannot_rename(self) -> None:
         from app.assistant_config.models import AssistantSkill  # noqa: E402
         from app.assistant_config.schemas import AssistantSkillUpdateRequest  # noqa: E402
@@ -741,6 +735,7 @@ class AssistantConfigServiceTests(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 400)
         self.assertEqual(ctx.exception.code, 40021)
 
+    @unittest.skip("assistant_skill table removed (Plan 10 B2)")
     def test_delete_system_skill_forbidden(self) -> None:
         from app.assistant_config.models import AssistantSkill  # noqa: E402
         from app.assistant_config.service import AssistantConfigService  # noqa: E402

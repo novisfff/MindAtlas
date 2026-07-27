@@ -1,9 +1,11 @@
 import type { AssistantAgentProfile } from '../api/agents'
 import type { SystemBehaviorContractField, SystemBehaviorContractSummary } from '../api/system-behaviors'
 import type { CallableWorkflow, WorkflowContractParam } from '../api/workflows'
-import type { AssistantSkill, SkillTargetType } from '../api/skills'
 import type { AssistantWorkflow } from '../api/workflows'
 import { isStructuredStartWorkflowFromNodes } from './workflow/startNodeConfig'
+
+/** Shared skill-target type leftovers after Plan 10 legacy skill admin removal. */
+export type SkillTargetType = 'workflow' | 'agent'
 
 const DEFAULT_SKILL_NAME = 'general_chat'
 const DEFAULT_SYSTEM_TARGET_PREFIX = `${DEFAULT_SKILL_NAME}__`
@@ -252,26 +254,9 @@ export function buildSystemBehaviorBindingTargets(
   return [specialDefaultTarget, ...withDefaultMarked.filter((item) => item.key !== defaultTarget.key)]
 }
 
-export function buildSkillBindingTargets(
-  workflows: AssistantWorkflow[],
-  agents: AssistantAgentProfile[],
-  options?: BuildTargetOptions,
-): AssistantExecutableTarget[] {
-  const realTargets = buildAssistantExecutableTargets(workflows, agents, options)
-  const defaultTarget = realTargets.find((item) => item.isSystemDefault)
-  if (!defaultTarget) return realTargets
-
-  const specialDefaultTarget: AssistantExecutableTarget = {
-    ...defaultTarget,
-    key: SYSTEM_DEFAULT_TARGET_KEY,
-    isSystemDefault: true,
-  }
-
-  return [specialDefaultTarget, ...realTargets.filter((item) => item.key !== defaultTarget.key)]
-}
 
 export function resolveSkillTargetKey(
-  skill: Pick<AssistantSkill, 'targetType' | 'workflowId' | 'agentProfileId'> | undefined,
+  skill: { targetType?: SkillTargetType | null; workflowId?: string | null; agentProfileId?: string | null } | undefined,
   availableTargets: AssistantExecutableTarget[] = [],
 ): string | null {
   if (!skill?.targetType) return null

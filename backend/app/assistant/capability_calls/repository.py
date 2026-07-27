@@ -130,6 +130,10 @@ class CapabilityCallRepository:
     # ------------------------------------------------------------------
 
     def get_run(self, run_id: UUID, *, for_update: bool = False) -> AssistantChatRun:
+        # Plan 09 Task 4: production CapabilityCall run lookup rejects eval IDs.
+        from app.assistant.evaluation.contracts import reject_if_evaluation_id
+
+        reject_if_evaluation_id(self.db, entity="run", value=run_id)
         stmt = self.db.query(AssistantChatRun).filter(AssistantChatRun.id == run_id)
         if for_update:
             stmt = stmt.populate_existing().with_for_update()
@@ -144,6 +148,10 @@ class CapabilityCallRepository:
         *,
         for_update: bool = False,
     ) -> AssistantCapabilityCall | None:
+        # Plan 09 Task 4: production CapabilityCall lookup rejects eval call IDs.
+        from app.assistant.evaluation.contracts import reject_if_evaluation_id
+
+        reject_if_evaluation_id(self.db, entity="capability_call", value=call_id)
         stmt = self.db.query(AssistantCapabilityCall).filter(
             AssistantCapabilityCall.id == call_id
         )
@@ -224,6 +232,12 @@ class CapabilityCallRepository:
 
         Returns ``(call, created)``.
         """
+        # Plan 09 Task 4: hard tripwire when Eval scope reaches production ledger.
+        from app.assistant.evaluation.isolation import tripwire_production_writer
+
+        tripwire_production_writer(
+            "CapabilityCallRepository.create_or_verify_proposed"
+        )
         ts = now or utcnow()
         run = self.get_run(spec.run_id, for_update=True)
         self._verify_lease(run, spec.lease)

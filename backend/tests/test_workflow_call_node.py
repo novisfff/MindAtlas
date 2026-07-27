@@ -11,7 +11,9 @@ bootstrap_backend_imports()
 reset_caches()
 
 
-class _FakeHumanLoopRuntime:  # patched to behave as HumanLoopRuntime proxy target
+class _FakeHumanLoopRuntime:
+    """Test double for HumanLoopRuntime (isinstance-compatible when subclassed)."""
+
     def __init__(self) -> None:
         self._on_requested = None
         self._on_resolved = None
@@ -698,8 +700,13 @@ class WorkflowCallNodeTests(unittest.TestCase):
         self.assertEqual(output["text"], "Echo Ada")
         self.assertEqual(output["json_fields"]["response"], "Echo Ada")
 
-    def test_workflow_call_runtime_scopes_human_approval_events(self) -> None:
-        from app.assistant.workflow.engine.container_runtime import ScopedHumanLoopRuntimeProxy
+    def test_workflow_call_passes_through_human_loop_runtime(self) -> None:
+        """ScopedHumanLoopRuntimeProxy is removed; runtime is passed through unscoped.
+
+        Production no longer attaches blocking HITL (attach_human_loop_runtime is a
+        no-op). This characterization only checks that an injected FakeRuntime still
+        reaches the child graph metadata without the removed proxy wrapper.
+        """
         from app.assistant.workflow.engine.node_builders.workflow_call_node import build_workflow_call_node
         from app.assistant.workflow.human_approval_runtime import HumanLoopRuntime
 
@@ -708,14 +715,13 @@ class WorkflowCallNodeTests(unittest.TestCase):
             workflow_input=self._human_loop_child_workflow_input(),
         )
 
-        fake_runtime = _FakeHumanLoopRuntime()
-        requested_events: list[dict] = []
-        resolved_events: list[dict] = []
-        fake_runtime._on_requested = lambda payload: requested_events.append(payload)
-        fake_runtime._on_resolved = lambda payload: resolved_events.append(payload)
+        # Fake must be a HumanLoopRuntime subclass so isinstance checks pass.
+        # Put _FakeHumanLoopRuntime first so its create_and_wait wins MRO.
+        class _TypedFake(_FakeHumanLoopRuntime, HumanLoopRuntime):
+            def __init__(self) -> None:
+                _FakeHumanLoopRuntime.__init__(self)
 
-        proxy = ScopedHumanLoopRuntimeProxy(fake_runtime, "call_child")
-        self.assertIsInstance(proxy, HumanLoopRuntime)
+        fake_runtime = _TypedFake()
 
         node_fn = build_workflow_call_node(
             "call_child",
@@ -733,9 +739,12 @@ class WorkflowCallNodeTests(unittest.TestCase):
             self.db.get_bind(),
         )
 
+        seen_runtime: list[object] = []
+
         class _CompiledGraph:
             def invoke(self, initial_state: dict) -> dict:
                 runtime = initial_state["metadata"]["human_loop_runtime"]
+                seen_runtime.append(runtime)
                 approval = runtime.create_and_wait(
                     node_id="human_1",
                     node_label="Human",
@@ -789,9 +798,11 @@ class WorkflowCallNodeTests(unittest.TestCase):
                 }
             )
 
-        self.assertEqual(fake_runtime.requested_node_ids, ["call_child::human_1"])
-        self.assertEqual(requested_events[0]["nodeId"], "call_child::human_1")
-        self.assertEqual(resolved_events[0]["nodeId"], "call_child::human_1")
+        # Pass-through: no ScopedHumanLoopRuntimeProxy, same object identity.
+        self.assertIs(seen_runtime[0], fake_runtime)
+        self.assertIsInstance(seen_runtime[0], HumanLoopRuntime)
+        # Without the proxy, node_id is not prefixed with call_child::.
+        self.assertEqual(fake_runtime.requested_node_ids, ["human_1"])
 
         output = result["node_outputs"]["call_child"]
         self.assertEqual(output["json_fields"]["answer"], "approved-by-human")
