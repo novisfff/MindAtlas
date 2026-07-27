@@ -804,13 +804,10 @@ class TestDurableBlockingRuntimeForbidden:
     def test_main_agent_create_and_wait_forbidden_before_row(self) -> None:
         from app.assistant.models import AssistantChatRun, Conversation
         from app.assistant.workflow.human_approval_runtime import (
-            DURABLE_BLOCKING_RUNTIME_FORBIDDEN,
             DurableBlockingRuntimeForbidden,
             HumanLoopContext,
             HumanLoopRuntime,
         )
-        from app.assistant_config.models import AssistantHumanApproval
-        from sqlalchemy import select
         from sqlalchemy.orm import sessionmaker
 
         conv = Conversation(title="guard")
@@ -846,29 +843,26 @@ class TestDurableBlockingRuntimeForbidden:
                 field_schema=[{"name": "a", "type": "string"}],
                 initial_values={},
             )
-        assert exc.value.reason_code == DURABLE_BLOCKING_RUNTIME_FORBIDDEN
+        assert "cannot use Legacy HumanLoopRuntime.create_and_wait" in str(exc.value)
 
-        rows = self.db.execute(select(AssistantHumanApproval)).scalars().all()
-        assert rows == []
-
-    def test_legacy_string_run_id_still_allowed(self) -> None:
-        """workflow-test / Legacy non-UUID run_ids are unchanged."""
+    def test_legacy_string_run_id_is_also_forbidden(self) -> None:
+        """The removed blocking runtime rejects every run-id shape."""
         from sqlalchemy.orm import sessionmaker
 
         from app.assistant.workflow.human_approval_runtime import (
+            DurableBlockingRuntimeForbidden,
             _reject_durable_blocking_runtime,
         )
 
         factory = sessionmaker(bind=self.db.get_bind())
-        # Non-UUID Legacy / workflow-test run ids must not raise.
-        _reject_durable_blocking_runtime(factory, "run_hitl_legacy_1")
-        # Missing run UUID is ignored (not treated as durable main_agent).
-        _reject_durable_blocking_runtime(factory, str(uuid.uuid4()))
+        with pytest.raises(DurableBlockingRuntimeForbidden):
+            _reject_durable_blocking_runtime(factory, "run_hitl_legacy_1")
+        with pytest.raises(DurableBlockingRuntimeForbidden):
+            _reject_durable_blocking_runtime(factory, str(uuid.uuid4()))
 
     def test_uuid_lookup_failure_fails_closed(self) -> None:
         """Valid UUID + DB/session lookup error must not admit Legacy row insert."""
         from app.assistant.workflow.human_approval_runtime import (
-            DURABLE_BLOCKING_RUNTIME_FORBIDDEN,
             DurableBlockingRuntimeForbidden,
             HumanLoopContext,
             HumanLoopRuntime,
@@ -892,10 +886,7 @@ class TestDurableBlockingRuntimeForbidden:
         rid = str(uuid.uuid4())
         with pytest.raises(DurableBlockingRuntimeForbidden) as exc:
             _reject_durable_blocking_runtime(_BrokenFactory(), rid)  # type: ignore[arg-type]
-        assert exc.value.reason_code == DURABLE_BLOCKING_RUNTIME_FORBIDDEN
-        assert "lookup failed" in str(exc.value).lower() or DURABLE_BLOCKING_RUNTIME_FORBIDDEN in str(
-            exc.value
-        )
+        assert "cannot use Legacy HumanLoopRuntime.create_and_wait" in str(exc.value)
 
         # create_and_wait must also fail closed before any approval row.
         runtime = HumanLoopRuntime(

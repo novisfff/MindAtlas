@@ -587,7 +587,7 @@ class CapabilityCallModelTests(unittest.TestCase):
 
 class CapabilityCallMigrationMetaTests(unittest.TestCase):
     def test_revision_parent_and_sole_head(self) -> None:
-        """Plan 08 ledger chain remains ancestors of the sole Plan 09 head."""
+        """Plan 08 ledger chain remains an ancestor of the sole migration head."""
         from pathlib import Path
         from alembic.config import Config
         from alembic.script import ScriptDirectory
@@ -599,11 +599,9 @@ class CapabilityCallMigrationMetaTests(unittest.TestCase):
         heads = script.get_heads()
         self.assertEqual(len(heads), 1, heads)
         head = heads[0]
-        # Plan 09 eval workbench is the sole pre-merge head (alias soft-disable
-        # folded into 09A lifecycle; residual 24f1e06fdd9e removed).
-        self.assertEqual(head, "027869a00a47")
+        self.assertEqual(head, "3bd7bc4257c9")
 
-        plan09_eval = script.get_revision(head)
+        plan09_eval = script.get_revision("027869a00a47")
         self.assertEqual(plan09_eval.down_revision, "403414a62e55")
         self.assertIn("skill_evaluation_workbench", plan09_eval.path)
 

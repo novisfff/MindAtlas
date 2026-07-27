@@ -104,6 +104,23 @@ class SystemWorkflowLayoutPresetTests(unittest.TestCase):
         self.assertIsNotNone(skill)
         return svc, skill.id
 
+    def _get_system_workflow(self, definition):
+        from app.assistant_config.models import AssistantWorkflow  # noqa: E402
+        from app.assistant_config.service import AssistantConfigService  # noqa: E402
+
+        svc = AssistantConfigService(self.db)
+        svc.sync_system_skills()
+        workflow = (
+            self.db.query(AssistantWorkflow)
+            .filter(
+                AssistantWorkflow.name == f"{definition.name}__workflow",
+                AssistantWorkflow.is_system.is_(True),
+            )
+            .first()
+        )
+        self.assertIsNotNone(workflow)
+        return svc, workflow.id
+
     def test_system_workflow_definitions_use_optimized_layout_presets(self) -> None:
         from app.assistant.skill_catalog.definitions import PERIODIC_REVIEW, QUICK_STATS, SMART_CAPTURE  # noqa: E402
 
@@ -121,6 +138,7 @@ class SystemWorkflowLayoutPresetTests(unittest.TestCase):
             for node_id, expected in expected_positions.items():
                 self.assertEqual(position_map.get(node_id), expected, f"{skill_name}.{node_id} position mismatch")
 
+    @unittest.skip("legacy AssistantSkill reset route removed (Plan 10 B2)")
     def test_reset_skill_restores_system_workflow_layout_preset(self) -> None:
         from app.assistant.skill_catalog.definitions import QUICK_STATS  # noqa: E402
         from app.assistant_config.models import AssistantSkill  # noqa: E402
@@ -147,14 +165,13 @@ class SystemWorkflowLayoutPresetTests(unittest.TestCase):
 
     def test_sync_restores_existing_system_workflow_positions(self) -> None:
         from app.assistant.skill_catalog.definitions import QUICK_STATS  # noqa: E402
-        from app.assistant_config.models import AssistantSkill  # noqa: E402
+        from app.assistant_config.models import AssistantWorkflow  # noqa: E402
 
-        svc, skill_id = self._get_system_skill_with_workflow(QUICK_STATS)
-        skill = self.db.query(AssistantSkill).filter(AssistantSkill.id == skill_id).first()
-        self.assertIsNotNone(skill)
-        self.assertIsNotNone(skill.workflow)
+        svc, workflow_id = self._get_system_workflow(QUICK_STATS)
+        workflow = self.db.get(AssistantWorkflow, workflow_id)
+        self.assertIsNotNone(workflow)
 
-        start_node = next((node for node in (skill.workflow.nodes or []) if node.node_id == "start"), None)
+        start_node = next((node for node in (workflow.nodes or []) if node.node_id == "start"), None)
         self.assertIsNotNone(start_node)
         start_node.position_x = 999.0
         start_node.position_y = 777.0
@@ -166,24 +183,22 @@ class SystemWorkflowLayoutPresetTests(unittest.TestCase):
         ):
             svc.sync_system_skills()
 
-        refreshed = self.db.query(AssistantSkill).filter(AssistantSkill.id == skill_id).first()
+        refreshed = self.db.get(AssistantWorkflow, workflow_id)
         self.assertIsNotNone(refreshed)
-        self.assertIsNotNone(refreshed.workflow)
         self.assertEqual(
-            _node_position_map(refreshed.workflow),
+            _node_position_map(refreshed),
             EXPECTED_WORKFLOW_POSITIONS["quick_stats"],
         )
 
     def test_sync_clears_system_workflow_viewport_when_baseline_has_none(self) -> None:
         from app.assistant.skill_catalog.definitions import QUICK_STATS  # noqa: E402
-        from app.assistant_config.models import AssistantSkill  # noqa: E402
+        from app.assistant_config.models import AssistantWorkflow  # noqa: E402
 
-        svc, skill_id = self._get_system_skill_with_workflow(QUICK_STATS)
-        skill = self.db.query(AssistantSkill).filter(AssistantSkill.id == skill_id).first()
-        self.assertIsNotNone(skill)
-        self.assertIsNotNone(skill.workflow)
+        svc, workflow_id = self._get_system_workflow(QUICK_STATS)
+        workflow = self.db.get(AssistantWorkflow, workflow_id)
+        self.assertIsNotNone(workflow)
 
-        skill.workflow.workflow_viewport = {"x": 0, "y": 0, "zoom": 1}
+        workflow.workflow_viewport = {"x": 0, "y": 0, "zoom": 1}
         self.db.commit()
 
         with patch(
@@ -192,10 +207,9 @@ class SystemWorkflowLayoutPresetTests(unittest.TestCase):
         ):
             svc.sync_system_skills()
 
-        refreshed = self.db.query(AssistantSkill).filter(AssistantSkill.id == skill_id).first()
+        refreshed = self.db.get(AssistantWorkflow, workflow_id)
         self.assertIsNotNone(refreshed)
-        self.assertIsNotNone(refreshed.workflow)
-        self.assertIsNone(refreshed.workflow.workflow_viewport)
+        self.assertIsNone(refreshed.workflow_viewport)
 
     def test_standalone_relation_followup_asset_uses_vertical_exit_layout(self) -> None:
         from app.assistant.workflow.system_assets import load_system_workflow_asset  # noqa: E402

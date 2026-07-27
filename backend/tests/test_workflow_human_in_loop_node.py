@@ -63,6 +63,39 @@ class WorkflowHumanInLoopNodeTests(unittest.TestCase):
             ],
         }
 
+    def test_capability_scope_rejects_duck_typed_runtime_without_invoking_it(self) -> None:
+        from types import SimpleNamespace
+
+        from app.assistant.workflow.engine.node_builders.human_in_loop_node import (
+            build_human_in_loop_node,
+        )
+
+        invoked = False
+
+        class DuckRuntime:
+            def create_and_wait(self, **kwargs):  # noqa: ANN003
+                nonlocal invoked
+                invoked = True
+                return {}
+
+        node_fn = build_human_in_loop_node(
+            "human_confirm",
+            self._node_cfg(),
+            execution_scope=SimpleNamespace(allow_ambient_memory=False),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "unsupported under capability scope"):
+            node_fn(
+                {
+                    "metadata": {"human_loop_runtime": DuckRuntime()},
+                    "node_outputs": self._node_outputs(),
+                    "sys_vars": {},
+                    "env_vars": {},
+                }
+            )
+
+        self.assertFalse(invoked)
+
     def test_runtime_resolves_templated_request_text_and_options(self) -> None:
         from app.assistant.workflow.engine.node_builders.human_in_loop_node import build_human_in_loop_node  # noqa: E402
         from app.assistant.workflow.human_approval_runtime import HumanLoopRuntime  # noqa: E402

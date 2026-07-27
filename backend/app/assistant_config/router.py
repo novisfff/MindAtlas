@@ -52,7 +52,6 @@ from app.assistant_config.workflow_copilot_service import WorkflowCopilotService
 from app.assistant_config.service import AssistantConfigService
 from app.common.exceptions import ApiException
 from app.common.responses import ApiResponse
-from app.assistant.workflow.human_approval_runtime import submit_human_approval_decision
 from app.database import get_db
 
 router = APIRouter(prefix="/api/assistant-config", tags=["assistant-config"])
@@ -633,22 +632,17 @@ def submit_run_approval_decision(
     request: HumanApprovalDecisionRequest,
     db: Session = Depends(get_db),
 ) -> ApiResponse:
-    try:
-        payload = submit_human_approval_decision(
-            db,
-            approval_id=approval_id,
-            decision=request.decision,
-            values=request.values,
-            comment=request.comment,
-            expected_run_id=run_id,
-        )
-    except ValueError as exc:
-        raise ApiException(
-            status_code=400,
-            code=42252,
-            message=str(exc),
-        ) from exc
-    return ApiResponse.ok(payload)
+    """Legacy blocking approval API removed (Plan 10 B2)."""
+    _ = (run_id, approval_id, request, db)
+    raise ApiException(
+        status_code=410,
+        code=41011,
+        message=(
+            "Legacy blocking HumanLoop / assistant_human_approval is removed. "
+            "Use durable Main Agent interrupts."
+        ),
+        details={"legacyHitlRemoved": True, "replacement": "durable_interrupt"},
+    )
 
 
 # Node type metadata

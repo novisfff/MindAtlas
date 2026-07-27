@@ -12,6 +12,7 @@ bootstrap_backend_imports()
 reset_caches()
 
 
+@unittest.skip("legacy SkillRouter removed (Plan 10 B2)")
 class SkillRouterDecisionTests(unittest.TestCase):
     def setUp(self) -> None:
         reset_caches()

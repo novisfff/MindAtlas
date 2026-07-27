@@ -245,7 +245,7 @@ class SystemInitializationServiceTests(unittest.TestCase):
 
     def test_initialize_system_writes_models_bindings_and_defaults(self) -> None:
         from app.ai_registry.models import AiComponentBinding, AiCredential, AiModel
-        from app.assistant_config.models import AssistantSkill, AssistantSystemBehaviorBinding
+        from app.assistant_config.models import AssistantAgentProfile, AssistantSystemBehaviorBinding
         from app.entry_type.models import EntryType
         from app.relation.models import RelationType
         from app.system_settings.initialization_service import (
@@ -284,7 +284,12 @@ class SystemInitializationServiceTests(unittest.TestCase):
         self.assertEqual(entry_types["KNOWLEDGE"].name, "Knowledge")
         self.assertIn("CUSTOM_TYPE_1", entry_types)
         self.assertEqual(relation_types["BELONGS_TO"].name, "Belongs To")
-        self.assertGreater(self.db.query(AssistantSkill).filter(AssistantSkill.is_system.is_(True)).count(), 0)
+        self.assertGreater(
+            self.db.query(AssistantAgentProfile)
+            .filter(AssistantAgentProfile.is_system.is_(True))
+            .count(),
+            0,
+        )
         self.assertGreater(self.db.query(AssistantSystemBehaviorBinding).count(), 0)
         self.assertIsNotNone(init_state)
 

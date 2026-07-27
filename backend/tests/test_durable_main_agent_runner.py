@@ -211,9 +211,10 @@ class DurableMainAgentAdmissionTests(unittest.TestCase):
         # Main Agent must not invoke background daemon start.
         self.assertEqual(started, [])
 
-    def test_mode_off_still_uses_background_legacy(self) -> None:
+    def test_mode_off_rejects_new_chat_without_starting_legacy_background(self) -> None:
         from app.assistant.models import Conversation
         from app.assistant.service import AssistantService
+        from app.common.exceptions import ApiException
 
         conv = Conversation(title="queue-legacy")
         self.db.add(conv)
@@ -234,13 +235,13 @@ class DurableMainAgentAdmissionTests(unittest.TestCase):
             settings.app_build_revision = BUILD
             settings.assistant_worker_registration_ttl_sec = 20
             gs.return_value = settings
-            try:
+            with self.assertRaises(ApiException) as ctx:
                 gen = svc.chat_stream(conv.id, "hello", stream_output=False)
                 next(gen, None)
-            except Exception:
-                pass
 
-        self.assertEqual(len(started), 1)
+        self.assertEqual(ctx.exception.status_code, 503)
+        self.assertEqual(ctx.exception.code, 50310)
+        self.assertEqual(started, [])
 
 
 class DurableMaterializeBaseTests(unittest.TestCase):

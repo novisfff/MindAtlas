@@ -112,9 +112,15 @@ jobs:
 
       - name: Alembic upgrade / downgrade / upgrade gate
         env:
-          # Plan 08/09 guarded downgrades need explicit acks on disposable CI DBs.
+          # Guarded destructive migrations need explicit acks on this disposable CI DB.
           MINDATLAS_PLAN08_DOWNGRADE_ACK_PURGE_LEDGER_DATA: "1"
           MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK: "1"
+          MINDATLAS_PLAN10_B2_TEST_OVERRIDE: "1"
+          MINDATLAS_PLAN10_MIGRATION_DOWNGRADE_ACK: "1"
+          MINDATLAS_PLAN10_B2_DOWNGRADE_ACK: "1"
+          MINDATLAS_PLAN10_B2_SKILL_DROP_DOWNGRADE_ACK: "1"
+          MINDATLAS_PLAN10_B2_LEGACY_ID_DROP_DOWNGRADE_ACK: "1"
+          MINDATLAS_PLAN10_B2_LEGACY_DIGEST_DROP_DOWNGRADE_ACK: "1"
         run: |
           set -euo pipefail
           alembic upgrade head

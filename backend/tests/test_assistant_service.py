@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import unittest
 from datetime import datetime, timezone
-from types import SimpleNamespace
 from unittest.mock import patch
 from uuid import UUID
 
@@ -93,38 +92,13 @@ class AssistantServiceUnitTests(unittest.TestCase):
             "https://api.example.com/v1/chat/completions",
         )
 
-    def test_generate_response_passes_resolved_locale_to_agent_runtime(self) -> None:
+    def test_generate_response_rejects_removed_legacy_agent_runtime(self) -> None:
         from app.assistant.service import AssistantService  # noqa: E402
-        from app.system_settings.service import SystemSettingsService  # noqa: E402
 
         service = AssistantService(self.db)
-        SystemSettingsService(self.db).set_locale("en")
-        captured_runtime_context: dict[str, object] = {}
 
-        class _FakeAgent:
-            def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
-                pass
-
-            def stream(self, history, user_input, runtime_context=None, **kwargs):  # noqa: ANN001, ANN003
-                captured_runtime_context.update(runtime_context or {})
-                yield "ok"
-
-        with patch.object(
-            service,
-            "_get_openai_config",
-            return_value=SimpleNamespace(api_key="k", base_url="https://api.example.com", model="gpt-test"),
-        ), patch.object(
-            service,
-            "_build_llm_messages",
-            return_value=[
-                {"role": "system", "content": "system"},
-                {"role": "user", "content": "hello"},
-            ],
-        ), patch(
-            "app.assistant.orchestration.agent_runtime.AssistantAgent",
-            _FakeAgent,
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "Legacy AssistantAgent/Supervisor runtime is removed",
         ):
-            output = list(service._generate_response(self.conv.id, stream_output=False))
-
-        self.assertEqual(output, ["ok"])
-        self.assertEqual(captured_runtime_context.get("locale"), "en")
+            list(service._generate_response(self.conv.id, stream_output=False))

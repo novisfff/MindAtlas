@@ -61,6 +61,7 @@ def _install_fastapi_stubs() -> None:
     sys.modules["starlette.status"] = starlette_status
 
 
+@unittest.skip("legacy Supervisor background-run summary path removed (Plan 10 B2)")
 class AssistantServiceL1SummaryTests(unittest.TestCase):
     def setUp(self) -> None:
         reset_caches()
