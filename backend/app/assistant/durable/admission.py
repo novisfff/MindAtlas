@@ -23,6 +23,14 @@ from app.config import get_settings
 logger = logging.getLogger(__name__)
 
 
+class RuntimeAdmissionError(RuntimeError):
+    """Fail-closed runtime selection failure before durable Run insertion."""
+
+    def __init__(self, reason_code: str, message: str) -> None:
+        super().__init__(message)
+        self.reason_code = reason_code
+
+
 def admit_and_select_runtime(
     db: Session,
     *,
@@ -56,9 +64,12 @@ def admit_and_select_runtime(
             from app.assistant.migration.repository import RuntimeMigrationRepository
 
             active = RuntimeMigrationRepository(db).get_active_rollout_revision()
-        except Exception:
-            active = None
-            logger.exception("rollout revision lookup failed; using plan04 admission")
+        except Exception as exc:
+            logger.exception("rollout revision lookup failed; admission denied")
+            raise RuntimeAdmissionError(
+                "rollout_infrastructure_unavailable",
+                "durable rollout revision lookup failed",
+            ) from exc
         if active is not None:
             try:
                 from app.assistant.migration.rollout import admit_with_rollout
@@ -74,12 +85,25 @@ def admit_and_select_runtime(
                     chat_run_already_inserted=False,
                 )
                 return kind, reason, kwargs
-            except Exception:
-                logger.exception(
-                    "rollout admission failed; falling through to plan04 path"
-                )
+            except Exception as exc:
+                logger.exception("rollout admission failed; admission denied")
+                raise RuntimeAdmissionError(
+                    "rollout_admission_failed",
+                    "durable rollout admission failed",
+                ) from exc
 
-    return _admit_plan04_main_agent(
+        settings = get_settings()
+        runtime_mode = str(
+            getattr(settings, "assistant_runtime_mode", "legacy") or "legacy"
+        ).strip().lower()
+        if runtime_mode != "legacy":
+            raise RuntimeAdmissionError(
+                "runtime_rollout_revision_missing",
+                "native Main Agent mode requires an active durable rollout revision",
+            )
+        return "legacy", "no_active_rollout", {}
+
+    return _admit_main_agent_candidate(
         db,
         mode=mode,
         execution_kind=execution_kind,
@@ -88,7 +112,7 @@ def admit_and_select_runtime(
     )
 
 
-def _admit_plan04_main_agent(
+def _admit_main_agent_candidate(
     db: Session,
     *,
     mode: str | None = None,
@@ -96,12 +120,14 @@ def _admit_plan04_main_agent(
     app_build_revision: str | None = None,
     require_compatible_worker: bool = True,
 ) -> tuple[str, str | None, dict[str, Any]]:
-    """Plan 04 Main Agent mode admission (pre-insert only)."""
+    """Main Agent candidate admission for explicit internal/evaluation calls."""
     settings = get_settings()
-    main_agent_mode = str(
-        mode if mode is not None else getattr(settings, "assistant_main_agent_mode", "off")
-        or "off"
-    ).strip().lower()
+    if mode is None:
+        native_mode = str(
+            getattr(settings, "assistant_runtime_mode", "legacy") or "legacy"
+        ).strip().lower()
+        mode = "read_only" if native_mode == "main_agent" else "off"
+    main_agent_mode = str(mode or "off").strip().lower()
     build = (
         app_build_revision
         or getattr(settings, "app_build_revision", None)

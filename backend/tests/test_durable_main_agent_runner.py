@@ -8,7 +8,7 @@ Scripted tests for:
 - completion + memory unit materialization
 - runtime admission before Run insert (immutable runtime_kind)
 - API queue path never calls _run_chat_background for main_agent
-- ASSISTANT_MAIN_AGENT_MODE=off / Legacy unchanged
+- native runtime rollout admission
 """
 
 from __future__ import annotations
@@ -180,7 +180,7 @@ class DurableMainAgentAdmissionTests(unittest.TestCase):
             ) as gs,
         ):
             settings = MagicMock()
-            settings.assistant_main_agent_mode = "read_only"
+            settings.assistant_runtime_mode = "main_agent"
             settings.app_build_revision = BUILD
             settings.assistant_worker_registration_ttl_sec = 20
             gs.return_value = settings
@@ -211,8 +211,8 @@ class DurableMainAgentAdmissionTests(unittest.TestCase):
         # Main Agent must not invoke background daemon start.
         self.assertEqual(started, [])
 
-    def test_mode_off_rejects_new_chat_without_starting_legacy_background(self) -> None:
-        from app.assistant.models import Conversation
+    def test_rejected_admission_leaves_no_orphan_messages_or_run(self) -> None:
+        from app.assistant.models import AssistantChatRun, Conversation, Message
         from app.assistant.service import AssistantService
         from app.common.exceptions import ApiException
 
@@ -228,13 +228,11 @@ class DurableMainAgentAdmissionTests(unittest.TestCase):
 
         with (
             patch.object(svc, "_start_background_run", side_effect=_capture_start),
-            patch("app.assistant.service.get_settings") as gs,
+            patch(
+                "app.assistant.durable.admission.admit_and_select_runtime",
+                return_value=("legacy", "rollout_assigned_legacy", {}),
+            ),
         ):
-            settings = MagicMock()
-            settings.assistant_main_agent_mode = "off"
-            settings.app_build_revision = BUILD
-            settings.assistant_worker_registration_ttl_sec = 20
-            gs.return_value = settings
             with self.assertRaises(ApiException) as ctx:
                 gen = svc.chat_stream(conv.id, "hello", stream_output=False)
                 next(gen, None)
@@ -242,6 +240,16 @@ class DurableMainAgentAdmissionTests(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 503)
         self.assertEqual(ctx.exception.code, 50310)
         self.assertEqual(started, [])
+        self.assertEqual(
+            self.db.query(Message).filter(Message.conversation_id == conv.id).count(),
+            0,
+        )
+        self.assertEqual(
+            self.db.query(AssistantChatRun)
+            .filter(AssistantChatRun.conversation_id == conv.id)
+            .count(),
+            0,
+        )
 
 
 class DurableMaterializeBaseTests(unittest.TestCase):

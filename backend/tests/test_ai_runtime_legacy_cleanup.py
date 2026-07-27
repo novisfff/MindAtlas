@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import re
 import unittest
 from pathlib import Path
 
@@ -19,6 +20,7 @@ reset_caches()
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 APP_ROOT = BACKEND_ROOT / "app"
 FRONTEND_APP = BACKEND_ROOT.parent / "frontend" / "src" / "app" / "App.tsx"
+DEPLOY_COMPOSE = BACKEND_ROOT.parent / "deploy" / "docker-compose.yml"
 
 
 def _module_source(module: object) -> str:
@@ -46,6 +48,32 @@ def _top_level_import_names(source: str) -> set[str]:
 
 
 class LegacyCleanupArchitectureTests(unittest.TestCase):
+    def test_deploy_compose_uses_only_native_runtime_rollout_config(self) -> None:
+        compose = DEPLOY_COMPOSE.read_text(encoding="utf-8")
+
+        self.assertNotIn("ASSISTANT_MAIN_AGENT_MODE", compose)
+        self.assertEqual(
+            len(re.findall(r"^\s+ASSISTANT_RUNTIME_MODE:", compose, re.MULTILINE)),
+            2,
+        )
+        self.assertEqual(
+            len(
+                re.findall(
+                    r"^\s+ASSISTANT_RUNTIME_ROLLOUT_REVISION:",
+                    compose,
+                    re.MULTILINE,
+                )
+            ),
+            2,
+        )
+
+    def test_application_startup_validates_native_rollout_config(self) -> None:
+        from app import main as main_mod
+
+        lifespan_source = inspect.getsource(main_mod.lifespan)
+        self.assertIn("validate_runtime_rollout_startup", lifespan_source)
+        self.assertIn("SessionLocal", lifespan_source)
+
     def test_assistant_service_module_does_not_import_intent_router_or_supervisor(self) -> None:
         from app.assistant import service as service_mod
 

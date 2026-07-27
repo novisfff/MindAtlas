@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import os
+import runpy
 import tempfile
 import unittest
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
@@ -18,6 +20,12 @@ reset_caches()
 
 _DIGEST_A = "a" * 64
 _DIGEST_B = "b" * 64
+_B2_MIGRATION = (
+    Path(__file__).resolve().parents[1]
+    / "alembic"
+    / "versions"
+    / "ca6f564ef4bd_remove_legacy_assistant_skill_runtime.py"
+)
 
 
 def _sqlite_session():
@@ -169,6 +177,44 @@ class CleanupPreflightTests(unittest.TestCase):
             os.environ.pop("MINDATLAS_PLAN10_B2_TEST_OVERRIDE", None)
         else:
             os.environ["MINDATLAS_PLAN10_B2_TEST_OVERRIDE"] = self._prev_override
+
+    def test_destructive_migration_blocks_nonterminal_legacy_runs_with_ack(self) -> None:
+        migration = runpy.run_path(str(_B2_MIGRATION))
+
+        class _Result:
+            def __init__(self, value: int) -> None:
+                self.value = value
+
+            def fetchone(self):
+                return (self.value,)
+
+        class _Connection:
+            def execute(self, statement):
+                return _Result(1 if "assistant_chat_run" in str(statement) else 0)
+
+        with patch.dict(
+            os.environ,
+            {"MINDATLAS_PLAN10_B2_TEST_OVERRIDE": "1"},
+            clear=True,
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                migration["_preflight"](_Connection())
+        self.assertIn("nonterminal_legacy_runs=1", str(ctx.exception))
+
+    def test_destructive_migration_preflight_propagates_count_query_errors(self) -> None:
+        migration = runpy.run_path(str(_B2_MIGRATION))
+
+        class _BrokenConnection:
+            def execute(self, _statement):
+                raise RuntimeError("count query failed")
+
+        with patch.dict(
+            os.environ,
+            {"MINDATLAS_PLAN10_B2_TEST_OVERRIDE": "1"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "count query failed"):
+                migration["_preflight"](_BrokenConnection())
 
     def test_preflight_fails_without_maintenance_ack(self) -> None:
         from app.assistant.migration.cleanup import preflight_deploy_b2

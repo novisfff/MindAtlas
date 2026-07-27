@@ -11,6 +11,8 @@ import os
 import unittest
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
@@ -931,6 +933,19 @@ class CliPrepareApplyTests(unittest.TestCase):
         self.assertEqual(s.assistant_runtime_mode, "legacy")
         self.assertEqual(s.assistant_runtime_rollout_revision, "")
 
+    def test_removed_main_agent_mode_env_is_rejected(self) -> None:
+        from pydantic import ValidationError
+
+        from app.config import Settings
+
+        with patch.dict(
+            os.environ,
+            {"ASSISTANT_MAIN_AGENT_MODE": "read_only"},
+            clear=True,
+        ):
+            with self.assertRaises(ValidationError) as ctx:
+                Settings(_env_file=None)
+        self.assertIn("ASSISTANT_MAIN_AGENT_MODE has been removed", str(ctx.exception))
 
 
 
@@ -1030,49 +1045,53 @@ class DeterministicAssignmentTests(unittest.TestCase):
         )
         self.assertEqual(result.assigned_runtime_kind, "legacy")
 
-    def test_plan04_compat_mapping_table(self) -> None:
+    def test_startup_config_must_match_active_durable_revision(self) -> None:
         from app.assistant.migration.rollout import (
             RolloutError,
-            resolve_runtime_mode_from_env,
+            activate_revision,
+            prepare_revision,
+            validate_runtime_rollout_startup,
         )
 
-        absent = resolve_runtime_mode_from_env(
-            runtime_mode_present=False, main_agent_mode_present=False
+        revision = prepare_revision(
+            self.session,
+            revision_label="startup-main-v1",
+            runtime_mode="main_agent",
+            eligible_closure_digest=_DIGEST_A,
+            build_revision="development",
+            read_canary_percent=100,
         )
-        self.assertEqual(absent["runtime_mode"], "legacy")
-
-        off = resolve_runtime_mode_from_env(
-            main_agent_mode="off",
-            runtime_mode_present=False,
-            main_agent_mode_present=True,
+        activate_revision(
+            self.session,
+            rollout_revision_id=revision.id,
+            expected_control_revision=0,
         )
-        self.assertEqual(off["runtime_mode"], "legacy")
-        self.assertFalse(off["paired_shadow_eligible"])
-
-        shadow = resolve_runtime_mode_from_env(
-            main_agent_mode="shadow",
-            runtime_mode_present=False,
-            main_agent_mode_present=True,
+        settings = SimpleNamespace(
+            assistant_runtime_mode="main_agent",
+            assistant_runtime_rollout_revision="startup-main-v1",
         )
-        self.assertEqual(shadow["runtime_mode"], "legacy")
-        self.assertFalse(shadow["paired_shadow_eligible"])
+        active = validate_runtime_rollout_startup(self.session, settings=settings)
+        self.assertEqual(active.id, revision.id)
 
         with self.assertRaises(RolloutError) as ctx:
-            resolve_runtime_mode_from_env(
-                main_agent_mode="read_only",
-                runtime_mode_present=False,
-                main_agent_mode_present=True,
+            validate_runtime_rollout_startup(
+                self.session,
+                settings=SimpleNamespace(
+                    assistant_runtime_mode="main_agent",
+                    assistant_runtime_rollout_revision="different-revision",
+                ),
             )
-        self.assertEqual(ctx.exception.code, "explicit_runtime_mode_required")
+        self.assertEqual(ctx.exception.code, "runtime_rollout_revision_mismatch")
 
-        with self.assertRaises(RolloutError) as ctx2:
-            resolve_runtime_mode_from_env(
-                runtime_mode="legacy",
-                main_agent_mode="off",
-                runtime_mode_present=True,
-                main_agent_mode_present=True,
+        with self.assertRaises(RolloutError) as mode_ctx:
+            validate_runtime_rollout_startup(
+                self.session,
+                settings=SimpleNamespace(
+                    assistant_runtime_mode="legacy",
+                    assistant_runtime_rollout_revision="startup-main-v1",
+                ),
             )
-        self.assertEqual(ctx2.exception.code, "dual_runtime_mode_variables")
+        self.assertEqual(mode_ctx.exception.code, "runtime_rollout_mode_mismatch")
 
     def test_activate_and_rollback_wrappers(self) -> None:
         from app.assistant.migration.rollout import (

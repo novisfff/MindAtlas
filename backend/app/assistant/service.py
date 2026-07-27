@@ -421,8 +421,7 @@ class AssistantService:
         )
         self.db.add(user_msg)
         conversation.last_message_at = utcnow()
-        self.db.commit()
-        self.db.refresh(user_msg)
+        self.db.flush()
 
         assistant_msg = Message(
             conversation_id=conversation.id,
@@ -430,21 +429,35 @@ class AssistantService:
             content="",
         )
         self.db.add(assistant_msg)
-        self.db.commit()
-        self.db.refresh(assistant_msg)
+        self.db.flush()
 
         # Plan 06 Task 6 / Plan 10 Task 9 (Deploy B1): admit + select immutable
         # runtime_kind immediately before Run insertion. New production chat is
         # Main Agent only — do not create or daemon-spawn legacy Supervisor runs.
         # Pre-insert Legacy fallback is fail-closed for new traffic; in-flight
         # legacy recovery (if any rows already exist) stays on the drain path.
-        from app.assistant.durable.admission import admit_and_select_runtime
-
-        runtime_kind, admit_reason, create_kwargs = admit_and_select_runtime(
-            self.db,
-            execution_kind="production",
-            conversation_id=conversation.id,
+        from app.assistant.durable.admission import (
+            RuntimeAdmissionError,
+            admit_and_select_runtime,
         )
+
+        try:
+            runtime_kind, admit_reason, create_kwargs = admit_and_select_runtime(
+                self.db,
+                execution_kind="production",
+                conversation_id=conversation.id,
+            )
+        except RuntimeAdmissionError as exc:
+            self.db.rollback()
+            raise ApiException(
+                status_code=503,
+                code=50310,
+                message="Main Agent runtime admission is temporarily unavailable.",
+                details={
+                    "admissionReason": exc.reason_code,
+                    "legacyRuntimeDisabled": True,
+                },
+            ) from exc
         # Strip internal Plan 10 metadata before create_run kwargs.
         preinsert_fallback = create_kwargs.pop("_preinsert_fallback", None)
         create_kwargs.pop("_rollout_decision", None)

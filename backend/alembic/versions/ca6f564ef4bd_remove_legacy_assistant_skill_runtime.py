@@ -55,10 +55,7 @@ def _preflight(connection) -> None:
         )
 
     def _scalar(sql: str) -> int:
-        try:
-            row = connection.execute(sa.text(sql)).fetchone()
-        except Exception:
-            return 0
+        row = connection.execute(sa.text(sql)).fetchone()
         if row is None:
             return 0
         return int(row[0] or 0)
@@ -82,9 +79,7 @@ def _preflight(connection) -> None:
     blockers: list[str] = []
     if pending > 0:
         blockers.append(f"pending_legacy_approvals={pending}")
-    # Local/partner path: maintenance ack waives nonterminal legacy runs.
-    # Production runbooks still require drain before ack.
-    if nonterminal > 0 and not _maintenance_ack_present():
+    if nonterminal > 0:
         blockers.append(f"nonterminal_legacy_runs={nonterminal}")
     if invalid_l2 > 0:
         blockers.append(f"invalid_l2_rows={invalid_l2}")

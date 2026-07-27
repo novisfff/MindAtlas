@@ -690,7 +690,7 @@ class TestPlan07VerificationInvariants:
         from app.config import get_settings
 
         settings = get_settings()
-        assert settings.assistant_main_agent_mode in {"off", "shadow", "read_only", "native"}
+        assert settings.assistant_runtime_mode in {"legacy", "main_agent"}
         # Default production posture for this worktree verification:
         assert settings.assistant_durable_interrupts_enabled is False
         # Pepper may be blank in tests; production enable requires nonempty stable pepper.

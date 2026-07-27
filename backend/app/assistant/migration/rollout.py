@@ -104,89 +104,6 @@ class PreInsertFallbackDecision:
         )
 
 
-# ---------------------------------------------------------------------------
-# Config / Plan 04 compat
-# ---------------------------------------------------------------------------
-
-
-def resolve_runtime_mode_from_env(
-    *,
-    runtime_mode: str | None = None,
-    main_agent_mode: str | None = None,
-    runtime_mode_present: bool | None = None,
-    main_agent_mode_present: bool | None = None,
-) -> dict[str, Any]:
-    """Map Plan 10 / Plan 04 mode variables to a routing decision.
-
-    Rules (binding):
-    - both present → fail (even if strings appear equivalent)
-    - ASSISTANT_RUNTIME_MODE alone → use it (legacy|main_agent; shadow/canary
-      require durable revision and are not accepted as parser values here)
-    - ASSISTANT_MAIN_AGENT_MODE alone:
-        absent/off → legacy
-        shadow → explicit-eval-only (paired production eligibility fixed to 0)
-        read_only → error ``explicit_runtime_mode_required``
-    """
-
-    rm_present = (
-        runtime_mode_present
-        if runtime_mode_present is not None
-        else runtime_mode is not None
-    )
-    ma_present = (
-        main_agent_mode_present
-        if main_agent_mode_present is not None
-        else main_agent_mode is not None
-    )
-    if rm_present and ma_present:
-        raise RolloutError(
-            "dual_runtime_mode_variables",
-            "ASSISTANT_RUNTIME_MODE and ASSISTANT_MAIN_AGENT_MODE cannot both be set",
-        )
-
-    if rm_present:
-        mode = str(runtime_mode or "").strip().lower()
-        if mode not in {"legacy", "main_agent"}:
-            raise RolloutError(
-                "invalid_runtime_mode",
-                f"ASSISTANT_RUNTIME_MODE must be legacy|main_agent, got {mode!r}",
-            )
-        return {
-            "runtime_mode": mode,
-            "config_origin": "native",
-            "paired_shadow_eligible": mode != "legacy",
-            "source": "ASSISTANT_RUNTIME_MODE",
-        }
-
-    # Compat path: ASSISTANT_MAIN_AGENT_MODE only (or neither → legacy default).
-    mode = str(main_agent_mode or "off").strip().lower() if ma_present else "off"
-    if mode in {"", "off"}:
-        return {
-            "runtime_mode": "legacy",
-            "config_origin": "plan04_compat",
-            "paired_shadow_eligible": False,
-            "source": "ASSISTANT_MAIN_AGENT_MODE" if ma_present else "default",
-        }
-    if mode == "shadow":
-        return {
-            "runtime_mode": "legacy",
-            "config_origin": "plan04_compat",
-            "paired_shadow_eligible": False,  # fixed zero
-            "compat_shadow": True,
-            "source": "ASSISTANT_MAIN_AGENT_MODE",
-        }
-    if mode == "read_only":
-        raise RolloutError(
-            "explicit_runtime_mode_required",
-            "ASSISTANT_MAIN_AGENT_MODE=read_only requires an explicit canary/main "
-            "rollout revision via ASSISTANT_RUNTIME_MODE + durable activation",
-        )
-    raise RolloutError(
-        "invalid_main_agent_mode",
-        f"unknown ASSISTANT_MAIN_AGENT_MODE: {mode!r}",
-    )
-
-
 def cohort_salt_fingerprint(salt: str | None = None) -> str:
     """Fingerprint of the cohort salt (sha256 of salt bytes). Never stores salt."""
     raw = salt if salt is not None else os.environ.get(COHORT_SALT_ENV, "")
@@ -322,6 +239,49 @@ def get_revision_by_label(
             AssistantRuntimeRolloutRevision.revision_label == label
         )
     ).scalar_one_or_none()
+
+
+def validate_runtime_rollout_startup(
+    session: Session,
+    *,
+    settings: Any | None = None,
+) -> AssistantRuntimeRolloutRevision | None:
+    """Require native environment config to match the durable active revision."""
+
+    if settings is None:
+        from app.config import get_settings
+
+        settings = get_settings()
+
+    configured_mode = str(
+        getattr(settings, "assistant_runtime_mode", "legacy") or "legacy"
+    ).strip().lower()
+    configured_label = str(
+        getattr(settings, "assistant_runtime_rollout_revision", "") or ""
+    ).strip()
+    active = RuntimeMigrationRepository(session).get_active_rollout_revision()
+
+    if active is None:
+        if configured_mode == "legacy" and not configured_label:
+            return None
+        raise RolloutError(
+            "runtime_rollout_revision_missing",
+            "configured runtime requires an active durable rollout revision",
+        )
+
+    active_label = str(active.revision_label or "").strip()
+    if not configured_label or configured_label != active_label:
+        raise RolloutError(
+            "runtime_rollout_revision_mismatch",
+            "configured rollout revision does not match the durable active revision",
+        )
+    active_mode = str(active.runtime_mode or "legacy").strip().lower()
+    if configured_mode != active_mode:
+        raise RolloutError(
+            "runtime_rollout_mode_mismatch",
+            "configured runtime mode does not match the durable active revision",
+        )
+    return active
 
 
 # ---------------------------------------------------------------------------
@@ -732,6 +692,6 @@ __all__ = (
     "prepare_revision",
     "record_preinsert_fallback",
     "resolve_cohort_salt",
-    "resolve_runtime_mode_from_env",
     "rollback_to_legacy",
+    "validate_runtime_rollout_startup",
 )

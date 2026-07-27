@@ -53,7 +53,8 @@ Return traffic and configuration to the last known-good **legacy-primary** state
 
 | Flag | Rollback target |
 |---|---|
-| `ASSISTANT_MAIN_AGENT_MODE` | `off` |
+| `ASSISTANT_RUNTIME_MODE` | `legacy` |
+| `ASSISTANT_RUNTIME_ROLLOUT_REVISION` | label of the newly activated durable legacy revision |
 | `ASSISTANT_MAIN_AGENT_WRITE_MODE` | `off` |
 | `ASSISTANT_CAPABILITY_LEDGER_MODE` | retain prior safe value; do not weaken enforced mid-flight without evidence |
 | `ASSISTANT_DURABLE_INTERRUPTS_ENABLED` | retain prior value unless interrupt path is implicated |
