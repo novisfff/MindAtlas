@@ -45,11 +45,13 @@ export function OperatorLoginPage() {
     try {
       const session = await loginMutation.mutateAsync(exactPassword)
       queryClient.setQueryData(operatorSessionKeys.session, session)
-      setPassword('')
       navigate('/dashboard', { replace: true })
     } catch (error) {
-      setPassword('')
       setErrorMessage(resolveLoginErrorMessage(error, t))
+    } finally {
+      // Clear UI state and RQ mutation variables so the password does not linger.
+      setPassword('')
+      loginMutation.reset()
     }
   }
 

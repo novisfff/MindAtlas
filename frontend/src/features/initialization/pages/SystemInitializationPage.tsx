@@ -916,12 +916,14 @@ export function SystemInitializationPage() {
       await queryClient.invalidateQueries({ queryKey: ['operator-session'] })
       toast.success(t('initialization.success'))
       navigate('/dashboard', { replace: true })
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : t('initialization.submitError'))
+    } catch {
+      // Never echo server/error text that might reflect secret material.
+      toast.error(t('initialization.submitError'))
     } finally {
-      // Always clear secrets from component state after an attempt.
+      // Always clear secrets from component state and RQ mutation variables after an attempt.
       setSetupToken('')
       setOperatorPassword('')
+      initializeMutation.reset()
     }
   }
 

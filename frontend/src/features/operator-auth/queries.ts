@@ -25,6 +25,8 @@ export function useOperatorLoginMutation() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: (password: string) => loginOperator(password),
+    // Do not retain password-bearing mutation entries in the RQ cache after settle.
+    gcTime: 0,
     onSuccess: (session: OperatorSession) => {
       queryClient.setQueryData(operatorSessionKeys.session, session)
     },

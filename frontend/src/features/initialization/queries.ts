@@ -49,5 +49,7 @@ export function useInitializeSystemMutation() {
       payload: InitializeSystemRequest
       setupToken: string
     }) => initializeSystem(payload, setupToken),
+    // Do not retain setup-token / operator-password variables in the RQ cache after settle.
+    gcTime: 0,
   })
 }

@@ -45,7 +45,7 @@ function renderLogin(initialPath = '/login') {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   })
-  return render(
+  const view = render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter initialEntries={[initialPath]}>
         <Routes>
@@ -55,6 +55,7 @@ function renderLogin(initialPath = '/login') {
       </MemoryRouter>
     </QueryClientProvider>,
   )
+  return { ...view, queryClient }
 }
 
 describe('OperatorLoginPage', () => {
@@ -126,5 +127,55 @@ describe('OperatorLoginPage', () => {
 
     expect(await screen.findByText(/invalid credentials/i)).toBeInTheDocument()
     expect(screen.queryByText(/wrong-password-value/i)).not.toBeInTheDocument()
+  })
+
+  it('clears the password field and mutation variables after a failed login attempt', async () => {
+    loginOperator.mockRejectedValue(
+      new ApiError({ message: 'invalid_credentials', status: 401, code: 40111 }),
+    )
+
+    const { queryClient } = renderLogin()
+    const secret = 'failed-attempt-secret'
+
+    const passwordInput = screen.getByLabelText(/password/i) as HTMLInputElement
+    fireEvent.change(passwordInput, { target: { value: secret } })
+    fireEvent.click(screen.getByRole('button', { name: /login/i }))
+
+    await waitFor(() => {
+      expect(passwordInput.value).toBe('')
+    })
+    expect(await screen.findByText(/invalid credentials/i)).toBeInTheDocument()
+
+    // React Query mutation cache must not retain the submitted password after settle+reset.
+    await waitFor(() => {
+      const holdsSecret = queryClient.getMutationCache().getAll().some(
+        (entry) => entry.state.variables === secret,
+      )
+      expect(holdsSecret).toBe(false)
+    })
+  })
+
+  it('does not leave the password in mutation cache after successful login', async () => {
+    loginOperator.mockResolvedValue({
+      authenticated: true,
+      role: 'operator',
+    })
+
+    const { queryClient } = renderLogin()
+    const secret = 'successful-login-secret'
+
+    fireEvent.change(screen.getByLabelText(/password/i), {
+      target: { value: secret },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /login/i }))
+
+    expect(await screen.findByText('dashboard-page')).toBeInTheDocument()
+
+    await waitFor(() => {
+      const holdsSecret = queryClient.getMutationCache().getAll().some(
+        (entry) => entry.state.variables === secret,
+      )
+      expect(holdsSecret).toBe(false)
+    })
   })
 })
