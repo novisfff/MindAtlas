@@ -90,6 +90,10 @@ def session_factory() -> Iterator[sessionmaker]:
     from sqlalchemy import create_engine, event
 
     import tests._db  # noqa: F401 — JSONB→JSON for SQLite
+    # system_settings.router → initialization_service imports RelationType, which
+    # registers Relation with an Entry relationship. Import Entry so mapper config
+    # can resolve before OperatorAccount is first constructed.
+    import app.entry.models  # noqa: F401
     from app.operator_auth.models import (  # noqa: E402
         OperatorAccount,
         OperatorAuditEvent,
@@ -731,8 +735,11 @@ def uninitialized_session_factory() -> Iterator[sessionmaker]:
     from sqlalchemy import create_engine, event
 
     import tests._db  # noqa: F401 — JSONB→JSON for SQLite
+    import app.entry.models  # noqa: F401 — resolve Relation→Entry mapper
     import app.operator_auth.models  # noqa: F401 — register tables
+    import app.report.models  # noqa: F401 — register before full create_all
     from app.database import Base  # noqa: E402
+    from tests._db import _normalize_report_tables_for_sqlite  # noqa: E402
 
     os.environ.setdefault(
         "AI_PROVIDER_FERNET_KEY",
@@ -757,6 +764,7 @@ def uninitialized_session_factory() -> Iterator[sessionmaker]:
         cursor.close()
 
     # Full metadata so AI/entry/assistant tables exist for coordinator staging.
+    _normalize_report_tables_for_sqlite()
     Base.metadata.create_all(engine)
     factory = sessionmaker(
         bind=engine,

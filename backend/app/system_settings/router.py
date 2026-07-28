@@ -42,7 +42,18 @@ from app.system_settings.schemas import (
 )
 from app.system_settings.service import SystemSettingsService
 
-router = APIRouter(prefix="/api/system-settings", tags=["system-settings"])
+_SETTINGS_PREFIX = "/api/system-settings"
+_SETTINGS_TAGS = ["system-settings"]
+
+# Split by policy for parent-router mounting in main.py.
+public_system_settings_router = APIRouter(prefix=_SETTINGS_PREFIX, tags=_SETTINGS_TAGS)
+setup_system_settings_router = APIRouter(prefix=_SETTINGS_PREFIX, tags=_SETTINGS_TAGS)
+protected_system_settings_router = APIRouter(
+    prefix=_SETTINGS_PREFIX, tags=_SETTINGS_TAGS
+)
+
+# Aggregate for tests that still import ``router``.
+router = APIRouter(tags=_SETTINGS_TAGS)
 
 
 @dataclass(frozen=True)
@@ -114,7 +125,7 @@ def _safe_validation_details(exc: ValidationError) -> list[dict[str, Any]]:
     return cleaned
 
 
-@router.get("/initialization-status", response_model=ApiResponse)
+@public_system_settings_router.get("/initialization-status", response_model=ApiResponse)
 def get_initialization_status(db: Session = Depends(get_db)) -> ApiResponse:
     service = SystemInitializationService(db)
     payload = service.get_initialization_status()
@@ -123,7 +134,9 @@ def get_initialization_status(db: Session = Depends(get_db)) -> ApiResponse:
     )
 
 
-@router.get("/initialization-defaults", response_model=ApiResponse)
+@public_system_settings_router.get(
+    "/initialization-defaults", response_model=ApiResponse
+)
 def get_initialization_defaults(locale: str, db: Session = Depends(get_db)) -> ApiResponse:
     service = SystemInitializationService(db)
     payload = service.get_initialization_defaults(locale=locale)
@@ -132,7 +145,7 @@ def get_initialization_defaults(locale: str, db: Session = Depends(get_db)) -> A
     )
 
 
-@router.post("/initialize", response_model=ApiResponse)
+@setup_system_settings_router.post("/initialize", response_model=ApiResponse)
 def initialize_system(
     response: Response,
     authorized: AuthorizedInitializationRequest = Depends(
@@ -179,7 +192,7 @@ def initialize_system(
     )
 
 
-@router.get("/runtime-config", response_model=ApiResponse)
+@protected_system_settings_router.get("/runtime-config", response_model=ApiResponse)
 def get_runtime_config(db: Session = Depends(get_db)) -> ApiResponse:
     service = SystemRuntimeConfigService(db)
     payload = service.get_runtime_config_response()
@@ -188,7 +201,9 @@ def get_runtime_config(db: Session = Depends(get_db)) -> ApiResponse:
     )
 
 
-@router.put("/runtime-config/{group_key}", response_model=ApiResponse)
+@protected_system_settings_router.put(
+    "/runtime-config/{group_key}", response_model=ApiResponse
+)
 def update_runtime_config(
     group_key: str,
     request: dict[str, Any],
@@ -201,7 +216,9 @@ def update_runtime_config(
     )
 
 
-@router.post("/runtime-config/{group_key}/validate", response_model=ApiResponse)
+@protected_system_settings_router.post(
+    "/runtime-config/{group_key}/validate", response_model=ApiResponse
+)
 def validate_runtime_config(
     group_key: str,
     request: dict[str, Any],
@@ -214,7 +231,7 @@ def validate_runtime_config(
     )
 
 
-@router.get("/locale", response_model=ApiResponse)
+@protected_system_settings_router.get("/locale", response_model=ApiResponse)
 def get_system_locale(db: Session = Depends(get_db)) -> ApiResponse:
     service = SystemSettingsService(db)
     locale, persisted = service.resolve_locale_response()
@@ -222,15 +239,15 @@ def get_system_locale(db: Session = Depends(get_db)) -> ApiResponse:
     return ApiResponse.ok(payload.model_dump(by_alias=True))
 
 
-@router.put("/locale", response_model=ApiResponse)
+@protected_system_settings_router.put("/locale", response_model=ApiResponse)
 def update_system_locale(
     request: SystemLocaleUpdateRequest,
     db: Session = Depends(get_db),
+    # Parent protected_browser_router already enforces Operator + CSRF + audit.
+    # Keep explicit deps as defense-in-depth for tests that mount this router alone.
     _principal: OperatorPrincipal = Depends(require_operator_principal),
     _: None = Depends(require_csrf),
 ) -> ApiResponse:
-    # Browser control-plane mutation: Operator + CSRF (Task 5 boundary).
-    # Task 7 will hoist this into the protected parent router.
     service = SystemSettingsService(db)
     try:
         locale = service.set_locale(request.locale)
@@ -238,3 +255,8 @@ def update_system_locale(
         raise ApiException(status_code=400, code=40040, message=str(exc)) from exc
     payload = SystemLocaleResponse(locale=locale, persisted=True)
     return ApiResponse.ok(payload.model_dump(by_alias=True))
+
+
+router.include_router(public_system_settings_router)
+router.include_router(setup_system_settings_router)
+router.include_router(protected_system_settings_router)

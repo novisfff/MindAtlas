@@ -1,4 +1,9 @@
-"""Operator browser auth routes: login, session probe, logout, password, revoke-all."""
+"""Operator browser auth routes: login, session probe, logout, password, revoke-all.
+
+Routers are split by policy so ``main.py`` can mount each under the matching
+parent. Endpoint-level principal/CSRF checks remain on mutations as defense in
+depth; the protected parent stages the generic mutation audit.
+"""
 
 from __future__ import annotations
 
@@ -36,7 +41,16 @@ from app.operator_auth.schemas import (
 )
 from app.operator_auth.service import AuthRejected, LoginLocked
 
-router = APIRouter(prefix="/api/operator-auth", tags=["operator-auth"])
+# Split routers carry the full path prefix; main.py mounts each under a policy parent.
+# Aggregate ``router`` has no prefix so include_router does not double paths —
+# older tests still ``include_router(operator_auth_router)``.
+_AUTH_PREFIX = "/api/operator-auth"
+_AUTH_TAGS = ["operator-auth"]
+
+login_router = APIRouter(prefix=_AUTH_PREFIX, tags=_AUTH_TAGS)
+session_probe_router = APIRouter(prefix=_AUTH_PREFIX, tags=_AUTH_TAGS)
+protected_operator_auth_router = APIRouter(prefix=_AUTH_PREFIX, tags=_AUTH_TAGS)
+router = APIRouter(tags=_AUTH_TAGS)
 
 
 def _session_payload(
@@ -54,7 +68,6 @@ def _session_payload(
     ).model_dump(by_alias=True)
 
 
-@router.post("/login", response_model=ApiResponse)
 async def login(
     request: Request,
     response: Response,
@@ -133,7 +146,6 @@ async def login(
     )
 
 
-@router.get("/session", response_model=ApiResponse)
 def get_session(
     request: Request,
     response: Response,
@@ -180,7 +192,6 @@ def get_session(
     )
 
 
-@router.post("/logout", response_model=ApiResponse)
 def logout(
     request: Request,
     response: Response,
@@ -198,7 +209,6 @@ def logout(
     return ApiResponse.ok(_session_payload(authenticated=False))
 
 
-@router.post("/password", response_model=ApiResponse)
 def change_password(
     body: OperatorPasswordChangeRequest,
     request: Request,
@@ -236,7 +246,6 @@ def change_password(
     return ApiResponse.ok(_session_payload(authenticated=False))
 
 
-@router.post("/sessions/revoke-all", response_model=ApiResponse)
 def revoke_all_sessions(
     body: OperatorRevokeAllRequest,
     request: Request,
@@ -257,3 +266,29 @@ def revoke_all_sessions(
     clear_session_cookies(response, settings=settings)
     response.headers["Cache-Control"] = "no-store"
     return ApiResponse.ok(_session_payload(authenticated=False))
+
+
+# Register on split routers (policy parents mount these).
+login_router.add_api_route(
+    "/login", login, methods=["POST"], response_model=ApiResponse
+)
+session_probe_router.add_api_route(
+    "/session", get_session, methods=["GET"], response_model=ApiResponse
+)
+protected_operator_auth_router.add_api_route(
+    "/logout", logout, methods=["POST"], response_model=ApiResponse
+)
+protected_operator_auth_router.add_api_route(
+    "/password", change_password, methods=["POST"], response_model=ApiResponse
+)
+protected_operator_auth_router.add_api_route(
+    "/sessions/revoke-all",
+    revoke_all_sessions,
+    methods=["POST"],
+    response_model=ApiResponse,
+)
+
+# Aggregate for tests that still import ``router``.
+router.include_router(login_router)
+router.include_router(session_probe_router)
+router.include_router(protected_operator_auth_router)

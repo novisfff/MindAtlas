@@ -209,7 +209,15 @@ def require_viewer_principal(
 
     On unsafe methods the CSRF cookie is supplied so previous-key sessions can
     rotate; when rotation occurs both cookies are re-emitted with the same raws.
+
+    Reuses ``request.state.operator_session_resolution`` when already populated
+    for this request so later deps (and plain-function CSRF checks) do not
+    re-touch and commit the session mid-request after a staged audit row.
     """
+    cached = getattr(request.state, "operator_session_resolution", None)
+    if isinstance(cached, SessionResolution):
+        return cached.principal
+
     value = request.cookies.get(SESSION_COOKIE_NAME)
     csrf_cookie_value: str | None = None
     if request.method.upper() in _UNSAFE_METHODS:
