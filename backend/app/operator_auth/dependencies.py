@@ -224,7 +224,10 @@ def require_viewer_principal(
     )
     if resolved is None:
         # Best-effort cleanup of a present-but-invalid browser cookie pair.
+        # Flag request.state so api_exception_handler can re-apply clears onto the
+        # fresh JSONResponse (dependency Response Set-Cookie headers are dropped).
         if value:
+            request.state.operator_auth_clear_cookies = True
             clear_session_cookies(response, settings=settings)
         raise ApiException(
             status_code=401,

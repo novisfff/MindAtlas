@@ -60,10 +60,18 @@ def register_exception_handlers(app: "FastAPI", *, debug: bool = False) -> None:
             exc.code,
             exc.message,
         )
-        return JSONResponse(
+        response = JSONResponse(
             status_code=exc.status_code,
             content=ApiResponse.fail(code=exc.code, message=exc.message, data=exc.details).model_dump(),
         )
+        if getattr(request.state, "operator_auth_clear_cookies", False):
+            # Lazy imports avoid circular deps with operator_auth.dependencies.
+            from app.config import get_settings
+            from app.operator_auth.dependencies import clear_session_cookies
+
+            clear_session_cookies(response, settings=get_settings())
+            response.headers["Cache-Control"] = "no-store"
+        return response
 
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
@@ -96,10 +104,17 @@ def register_exception_handlers(app: "FastAPI", *, debug: bool = False) -> None:
             exc.status_code,
             message,
         )
-        return JSONResponse(
+        response = JSONResponse(
             status_code=exc.status_code,
             content=ApiResponse.fail(code=exc.status_code, message=message).model_dump(),
         )
+        if getattr(request.state, "operator_auth_clear_cookies", False):
+            from app.config import get_settings
+            from app.operator_auth.dependencies import clear_session_cookies
+
+            clear_session_cookies(response, settings=get_settings())
+            response.headers["Cache-Control"] = "no-store"
+        return response
 
     @app.exception_handler(Exception)
     async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:

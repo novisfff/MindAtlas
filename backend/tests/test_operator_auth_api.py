@@ -254,9 +254,10 @@ def test_login_sets_exact_cookie_contract(
     assert data["role"] == "operator"
     assert data["idleExpiresAt"]
     assert data["absoluteExpiresAt"]
-    # No secret echo
+    # No secret echo — password value must never appear; field names may in schemas.
     dumped = json.dumps(body)
-    assert "password" not in dumped.lower() or "password" not in str(data)
+    assert _PASSWORD not in dumped
+    assert "correct horse" not in dumped.lower()
     assert session not in dumped
     assert csrf not in dumped
 
@@ -283,6 +284,56 @@ def test_forged_operator_headers_never_authenticate(client: TestClient) -> None:
     )
     assert response.status_code == 401
     assert response.json()["message"] == "invalid_session"
+
+
+def test_invalid_session_cookie_cleared_on_mutation_401(
+    client: TestClient,
+    origin_headers: dict[str, str],
+    session_factory: sessionmaker,
+) -> None:
+    """Present-but-invalid session cookies must be expired on 401 responses.
+
+    FastAPI exception handlers build a fresh JSONResponse, so clears applied only
+    to the dependency Response are dropped unless the handler re-applies them.
+    """
+    login = client.post(
+        "/api/operator-auth/login",
+        json={"password": _PASSWORD},
+        headers=origin_headers,
+    )
+    assert login.status_code == 200
+    session_cookie = client.cookies.get(SESSION_COOKIE_NAME)
+    csrf_cookie = client.cookies.get(CSRF_COOKIE_NAME)
+    assert session_cookie and csrf_cookie
+
+    # Revoke the durable session server-side while leaving browser cookies intact.
+    db = session_factory()
+    try:
+        repo = OperatorRepository(db)
+        account = repo.get_singleton_account(for_update=True)
+        assert account is not None
+        revoked = repo.revoke_all_sessions_for_account(
+            account.id, reason="revoke_all"
+        )
+        assert revoked >= 1
+        db.commit()
+    finally:
+        db.close()
+
+    response = client.put(
+        "/api/system-settings/locale",
+        json={"locale": "en"},
+        headers=_origin_headers(**{CSRF_HEADER_NAME: csrf_cookie}),
+    )
+    assert response.status_code == 401
+    assert response.json()["message"] == "invalid_session"
+    cookies = _set_cookies(response)
+    assert any(
+        SESSION_COOKIE_NAME in item and "Max-Age=0" in item for item in cookies
+    ), cookies
+    assert any(
+        CSRF_COOKIE_NAME in item and "Max-Age=0" in item for item in cookies
+    ), cookies
 
 
 # ---------------------------------------------------------------------------
@@ -348,7 +399,9 @@ def test_wrong_password_is_generic(
     assert response.status_code == 401
     body = response.json()
     assert body["message"] == "invalid_credentials"
-    assert "password" not in json.dumps(body).lower() or body["message"] == "invalid_credentials"
+    dumped = json.dumps(body).lower()
+    assert "definitely-not-the-password" not in dumped
+    assert "correct horse" not in dumped
     # Same message shape for missing account path is covered by service tests;
     # HTTP must not leak which secret component failed.
     assert "data" not in body or body.get("data") in (None, {})
