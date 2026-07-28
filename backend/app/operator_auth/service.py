@@ -37,6 +37,8 @@ from app.operator_auth.tokens import (
     digest_csrf,
     digest_session,
     digests_equal,
+    format_csrf_cookie,
+    format_session_cookie,
     issue_raw_csrf,
     issue_raw_session_cookie,
     parse_csrf_cookie,
@@ -340,12 +342,21 @@ class OperatorAuthService:
         self,
         session_cookie_value: str | None,
         context: RequestSecurityContext,
+        *,
+        csrf_cookie_value: str | None = None,
     ) -> SessionResolution | None:
         """Validate a browser session cookie and touch idle expiry.
 
         Returns ``None`` for any failure mode (malformed, revoked, expired,
         unknown key, disabled account, revision mismatch). Expiry and policy
         failures are revoked durably when a row can be identified.
+
+        When the row is under a previous key **and** both session and CSRF raws
+        are supplied and valid under that previous key, digests are re-MACed
+        under the active key using the **same** raw bytes (no new entropy) and
+        ``rotated_cookie`` re-encodes those raws. Absolute expiry is unchanged.
+        Without a valid CSRF raw, the session still resolves under the previous
+        key but is not rotated on this request.
         """
         if not session_cookie_value or not isinstance(session_cookie_value, str):
             return None
@@ -429,32 +440,45 @@ class OperatorAuthService:
             self._commit()
             return None
 
-        # Successful touch — never extend absolute expiry.
+        # Successful touch — never extend absolute expiry. Creation request-
+        # context digests are immutable audit/binding fields and are not
+        # overwritten on touch.
         row.last_seen_at = now
         row.idle_expires_at = min(
             now + timedelta(seconds=SESSION_IDLE_SECONDS),
             absolute_expires,
         )
-        # Refresh request-context digests for audit trail (soft binding).
-        row.request_digest = context.request_digest
-        row.user_agent_digest = context.user_agent_digest
-        row.network_digest = context.network_digest
 
         rotated: tuple[str, str] | None = None
         if row.hmac_key_id != key_ring.active_key_id:
-            # Previous-key success: re-MAC under active key with fresh raws so
-            # both digests move to the active key without needing the old CSRF
-            # raw. Absolute expiry is preserved.
-            new_session_cookie, new_raw_session = issue_raw_session_cookie(row.id)
-            new_csrf_cookie, new_raw_csrf = issue_raw_csrf()
-            row.token_digest = digest_session(
-                key=key_ring.active_key, session_id=row.id, raw=new_raw_session
-            )
-            row.csrf_digest = digest_csrf(
-                key=key_ring.active_key, session_id=row.id, raw=new_raw_csrf
-            )
-            row.hmac_key_id = key_ring.active_key_id
-            rotated = (new_session_cookie, new_csrf_cookie)
+            # Previous-key success: only rotate when both raws are present and
+            # the CSRF raw validates under the previous key. Re-MAC the same
+            # raws under the active key — do not mint new entropy.
+            raw_csrf: bytes | None = None
+            if csrf_cookie_value and isinstance(csrf_cookie_value, str):
+                try:
+                    candidate = parse_csrf_cookie(csrf_cookie_value)
+                except ValueError:
+                    candidate = None
+                else:
+                    expected_csrf = digest_csrf(
+                        key=key, session_id=row.id, raw=candidate
+                    )
+                    if digests_equal(expected_csrf, row.csrf_digest):
+                        raw_csrf = candidate
+
+            if raw_csrf is not None:
+                row.token_digest = digest_session(
+                    key=key_ring.active_key, session_id=row.id, raw=raw_session
+                )
+                row.csrf_digest = digest_csrf(
+                    key=key_ring.active_key, session_id=row.id, raw=raw_csrf
+                )
+                row.hmac_key_id = key_ring.active_key_id
+                rotated = (
+                    format_session_cookie(row.id, raw_session),
+                    format_csrf_cookie(raw_csrf),
+                )
 
         self.db.flush()
         self._commit()
@@ -526,7 +550,7 @@ class OperatorAuthService:
             raise CsrfRejected() from exc
 
         expected = digest_csrf(key=key, session_id=row.id, raw=raw)
-        if not hmac.compare_digest(expected, row.csrf_digest):
+        if not digests_equal(expected, row.csrf_digest):
             raise CsrfRejected()
 
     # ------------------------------------------------------------------
@@ -666,7 +690,4 @@ class OperatorAuthService:
             count += 1
         if count:
             self._commit()
-        else:
-            # Still commit nothing staged; no-op is fine.
-            pass
         return count

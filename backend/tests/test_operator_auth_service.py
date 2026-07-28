@@ -447,6 +447,7 @@ def session_factory() -> Iterator[sessionmaker]:
 
     from sqlalchemy import create_engine, event
 
+    import tests._db  # noqa: F401  # register JSONB→JSON compiler for SQLite
     from app.database import Base
     import app.operator_auth.models  # noqa: F401
     import app.system_settings.models  # noqa: F401
@@ -539,12 +540,17 @@ def resolve_with_keys(
     previous: str,
     issued,
     clock: FrozenDbClock | None = None,
+    csrf_cookie_value: str | None = None,
 ):
     ring = make_key_ring(active=active, previous=previous)
     db = session_factory()
     try:
         service = make_service(db, ring, now_fn=clock)
-        return service.resolve_session(issued.session_cookie_value, CTX)
+        return service.resolve_session(
+            issued.session_cookie_value,
+            CTX,
+            csrf_cookie_value=csrf_cookie_value,
+        )
     finally:
         db.close()
 
@@ -583,13 +589,82 @@ def test_restart_with_same_key_keeps_session(
 def test_previous_key_is_rotated_on_successful_request(
     session_factory: sessionmaker,
 ) -> None:
+    """Rotation re-MACs the supplied raws; same cookies keep working."""
+    issued = issue_with_key(session_factory, key_id="old")
+    result = resolve_with_keys(
+        session_factory,
+        active="new",
+        previous="old",
+        issued=issued,
+        csrf_cookie_value=issued.csrf_cookie_value,
+    )
+    assert result is not None
+    assert result.rotated_cookie is not None
+    rotated_session, rotated_csrf = result.rotated_cookie
+    # Same raws re-encoded — cookie values are identical to the supplied ones.
+    assert rotated_session == issued.session_cookie_value
+    assert rotated_csrf == issued.csrf_cookie_value
+    assert result.hmac_key_id == "new"
+    assert stored_key_id(session_factory, issued.principal.session_id) == "new"
+
+    # Old session cookie still resolves after rotation (same raw re-MACed).
+    db = session_factory()
+    try:
+        ring_both = make_key_ring(active="new", previous="old")
+        service = make_service(db, ring_both)
+        resolved_again = service.resolve_session(issued.session_cookie_value, CTX)
+        assert resolved_again is not None
+        assert resolved_again.principal.session_id == issued.principal.session_id
+        # CSRF still verifies with the same csrf cookie/header after rotation.
+        service.verify_csrf(
+            resolution=resolved_again,
+            csrf_cookie_value=issued.csrf_cookie_value,
+            csrf_header_value=issued.csrf_cookie_value,
+        )
+        # Follow-up resolve with only the active key works.
+        service_active = make_service(db, ring_with_only("new"))
+        resolved_active = service_active.resolve_session(
+            issued.session_cookie_value, CTX
+        )
+        assert resolved_active is not None
+        assert resolved_active.hmac_key_id == "new"
+        assert resolved_active.rotated_cookie is None
+    finally:
+        db.close()
+
+
+def test_previous_key_without_csrf_does_not_rotate(
+    session_factory: sessionmaker,
+) -> None:
+    """Previous-key session without CSRF still resolves but is not rotated."""
     issued = issue_with_key(session_factory, key_id="old")
     result = resolve_with_keys(
         session_factory, active="new", previous="old", issued=issued
     )
     assert result is not None
-    assert result.rotated_cookie is not None
-    assert stored_key_id(session_factory, issued.principal.session_id) == "new"
+    assert result.rotated_cookie is None
+    assert result.hmac_key_id == "old"
+    assert stored_key_id(session_factory, issued.principal.session_id) == "old"
+
+
+def test_resolve_preserves_creation_request_digests(
+    session_factory: sessionmaker, key_ring: SessionMacKeyRing
+) -> None:
+    """Creation request-context digests are immutable audit/binding fields."""
+    db = session_factory()
+    try:
+        _seed_operator(db)
+        service = make_service(db, key_ring)
+        issued = service.login(_PASSWORD, CTX)
+        resolved = service.resolve_session(issued.session_cookie_value, CTX2)
+        assert resolved is not None
+        row = db.get(OperatorSession, issued.principal.session_id)
+        assert row is not None
+        assert row.request_digest == CTX.request_digest
+        assert row.user_agent_digest == CTX.user_agent_digest
+        assert row.network_digest == CTX.network_digest
+    finally:
+        db.close()
 
 
 def test_removed_previous_key_revokes_dependent_sessions(

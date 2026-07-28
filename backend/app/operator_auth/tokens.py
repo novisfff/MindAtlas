@@ -100,15 +100,28 @@ class SessionMacKeyRing:
         return cls(active_key_id=active_key_id, keys=decoded)
 
 
+def format_session_cookie(session_id: UUID, raw: bytes) -> str:
+    """Encode an existing session raw into the cookie wire format (no new entropy)."""
+    if len(raw) != RAW_TOKEN_BYTES:
+        raise ValueError("token must be exactly 32 bytes")
+    return f"{SESSION_COOKIE_VERSION}.{session_id.hex}.{_b64url_encode(raw)}"
+
+
+def format_csrf_cookie(raw: bytes) -> str:
+    """Encode an existing CSRF raw into the cookie wire format (no new entropy)."""
+    if len(raw) != RAW_TOKEN_BYTES:
+        raise ValueError("token must be exactly 32 bytes")
+    return _b64url_encode(raw)
+
+
 def issue_raw_session_cookie(session_id: UUID) -> tuple[str, bytes]:
     raw = secrets.token_bytes(RAW_TOKEN_BYTES)
-    encoded = _b64url_encode(raw)
-    return f"{SESSION_COOKIE_VERSION}.{session_id.hex}.{encoded}", raw
+    return format_session_cookie(session_id, raw), raw
 
 
 def issue_raw_csrf() -> tuple[str, bytes]:
     raw = secrets.token_bytes(RAW_TOKEN_BYTES)
-    return _b64url_encode(raw), raw
+    return format_csrf_cookie(raw), raw
 
 
 def parse_session_cookie(value: str) -> tuple[UUID, bytes]:
