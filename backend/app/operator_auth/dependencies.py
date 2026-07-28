@@ -277,7 +277,7 @@ def require_csrf(
     """Validate Origin / Sec-Fetch-Site and the double-submit CSRF pair.
 
     Consumes the session resolution cached by ``require_viewer_principal``.
-    Does not read ``X-MindAtlas-Operator-Id`` or ``X-MindAtlas-Operator-Role``.
+    Does not read caller-supplied operator identity or role headers.
     """
     del principal  # presence ensures session resolution ran first
     origin = request.headers.get("origin", "")

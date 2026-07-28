@@ -119,15 +119,15 @@ def _valid_zip(
 
 
 def _operator(principal_id: str = "op-import-1"):
-    from app.assistant.skills.principal import OperatorPrincipal
+    from tests.operator_session_helpers import make_service_principal
 
-    return OperatorPrincipal(principal_id=principal_id, role="operator")
+    return make_service_principal(principal_id, role="operator")
 
 
 def _viewer(principal_id: str = "viewer-import-1"):
-    from app.assistant.skills.principal import OperatorPrincipal
+    from tests.operator_session_helpers import make_service_principal
 
-    return OperatorPrincipal(principal_id=principal_id, role="viewer")
+    return make_service_principal(principal_id, role="viewer")
 
 
 def _sha256(data: bytes) -> str:
@@ -1410,51 +1410,35 @@ def test_rewrite_skill_md_name_only_changes_name_field() -> None:
 class TestImportPreviewAdminRoutes:
     def setup_method(self) -> None:
         reset_caches()
-        import os
-        from fastapi import FastAPI
-        from fastapi.testclient import TestClient
-        from app.assistant.skills.admin_router import (
-            TRUSTED_MOUNT_ENV,
-            mount_skill_admin_router,
-        )
-        from app.common.exceptions import register_exception_handlers
-        from app.database import get_db
+        from app.assistant.skills.admin_router import skill_admin_parent_router
         from tests._db import make_session
+        from tests.operator_session_helpers import build_authenticated_skill_client
 
-        os.environ[TRUSTED_MOUNT_ENV] = "1"
-        os.environ["APP_ENV"] = "development"
         self.db = make_session()
-        app = FastAPI()
-        register_exception_handlers(app)
-
-        def _override():
-            try:
-                yield self.db
-            finally:
-                pass
-
-        app.dependency_overrides[get_db] = _override
-        assert mount_skill_admin_router(app, app_env="development") is True
-        self.client = TestClient(app)
-        self.headers = {
-            "X-MindAtlas-Operator-Id": "op-route-1",
-            "X-MindAtlas-Operator-Role": "operator",
-        }
+        self.client, self.headers, _settings = build_authenticated_skill_client(
+            db=self.db,
+            include_routers=[skill_admin_parent_router],
+        )
 
     def teardown_method(self) -> None:
-        import os
-        from app.assistant.skills.admin_router import TRUSTED_MOUNT_ENV
-
-        os.environ.pop(TRUSTED_MOUNT_ENV, None)
-        os.environ.pop("APP_ENV", None)
+        self.client.close()
         self.db.close()
+        from tests.operator_session_helpers import restore_operator_settings
+        restore_operator_settings()
+
+    def _mutation_headers(self, *, multipart: bool = False) -> dict[str, str]:
+        headers = dict(self.headers)
+        if multipart:
+            headers.pop("Content-Type", None)
+            headers.pop("content-type", None)
+        return headers
 
     def test_preview_and_apply_http_create(self) -> None:
         name = f"http-{uuid4().hex[:8]}"
         raw = _valid_zip(name=name, aliases=[])
         resp = self.client.post(
             "/api/assistant-config/skill-admin/skill-packages/import/preview",
-            headers=self.headers,
+            headers=self._mutation_headers(multipart=True),
             files={"file": ("pack.zip", raw, "application/zip")},
             data={"mode": "create", "expectedAggregateRevision": "0"},
         )

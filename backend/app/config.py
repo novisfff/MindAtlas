@@ -297,8 +297,9 @@ class Settings(BaseSettings):
         default="",
         alias="ASSISTANT_MAIN_AGENT_WRITE_COHORT_DIGEST",
     )
-    # Guarded local reconciliation mutation path. Default-disabled; the actor
-    # identity is server-owned configuration, never request/CLI input.
+    # Reconciliation evidence issuance flag. Default-disabled. Mutations require
+    # an authenticated HTTP Operator session (Plan 4); the optional operator id
+    # field is retained only for env compatibility and is never authorization.
     assistant_capability_reconciliation_enabled: bool = Field(
         default=False,
         alias="ASSISTANT_CAPABILITY_RECONCILIATION_ENABLED",
@@ -642,14 +643,8 @@ class Settings(BaseSettings):
                     "assistant_capability_call_idempotency_secret must be at least "
                     "32 bytes when ledger mode is enforced or write mode is golden"
                 )
-        if (
-            self.assistant_capability_reconciliation_enabled
-            and self.assistant_capability_reconciliation_operator_id is None
-        ):
-            raise ValueError(
-                "assistant_capability_reconciliation_operator_id is required when "
-                "assistant_capability_reconciliation_enabled is true"
-            )
+        # operator_id is retained as a deprecated unused setting for env compat only;
+        # it is never an authorization source for CLI or HTTP mutations.
         if self.assistant_capability_reconciliation_enabled and len(
             self.assistant_capability_reconciliation_evidence_secret.encode("utf-8")
         ) < 32:

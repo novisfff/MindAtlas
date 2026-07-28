@@ -49,9 +49,9 @@ class TwoGateLifecycleTests(unittest.TestCase):
     def setUp(self) -> None:
         reset_caches()
         os.environ.pop("ASSISTANT_SKILL_PUBLISH_GATE_MODE", None)
-        from app.config import get_settings
+        from tests.operator_session_helpers import restore_operator_settings
 
-        get_settings.cache_clear()
+        restore_operator_settings()
         from tests._db import make_session
         from app.assistant.skills.service import AgentSkillService
         from app.assistant.skills.admin_service import SkillAdminService
@@ -124,9 +124,9 @@ class TwoGateLifecycleTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         os.environ.pop("ASSISTANT_SKILL_PUBLISH_GATE_MODE", None)
-        from app.config import get_settings
+        from tests.operator_session_helpers import restore_operator_settings
 
-        get_settings.cache_clear()
+        restore_operator_settings()
         for s in self._sessions:
             try:
                 s.close()
@@ -143,9 +143,9 @@ class TwoGateLifecycleTests(unittest.TestCase):
         return s
 
     def _operator(self):
-        from app.assistant.skills.principal import OperatorPrincipal
+        from tests.operator_session_helpers import make_service_principal
 
-        return OperatorPrincipal(principal_id="op-two-gate", role="operator")
+        return make_service_principal("op-two-gate", role="operator")
 
     def _run_dataset(
         self,
@@ -313,32 +313,13 @@ class TwoGateLifecycleTests(unittest.TestCase):
 
     def test_gate_api_rejects_client_authored_subject(self) -> None:
         """HTTP CreateGateBody.extra=forbid rejects client subject closure."""
-        from fastapi import FastAPI
-        from fastapi.testclient import TestClient
+        from app.assistant.evaluation.router import PLAN09_EVAL_PREFIX, skill_eval_router
+        from tests.operator_session_helpers import build_authenticated_skill_client
 
-        from app.assistant.evaluation.router import PLAN09_EVAL_PREFIX, mount_skill_eval_router
-        from app.assistant.skills.admin_router import TRUSTED_MOUNT_ENV
-        from app.common.exceptions import register_exception_handlers
-        from app.database import get_db
-
-        os.environ[TRUSTED_MOUNT_ENV] = "1"
-        app = FastAPI()
-        register_exception_handlers(app)
-        session = self.db
-
-        def _override_db():
-            try:
-                yield session
-            finally:
-                pass
-
-        app.dependency_overrides[get_db] = _override_db
-        mount_skill_eval_router(app, app_env="development")
-        client = TestClient(app)
-        headers = {
-            "X-MindAtlas-Operator-Id": "operator-two-gate",
-            "X-MindAtlas-Operator-Role": "operator",
-        }
+        client, headers, _settings = build_authenticated_skill_client(
+            db=self.db,
+            include_routers=[skill_eval_router],
+        )
         body = {
             "requestId": str(uuid.uuid4()),
             "action": "skill_publish",
@@ -358,9 +339,9 @@ class TwoGateLifecycleTests(unittest.TestCase):
         from app.common.exceptions import ApiException
 
         os.environ["ASSISTANT_SKILL_PUBLISH_GATE_MODE"] = "enforce"
-        from app.config import get_settings
+        from tests.operator_session_helpers import restore_operator_settings
 
-        get_settings.cache_clear()
+        restore_operator_settings()
 
         assert self.package.draft_version is not None
         draft = self.package.draft_version
@@ -496,9 +477,9 @@ class TwoGateLifecycleTests(unittest.TestCase):
         )
 
         os.environ["ASSISTANT_SKILL_PUBLISH_GATE_MODE"] = "enforce"
-        from app.config import get_settings
+        from tests.operator_session_helpers import restore_operator_settings
 
-        get_settings.cache_clear()
+        restore_operator_settings()
 
         assert self.package.draft_version is not None
         draft = self.package.draft_version

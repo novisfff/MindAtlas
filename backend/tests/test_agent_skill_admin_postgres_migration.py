@@ -797,7 +797,7 @@ def test_two_session_metadata_cas_one_winner() -> None:
     """Two concurrent metadata updates with the same expected revision: one wins."""
     from app.assistant.skills.admin_service import SkillAdminService
     from app.assistant.skills.models import AssistantSkillPackage
-    from app.assistant.skills.principal import OperatorPrincipal
+    from tests.operator_session_helpers import make_service_principal
     from app.assistant.skills.schemas import UpdateSkillPackageMetadataCommand
     from app.common.exceptions import ApiException
 
@@ -822,9 +822,7 @@ def test_two_session_metadata_cas_one_winner() -> None:
                             expected_aggregate_revision=0,
                             display_name=f"Winner-{label}",
                         ),
-                        principal=OperatorPrincipal(
-                            principal_id=f"op-{label}", role="operator"
-                        ),
+                        principal=make_service_principal(f"op-{label}", role="operator"),
                     )
                     with lock:
                         outcomes.append(("ok", detail.aggregate_revision))
@@ -864,7 +862,7 @@ def test_two_session_metadata_vs_archive_cas() -> None:
     """Metadata update and archive racing on the same expected revision: one wins."""
     from app.assistant.skills.admin_service import SkillAdminService
     from app.assistant.skills.models import AssistantSkillPackage
-    from app.assistant.skills.principal import OperatorPrincipal
+    from tests.operator_session_helpers import make_service_principal
     from app.assistant.skills.schemas import (
         AggregateRevisionCommand,
         UpdateSkillPackageMetadataCommand,
@@ -892,9 +890,7 @@ def test_two_session_metadata_vs_archive_cas() -> None:
                             expected_aggregate_revision=0,
                             display_name="Meta-Won",
                         ),
-                        principal=OperatorPrincipal(
-                            principal_id="op-meta", role="operator"
-                        ),
+                        principal=make_service_principal("op-meta", role="operator"),
                     )
                     with lock:
                         outcomes.append("meta-ok")
@@ -916,9 +912,7 @@ def test_two_session_metadata_vs_archive_cas() -> None:
                             request_id="arch-vs-meta",
                             expected_aggregate_revision=0,
                         ),
-                        principal=OperatorPrincipal(
-                            principal_id="op-arch", role="operator"
-                        ),
+                        principal=make_service_principal("op-arch", role="operator"),
                     )
                     with lock:
                         outcomes.append("archive-ok")
@@ -963,7 +957,7 @@ def test_two_session_sequential_lock_still_serializes_on_sqlite_pattern() -> Non
     one may commit revision 0→1; the second must conflict.
     """
     from app.assistant.skills.admin_service import SkillAdminService
-    from app.assistant.skills.principal import OperatorPrincipal
+    from tests.operator_session_helpers import make_service_principal
     from app.assistant.skills.schemas import UpdateSkillPackageMetadataCommand
     from app.common.exceptions import ApiException
 
@@ -983,9 +977,7 @@ def test_two_session_sequential_lock_still_serializes_on_sqlite_pattern() -> Non
                             expected_aggregate_revision=0,
                             display_name=name,
                         ),
-                        principal=OperatorPrincipal(
-                            principal_id=request_id, role="operator"
-                        ),
+                        principal=make_service_principal(request_id, role="operator"),
                     )
                     return "ok"
                 except ApiException as exc:

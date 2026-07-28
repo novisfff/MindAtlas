@@ -208,7 +208,6 @@ _protected_browser.include_router(assistant_config_router)
 _protected_browser.include_router(skill_package_router)
 _protected_browser.include_router(main_agent_profile_router)
 # Plan 09 admin/eval: always mounted; protected_browser enforces real session.
-# Task 8 replaces get_trusted_operator_principal body — routes stay gated here.
 _protected_browser.include_router(skill_admin_parent_router)
 _protected_browser.include_router(skill_eval_router)
 _protected_browser.include_router(stats_router)
