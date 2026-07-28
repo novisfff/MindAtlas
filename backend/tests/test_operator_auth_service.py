@@ -24,6 +24,11 @@ from app.operator_auth.audit import (  # noqa: E402
     OPERATOR_AUDIT_EVENT_TYPES,
     OperatorAuditRepository,
 )
+from app.operator_auth.constants import (  # noqa: E402
+    LOGIN_FAILURE_LIMIT,
+    LOGIN_LOCK_SECONDS,
+    LOGIN_WINDOW_SECONDS,
+)
 from app.operator_auth.contracts import RequestSecurityContext  # noqa: E402
 from app.operator_auth.models import OperatorAccount, OperatorAuditEvent  # noqa: E402
 from app.operator_auth.repository import OperatorRepository  # noqa: E402
@@ -93,6 +98,42 @@ def test_failure_after_window_starts_new_window(
     state = repository.record_login_failure(account.id)
     assert state.failed_login_count == 1
     assert state.locked_until is None
+
+
+def test_active_lock_survives_failure_window_reset(
+    repository: OperatorRepository, frozen_db_clock: FrozenDbClock
+) -> None:
+    """Spaced failures make lock outlive the window; later failure must keep lock."""
+    account = repository.seed_account(password="correct horse battery")
+    # First failure starts the window at t0.
+    repository.record_login_failure(account.id)
+    # Offset remaining failures so locked_until outlives the failure window.
+    offset_seconds = 60
+    frozen_db_clock.advance(seconds=offset_seconds)
+    for _ in range(LOGIN_FAILURE_LIMIT - 1):
+        repository.record_login_failure(account.id)
+
+    locked = repository.get_account_by_id(account.id)
+    assert locked is not None
+    assert repository.is_login_locked(locked)
+    original_locked_until = locked.locked_until
+    assert original_locked_until is not None
+    assert original_locked_until == frozen_db_clock.now + timedelta(
+        seconds=LOGIN_LOCK_SECONDS
+    )
+
+    # Past window start + WINDOW, still strictly before locked_until.
+    # now is t0+offset; need now >= t0+WINDOW and now < t0+offset+LOCK.
+    frozen_db_clock.advance(seconds=LOGIN_WINDOW_SECONDS - offset_seconds + 1)
+    assert repository.is_login_locked(locked)
+
+    state = repository.record_login_failure(account.id)
+    assert state.failed_login_count == 1
+    assert state.locked_until == original_locked_until
+    assert repository.is_login_locked(state)
+
+    frozen_db_clock.advance(seconds=LOGIN_LOCK_SECONDS)
+    assert repository.is_login_locked(state) is False
 
 
 def test_successful_clear_resets_failure_window(
@@ -184,9 +225,10 @@ def _ensure_operator_schema(engine: Engine) -> None:
         except Exception:
             rev = None
         if rev != "9f3c1a7e2b40":
-            pytest.skip(
+            pytest.fail(
                 f"operator auth schema not at 9f3c1a7e2b40 (got {rev!r}); "
-                "run test_operator_auth_postgres first"
+                "run postgres suite / upgrade to 9f3c1a7e2b40 first — "
+                "PostgreSQL security gates must not soft-skip when misconfigured"
             )
         # Minimal app_setting so FOR UPDATE on the initialization marker works.
         conn.execute(
@@ -285,7 +327,7 @@ def test_initialization_lock_serializes_two_postgres_transactions() -> None:
 
 @pytest.mark.skipif(
     not _POSTGRES_URL,
-    reason="MINDATLAS_TEST_POSTGRES_URL not set; audit append needs PostgreSQL digests",
+    reason="MINDATLAS_TEST_POSTGRES_URL not set; audit database-time proof needs PostgreSQL",
 )
 def test_audit_append_uses_database_time_on_postgres() -> None:
     with _pg_engine() as engine:

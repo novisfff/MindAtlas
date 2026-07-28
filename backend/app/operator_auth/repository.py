@@ -164,9 +164,11 @@ class OperatorRepository:
         if window_started is None or (
             now - window_started
         ).total_seconds() >= LOGIN_WINDOW_SECONDS:
+            # Restart the failure window only. Do not clear a still-active lock:
+            # locked_until can outlive the window when failures are spaced, and
+            # expiry is owned by is_login_locked / clear_login_failures.
             account.failed_login_window_started_at = now
             account.failed_login_count = 1
-            account.locked_until = None
         else:
             account.failed_login_count = int(account.failed_login_count or 0) + 1
         if int(account.failed_login_count) >= LOGIN_FAILURE_LIMIT:
