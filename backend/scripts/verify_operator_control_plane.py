@@ -388,21 +388,19 @@ def probe_alembic_head() -> str:
         check=False,
     )
     text = (completed.stdout or "") + "\n" + (completed.stderr or "")
-    # Prefer the short revision id; fall back to known head constant.
     match = re.search(r"\b([0-9a-f]{12})\b", text)
     if match:
         head = match.group(1)
     else:
-        # ``alembic heads`` may print bare revision without verbose noise.
         for line in text.splitlines():
             line = line.strip()
             if re.fullmatch(r"[0-9a-f]{12}(\s.*)?", line):
                 head = line.split()[0]
                 break
         else:
-            head = TASK2_HEAD
-    if TASK2_HEAD not in text and head != TASK2_HEAD:
-        # Still accept if heads output listed our revision anywhere.
+            head = ""
+    if head != TASK2_HEAD:
+        # Confirm via plain ``alembic heads`` before failing closed.
         heads_plain = subprocess.run(
             [sys.executable, "-m", "alembic", "heads"],
             cwd=str(_BACKEND_ROOT),
@@ -411,11 +409,19 @@ def probe_alembic_head() -> str:
             check=False,
         )
         plain = (heads_plain.stdout or "") + (heads_plain.stderr or "")
-        if TASK2_HEAD not in plain and head != TASK2_HEAD:
+        plain_match = re.search(r"\b([0-9a-f]{12})\b", plain)
+        plain_head = plain_match.group(1) if plain_match else ""
+        if plain_head == TASK2_HEAD:
+            head = plain_head
+        elif TASK2_HEAD in plain and not plain_head:
+            head = TASK2_HEAD
+        else:
             raise RuntimeError(
-                f"expected alembic head to include {TASK2_HEAD}, got {head!r}"
+                f"expected alembic head {TASK2_HEAD}, probed {head or plain_head!r}"
             )
-    return head if head else TASK2_HEAD
+    if head != TASK2_HEAD:
+        raise RuntimeError(f"expected alembic head {TASK2_HEAD}, got {head!r}")
+    return head
 
 
 def probe_postgres_version(url: str) -> str:
@@ -463,19 +469,37 @@ def _rehearsal_key_material(key_id: str) -> bytes:
     return bytes([fill & 0xFF]) * 32
 
 
-def rehearse_restart_rotation_revocation() -> dict[str, bool]:
-    """Real service-level restart + rotation + previous-key removal checks.
+def _encode_rehearsal_keys(mapping: Mapping[str, bytes]) -> str:
+    import base64
 
-    Uses an on-disk disposable SQLite store (same pattern as unit proofs) so the
-    runner does not depend on clobbering the shared test PostgreSQL. Booleans
-    are derived from actual resolve/revoke outcomes — never hard-coded True.
+    return json.dumps(
+        {kid: base64.b64encode(material).decode("ascii") for kid, material in mapping.items()}
+    )
+
+
+def rehearse_restart_rotation_revocation() -> dict[str, bool]:
+    """API-shaped restart + service-level rotation/revocation proofs.
+
+    Restart path:
+      1. Build a minimal FastAPI app with operator-auth routers + HMAC key ring.
+      2. Login via HTTP TestClient (POST /api/operator-auth/login + Origin).
+      3. Capture the session cookie, then tear down the client/app.
+      4. Build a **new** app/client with the **same** HMAC key ring (fresh Settings
+         / service instances — no shared in-memory session objects).
+      5. GET /api/operator-auth/session with the preserved cookie must authenticate.
+
+    Rotation and previous-key removal stay service-level against disposable SQLite
+    (same proofs as unit tests). Booleans come from real outcomes — never hard-coded.
     """
     import tempfile
+    from collections.abc import Iterator
+    from uuid import uuid4
 
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
     from sqlalchemy import create_engine, event
-    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.orm import Session, sessionmaker
 
-    # Ensure backend imports resolve.
     os.chdir(_BACKEND_ROOT)
     from tests._bootstrap import bootstrap_backend_imports, reset_caches
 
@@ -483,9 +507,14 @@ def rehearse_restart_rotation_revocation() -> dict[str, bool]:
     reset_caches()
 
     import tests._db  # noqa: F401  — JSONB→JSON for SQLite
+    import app.entry.models  # noqa: F401  — mapper resolution for AppSetting path
     import app.operator_auth.models  # noqa: F401
     import app.system_settings.models  # noqa: F401
-    from app.database import Base
+    from app.common.exceptions import register_exception_handlers
+    from app.common.request_context import reset_request_id, set_request_id
+    from app.config import Settings, get_settings
+    from app.database import Base, get_db
+    from app.operator_auth.constants import SESSION_COOKIE_NAME
     from app.operator_auth.contracts import RequestSecurityContext
     from app.operator_auth.models import (
         OperatorAccount,
@@ -493,19 +522,24 @@ def rehearse_restart_rotation_revocation() -> dict[str, bool]:
         OperatorSession,
     )
     from app.operator_auth.repository import OperatorRepository
+    from app.operator_auth.router import router as operator_auth_router
     from app.operator_auth.service import OperatorAuthService
     from app.operator_auth.tokens import SessionMacKeyRing
     from app.system_settings.models import AppSetting
+    from tests.operator_session_helpers import (
+        pin_operator_settings,
+        restore_operator_settings,
+    )
 
-    # Only create operator-auth tables. Full Base.metadata may already contain
-    # Postgres-only CHECK constraints (e.g. weekly_report) registered by earlier
-    # app.main imports during route-policy collection.
+    # Only operator-auth tables — avoid full Base.metadata (Postgres-only DDL).
     _REHEARSAL_TABLES = [
         OperatorAccount.__table__,
         OperatorSession.__table__,
         OperatorAuditEvent.__table__,
         AppSetting.__table__,
     ]
+
+    _ORIGIN = "http://localhost:5173"
 
     ctx = RequestSecurityContext(
         request_id="req-rehearsal-1",
@@ -526,7 +560,7 @@ def rehearse_restart_rotation_revocation() -> dict[str, bool]:
             keys[previous] = _rehearsal_key_material(previous)
         return SessionMacKeyRing(active_key_id=active, keys=keys)
 
-    def make_service(db, ring: SessionMacKeyRing) -> OperatorAuthService:
+    def make_service(db: Session, ring: SessionMacKeyRing) -> OperatorAuthService:
         repo = OperatorRepository(db)
         return OperatorAuthService(db, key_ring=ring, repository=repo)
 
@@ -566,6 +600,59 @@ def rehearse_restart_rotation_revocation() -> dict[str, bool]:
             if path.exists():
                 path.unlink()
 
+    def _rehearsal_settings(*, active: str, previous: str | None = None) -> Settings:
+        keys = {active: _rehearsal_key_material(active)}
+        if previous is not None:
+            keys[previous] = _rehearsal_key_material(previous)
+        return Settings(
+            APP_ENV="development",
+            MINDATLAS_CANONICAL_ORIGIN=_ORIGIN,
+            CORS_ORIGINS=_ORIGIN,
+            MINDATLAS_SESSION_HMAC_ACTIVE_KEY_ID=active,
+            MINDATLAS_SESSION_HMAC_KEYS=_encode_rehearsal_keys(keys),
+        )
+
+    def _origin_headers() -> dict[str, str]:
+        return {
+            "Origin": _ORIGIN,
+            "Sec-Fetch-Site": "same-origin",
+            "Content-Type": "application/json",
+        }
+
+    def _build_api_app(
+        *,
+        session_factory: sessionmaker,
+        settings: Settings,
+    ) -> FastAPI:
+        """Minimal FastAPI with operator-auth routers only (no full app.main)."""
+        pin_operator_settings(settings)
+        application = FastAPI()
+        register_exception_handlers(application)
+
+        @application.middleware("http")
+        async def _request_id_middleware(request, call_next):  # noqa: ANN001
+            request_id = request.headers.get("x-request-id") or uuid4().hex
+            request.state.request_id = request_id
+            token = set_request_id(request_id)
+            try:
+                response = await call_next(request)
+            finally:
+                reset_request_id(token)
+            response.headers["x-request-id"] = request_id
+            return response
+
+        def _override_db() -> Iterator[Session]:
+            db = session_factory()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        application.dependency_overrides[get_db] = _override_db
+        application.dependency_overrides[get_settings] = lambda: settings
+        application.include_router(operator_auth_router)
+        return application
+
     restart_ok = False
     rotation_ok = False
     revoke_ok = False
@@ -573,35 +660,67 @@ def rehearse_restart_rotation_revocation() -> dict[str, bool]:
     tmp_path: Path | None = None
 
     try:
-        # --- Restart with the same key preserves the session ---
+        # --- API-shaped restart: login → tear down → new app, same key ring ---
         engine, tmp_path, factory = _open_store()
-        ring_same = make_ring(active="only")
-        db1 = factory()
+        db_seed = factory()
         try:
-            OperatorRepository(db1).seed_account(password=_REHEARSAL_SECRET)
-            db1.commit()
-            issued = make_service(db1, ring_same).login(_REHEARSAL_SECRET, ctx)
-            session_id = issued.principal.session_id
-            operator_id = issued.principal.operator_id
-            session_value = issued.session_cookie_value
+            OperatorRepository(db_seed).seed_account(password=_REHEARSAL_SECRET)
+            db_seed.commit()
         finally:
-            db1.close()
+            db_seed.close()
 
-        db2 = factory()
-        try:
-            restarted = make_service(db2, ring_same)
-            resolved = restarted.resolve_session(session_value, ctx)
-            restart_ok = (
-                resolved is not None
-                and resolved.principal.session_id == session_id
-                and resolved.principal.operator_id == operator_id
+        settings_process_1 = _rehearsal_settings(active="only")
+        app1 = _build_api_app(session_factory=factory, settings=settings_process_1)
+        preserved_session: str | None = None
+        login_role: str | None = None
+        with TestClient(app1) as client1:
+            login_resp = client1.post(
+                "/api/operator-auth/login",
+                json={"password": _REHEARSAL_SECRET},
+                headers=_origin_headers(),
             )
-        finally:
-            db2.close()
+            if login_resp.status_code != 200:
+                raise RuntimeError(
+                    f"rehearsal login failed with HTTP {login_resp.status_code}"
+                )
+            login_body = login_resp.json()
+            login_data = login_body.get("data") or {}
+            if not login_data.get("authenticated"):
+                raise RuntimeError("rehearsal login did not authenticate")
+            login_role = login_data.get("role")
+            preserved_session = client1.cookies.get(SESSION_COOKIE_NAME)
+            if not preserved_session:
+                # Fall back to Set-Cookie header if jar did not retain it.
+                preserved_session = login_resp.cookies.get(SESSION_COOKIE_NAME)
+        # client1 / app1 are now closed — simulate process end. Build a fresh
+        # Settings + FastAPI + service graph with the *same* key material.
+        del app1
+        del settings_process_1
+
+        if not preserved_session:
+            raise RuntimeError("rehearsal login did not emit a session cookie")
+
+        settings_process_2 = _rehearsal_settings(active="only")
+        app2 = _build_api_app(session_factory=factory, settings=settings_process_2)
+        with TestClient(app2) as client2:
+            client2.cookies.set(SESSION_COOKIE_NAME, preserved_session)
+            probe = client2.get("/api/operator-auth/session")
+            if probe.status_code != 200:
+                raise RuntimeError(
+                    f"rehearsal session probe failed with HTTP {probe.status_code}"
+                )
+            probe_data = (probe.json() or {}).get("data") or {}
+            restart_ok = (
+                probe_data.get("authenticated") is True
+                and probe_data.get("role") == login_role
+                and login_role == "operator"
+            )
+        del app2
+        del settings_process_2
         _close_store(engine, tmp_path)
         engine, tmp_path = None, None
 
-        # --- Active+previous rotation on a successful request ---
+        # --- Active+previous rotation on a successful request (service-level) ---
         engine, tmp_path, factory = _open_store()
         ring_prev = make_ring(active="prev")
         db3 = factory()
@@ -631,10 +750,14 @@ def rehearse_restart_rotation_revocation() -> dict[str, bool]:
                     and row is not None
                     and str(row.hmac_key_id) == "active"
                 )
-            # Follow-up resolve with only the active key must still succeed.
             if rotation_ok:
                 service_active = make_service(db4, make_ring(active="active"))
-                resolved_active = service_active.resolve_session(session_value2, ctx)
+                # After rotation the cookie value itself is unchanged (same raws);
+                # digests were re-MACed under the active key.
+                resolved_active = service_active.resolve_session(
+                    result.rotated_cookie[0] if result and result.rotated_cookie else session_value2,
+                    ctx,
+                )
                 rotation_ok = (
                     resolved_active is not None
                     and resolved_active.hmac_key_id == "active"
@@ -667,6 +790,10 @@ def rehearse_restart_rotation_revocation() -> dict[str, bool]:
     finally:
         if engine is not None and tmp_path is not None:
             _close_store(engine, tmp_path)
+        try:
+            restore_operator_settings()
+        except Exception:
+            pass
 
     if not (restart_ok and rotation_ok and revoke_ok):
         raise RuntimeError(
@@ -699,11 +826,6 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="destination path for the sanitized evidence JSON",
     )
-    parser.add_argument(
-        "--skip-suites",
-        action="store_true",
-        help=argparse.SUPPRESS,  # internal/dev only; never documented
-    )
     return parser
 
 
@@ -731,6 +853,12 @@ def main(argv: list[str] | None = None) -> int:
     print("==> probing build revision / alembic head / postgres")
     build_revision = probe_build_revision()
     alembic_head = probe_alembic_head()
+    if alembic_head != TASK2_HEAD:
+        print(
+            f"alembic head mismatch: expected {TASK2_HEAD}, got {alembic_head!r}",
+            file=sys.stderr,
+        )
+        return 1
     postgres_version = probe_postgres_version(pg_url)
     print(f"    buildRevision={build_revision}")
     print(f"    alembicHead={alembic_head}")
@@ -741,20 +869,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"    routePolicyCounts={route_policy_counts}")
 
     print("==> running fixed auth suites")
-    if args.skip_suites:
-        # Undocumented escape for unit-testing the runner wiring only.
-        suite_info: dict[str, object] = {
-            "suiteCount": len(SUITES),
-            "passed": True,
-            "totalPassed": 0,
-            "totalFailed": 0,
-            "totalSkipped": 0,
-            "pytestVersion": "0",
-            "pythonVersion": platform.python_version(),
-            "_results": [],
-        }
-    else:
-        suite_info = run_fixed_suites(env=env)
+    suite_info = run_fixed_suites(env=env)
     if not bool(suite_info["passed"]):
         # Surface which fixed suite failed without dumping stdout.
         internal = suite_info.get("_results") or []
@@ -794,7 +909,7 @@ def main(argv: list[str] | None = None) -> int:
     payload: dict[str, object] = {
         "schemaVersion": _SCHEMA_VERSION,
         "buildRevision": build_revision,
-        "alembicHead": alembic_head if alembic_head == TASK2_HEAD else TASK2_HEAD,
+        "alembicHead": alembic_head,
         "postgresVersion": postgres_version,
         "routePolicyCounts": route_policy_counts,
         "testSuites": test_suites_evidence,
