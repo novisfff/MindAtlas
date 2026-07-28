@@ -1,8 +1,9 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import {
   SKILL_ADMIN_BASE,
   SKILL_PACKAGES_BASE,
+  archiveSkillPackage,
   isDangerousMarkupMediaType,
   isRasterImageMediaType,
   isScriptResourcePath,
@@ -10,7 +11,7 @@ import {
   mapSkillPackageError,
   newRequestId,
 } from './skill-packages'
-import { ApiError } from '@/lib/api/client'
+import { ApiError, apiClient } from '@/lib/api/client'
 
 describe('skill-packages API contract', () => {
   it('pins Plan 01 and Plan 09 path prefixes', () => {
@@ -41,5 +42,33 @@ describe('skill-packages API contract', () => {
     expect(isRasterImageMediaType('image/png')).toBe(true)
     expect(isDangerousMarkupMediaType('image/svg+xml')).toBe(true)
     expect(isDangerousMarkupMediaType('text/html')).toBe(true)
+  })
+
+  it('does not generate X-MindAtlas-Operator-* headers on admin mutations', async () => {
+    const spy = vi.spyOn(apiClient, 'post').mockResolvedValue({
+      id: 'pkg-1',
+      canonicalName: 'demo',
+      displayName: 'Demo',
+      description: '',
+      migrationState: 'native',
+      catalogEnabled: false,
+      isSystem: false,
+      aggregateRevision: 2,
+    })
+
+    await archiveSkillPackage('pkg-1', {
+      requestId: 'req-1',
+      expectedAggregateRevision: 1,
+    })
+
+    expect(spy).toHaveBeenCalledTimes(1)
+    const options = spy.mock.calls[0][1] as { headers?: HeadersInit } | undefined
+    const headers = new Headers(options?.headers)
+    for (const key of headers.keys()) {
+      expect(key.toLowerCase().startsWith('x-mindatlas-operator-')).toBe(false)
+    }
+    expect(headers.has('X-MindAtlas-Operator-Id')).toBe(false)
+    expect(headers.has('X-MindAtlas-Operator-Role')).toBe(false)
+    spy.mockRestore()
   })
 })
