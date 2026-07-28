@@ -57,6 +57,119 @@ jobs:
             tests/test_skill_publish_gate.py \
             tests/test_skill_eval_api.py
 
+  operator-control-plane:
+    name: Operator Control Plane Gates
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: mindatlas
+          POSTGRES_PASSWORD: mindatlas
+          POSTGRES_DB: mindatlas_operator_auth_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U mindatlas -d mindatlas_operator_auth_ci"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Disposable CI database only — never production credentials.
+      DATABASE_URL: postgresql://mindatlas:mindatlas@localhost:5432/mindatlas_operator_auth_ci
+      MINDATLAS_TEST_POSTGRES_URL: postgresql://mindatlas:mindatlas@localhost:5432/mindatlas_operator_auth_ci
+      # Hard-fail release-critical operator-auth PostgreSQL suite when URL missing.
+      MINDATLAS_REQUIRE_POSTGRES: "1"
+      AI_PROVIDER_FERNET_KEY: "07v02gVBdreNrXjLJZkIMdohHtgy6aDFKBHxakHjbrQ="
+      # Synthetic test-only operator secrets (disposable; never production values).
+      # Setup material is 48 url-safe bytes; HMAC keys are 32-byte base64.
+      MINDATLAS_CANONICAL_ORIGIN: "http://localhost:3000"
+      MINDATLAS_INITIAL_SETUP_TOKEN: "ci-only-operator-setup-material-not-for-production-use-48b"
+      MINDATLAS_SESSION_HMAC_ACTIVE_KEY_ID: "ci_active"
+      MINDATLAS_SESSION_HMAC_KEYS: '{"ci_active":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}'
+      APP_ENV: test
+      APP_BUILD_REVISION: "ci-operator-control-plane"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install backend dependencies
+        run: python -m pip install -r requirements.txt pytest
+
+      - name: Alembic upgrade to operator control-plane head
+        run: |
+          set -euo pipefail
+          alembic upgrade 9f3c1a7e2b40
+          alembic current
+          alembic heads
+
+      - name: Operator auth and route-inventory suites
+        run: |
+          set -euo pipefail
+          # Fixed Plan 1 suites. MINDATLAS_REQUIRE_POSTGRES=1 makes the
+          # postgres module hard-fail (not skip) when the URL is absent.
+          python -m pytest -q \
+            tests/test_operator_password.py \
+            tests/test_operator_auth_config.py \
+            tests/test_operator_auth_service.py \
+            tests/test_operator_auth_api.py \
+            tests/test_operator_auth_postgres.py \
+            tests/test_route_auth_inventory.py \
+            tests/test_operator_cli_boundary.py \
+            tests/test_operator_control_plane_evidence.py
+
+      - name: Reject skipped release-critical postgres suite
+        run: |
+          set -euo pipefail
+          # Re-run the postgres module alone and fail if any test was skipped.
+          python - <<'PY'
+          import os
+          import re
+          import subprocess
+          import sys
+
+          env = dict(os.environ)
+          env["MINDATLAS_REQUIRE_POSTGRES"] = "1"
+          proc = subprocess.run(
+              [
+                  sys.executable,
+                  "-m",
+                  "pytest",
+                  "tests/test_operator_auth_postgres.py",
+                  "-q",
+              ],
+              env=env,
+              capture_output=True,
+              text=True,
+          )
+          out = (proc.stdout or "") + "\n" + (proc.stderr or "")
+          print(out)
+          if proc.returncode != 0:
+              raise SystemExit(proc.returncode)
+          lower = out.lower()
+          match = re.search(r"(\d+)\s+skipped", lower)
+          if match and int(match.group(1)) > 0:
+              raise SystemExit(
+                  "operator-auth postgres suite skipped under require-postgres; "
+                  "release-critical gate must run"
+              )
+          if "passed" not in lower:
+              raise SystemExit(
+                  "operator-auth postgres suite produced no pass summary"
+              )
+          print("operator-auth postgres gate: OK")
+          PY
+
   agent-skill-migration:
     name: Agent Skill PostgreSQL Migration Gate
     runs-on: ubuntu-latest

@@ -35,12 +35,28 @@ DOWNGRADE_BLOCKED_TOKEN = "operator_auth_downgrade_blocked"
 DESTRUCTIVE_DOWNGRADE_ENV = "MINDATLAS_TEST_DESTRUCTIVE_DOWNGRADE"
 
 _POSTGRES_URL = os.environ.get("MINDATLAS_TEST_POSTGRES_URL", "").strip()
+_REQUIRE_POSTGRES = os.environ.get("MINDATLAS_REQUIRE_POSTGRES", "").strip() in {
+    "1",
+    "true",
+    "TRUE",
+    "yes",
+    "YES",
+}
+
+if not _POSTGRES_URL and _REQUIRE_POSTGRES:
+    # Release-critical gate: never pytest.skip when CI/runner demands PostgreSQL.
+    pytest.fail(
+        "MINDATLAS_TEST_POSTGRES_URL not set while MINDATLAS_REQUIRE_POSTGRES=1; "
+        "operator-auth PostgreSQL schema gate is release-critical and must hard-fail",
+        pytrace=False,
+    )
 
 pytestmark = pytest.mark.skipif(
     not _POSTGRES_URL,
     reason=(
         "MINDATLAS_TEST_POSTGRES_URL not set; operator-auth PostgreSQL schema "
-        "gate skipped (SQLite cannot prove append-only trigger / checks)"
+        "gate skipped (SQLite cannot prove append-only trigger / checks). "
+        "Set MINDATLAS_REQUIRE_POSTGRES=1 to hard-fail instead of skip."
     ),
 )
 
