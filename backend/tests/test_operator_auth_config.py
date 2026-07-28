@@ -90,12 +90,36 @@ def test_production_accepts_exact_https_origin_in_cors() -> None:
     assert settings.canonical_origin == "https://atlas.example"
 
 
+def test_canonical_origin_whitespace_is_normalized() -> None:
+    settings = Settings(
+        APP_ENV="production",
+        MINDATLAS_CANONICAL_ORIGIN="  https://atlas.example  ",
+        CORS_ORIGINS="https://atlas.example",
+    )
+    assert settings.canonical_origin == "https://atlas.example"
+    # Stripped stored value must match a real browser Origin header.
+    require_json_same_origin(
+        _make_request(origin="https://atlas.example"),
+        canonical_origin=settings.canonical_origin,
+    )
+
+
 def test_setup_token_min_length_enforced_when_present() -> None:
     with pytest.raises(ValidationError):
         Settings(
             APP_ENV="development",
             MINDATLAS_INITIAL_SETUP_TOKEN="too-short",
         )
+
+
+def test_blank_secret_str_coerced_to_none() -> None:
+    settings = Settings(
+        APP_ENV="development",
+        MINDATLAS_INITIAL_SETUP_TOKEN="",
+        MINDATLAS_SESSION_HMAC_KEYS="",
+    )
+    assert settings.initial_setup_token is None
+    assert settings.session_hmac_keys is None
 
 
 def test_settings_constructible_without_auth_secrets() -> None:
@@ -174,6 +198,17 @@ def test_require_json_same_origin_accepts_valid_request() -> None:
     )
 
 
+def _gate_then_verify(
+    request: Request,
+    *,
+    canonical_origin: str,
+    password_verifier: MagicMock,
+) -> None:
+    """Call the origin gate, then the spy — spy only runs if the gate returns."""
+    require_json_same_origin(request, canonical_origin=canonical_origin)
+    password_verifier("would-run-if-gate-bypassed")
+
+
 @pytest.mark.parametrize(
     ("headers", "status", "code", "message"),
     [
@@ -229,12 +264,23 @@ def test_require_json_same_origin_rejects_before_secret_check(
 ) -> None:
     password_verifier = MagicMock()
     with pytest.raises(ApiException) as exc_info:
-        require_json_same_origin(
+        _gate_then_verify(
             _make_request(**headers),
             canonical_origin="https://atlas.example",
+            password_verifier=password_verifier,
         )
-        password_verifier("should-not-run")
     assert exc_info.value.status_code == status
     assert exc_info.value.code == code
     assert exc_info.value.message == message
     password_verifier.assert_not_called()
+
+
+def test_gate_then_verify_invokes_spy_when_gate_passes() -> None:
+    """Sanity: the helper would call the spy if origin checks succeeded."""
+    password_verifier = MagicMock()
+    _gate_then_verify(
+        _make_request(),
+        canonical_origin="https://atlas.example",
+        password_verifier=password_verifier,
+    )
+    password_verifier.assert_called_once_with("would-run-if-gate-bypassed")

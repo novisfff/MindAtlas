@@ -16,7 +16,7 @@ SESSION_HMAC_LABEL = b"mindatlas/operator-session/v1\x00"
 CSRF_HMAC_LABEL = b"mindatlas/operator-csrf/v1\x00"
 CONTEXT_HMAC_LABEL = b"mindatlas/operator-context/v1\x00"
 
-# Argon2id parameters (documented for operators; PasswordService hard-codes the same).
+# Argon2id parameters (PasswordService imports these; do not diverge).
 ARGON2_TIME_COST = 3
 ARGON2_MEMORY_COST = 65536
 ARGON2_PARALLELISM = 2

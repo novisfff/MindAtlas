@@ -666,7 +666,10 @@ class Settings(BaseSettings):
 
         # Single-operator auth: production/staging origin + credentialed CORS.
         # Setup/session secrets may be absent (health stays up); never mint replacements.
+        # Normalize padded origin so require_json_same_origin compares the same value
+        # that production/staging HTTPS/CORS validation accepted.
         origin = self.canonical_origin.strip()
+        self.canonical_origin = origin
         cors = self.cors_origins_list()
         if self.app_env in {"production", "staging"}:
             if not origin.startswith("https://"):
@@ -675,6 +678,15 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "credentialed CORS must contain the exact canonical origin"
                 )
+        # Blank SecretStr from empty .env.example copies is not "configured".
+        if self.initial_setup_token is not None and not (
+            self.initial_setup_token.get_secret_value() or ""
+        ).strip():
+            self.initial_setup_token = None
+        if self.session_hmac_keys is not None and not (
+            self.session_hmac_keys.get_secret_value() or ""
+        ).strip():
+            self.session_hmac_keys = None
         token = (
             self.initial_setup_token.get_secret_value()
             if self.initial_setup_token

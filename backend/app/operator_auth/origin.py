@@ -16,7 +16,7 @@ def require_json_same_origin(request: Request, *, canonical_origin: str) -> None
     Comparisons use constant-time digests so origin length does not leak via
     short-circuit string equality.
     """
-    media_type = request.headers.get("content-type", "").split(";", 1)[0].lower().strip()
+    media_type = request.headers.get("content-type", "").split(";", 1)[0].lower()
     if media_type != "application/json":
         raise ApiException(
             status_code=415,
