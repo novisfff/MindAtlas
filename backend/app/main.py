@@ -91,8 +91,15 @@ if cors_origins:
         CORSMiddleware,
         allow_origins=cors_origins,
         allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_methods=["GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"],
+        allow_headers=[
+            "Accept",
+            "Authorization",
+            "Content-Type",
+            "X-MindAtlas-CSRF",
+            "X-MindAtlas-Locale",
+            "X-Request-ID",
+        ],
     )
 
 register_exception_handlers(app, debug=settings.debug)

@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Literal
 from uuid import UUID
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -342,6 +342,20 @@ class Settings(BaseSettings):
     # Keep as string to support simple comma-separated values in `.env` without requiring JSON.
     cors_origins: str = Field(default="", alias="CORS_ORIGINS")
 
+    # Single-operator control plane (Plan 1). Secrets have no repository defaults;
+    # Settings remains constructible when they are absent so /health stays up.
+    # Missing secrets never generate ephemeral replacements.
+    initial_setup_token: SecretStr | None = Field(
+        default=None, alias="MINDATLAS_INITIAL_SETUP_TOKEN"
+    )
+    canonical_origin: str = Field(default="", alias="MINDATLAS_CANONICAL_ORIGIN")
+    session_hmac_active_key_id: str = Field(
+        default="", alias="MINDATLAS_SESSION_HMAC_ACTIVE_KEY_ID"
+    )
+    session_hmac_keys: SecretStr | None = Field(
+        default=None, alias="MINDATLAS_SESSION_HMAC_KEYS"
+    )
+
     # Uploads
     upload_dir: str = Field(default="../uploads", alias="UPLOAD_DIR")
 
@@ -649,6 +663,27 @@ class Settings(BaseSettings):
                 "assistant_skill_publish_gate_mode must be 'observe' or 'enforce'"
             )
         self.assistant_skill_publish_gate_mode = gate_mode
+
+        # Single-operator auth: production/staging origin + credentialed CORS.
+        # Setup/session secrets may be absent (health stays up); never mint replacements.
+        origin = self.canonical_origin.strip()
+        cors = self.cors_origins_list()
+        if self.app_env in {"production", "staging"}:
+            if not origin.startswith("https://"):
+                raise ValueError("MINDATLAS_CANONICAL_ORIGIN must be HTTPS")
+            if "*" in cors or origin not in cors:
+                raise ValueError(
+                    "credentialed CORS must contain the exact canonical origin"
+                )
+        token = (
+            self.initial_setup_token.get_secret_value()
+            if self.initial_setup_token
+            else ""
+        )
+        if token and len(token.encode("utf-8")) < 32:
+            raise ValueError(
+                "MINDATLAS_INITIAL_SETUP_TOKEN must be at least 32 UTF-8 bytes"
+            )
         return self
 
     def cors_origins_list(self) -> list[str]:
