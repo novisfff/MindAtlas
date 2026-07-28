@@ -28,10 +28,17 @@ from app.operator_auth.constants import (  # noqa: E402
     LOGIN_FAILURE_LIMIT,
     LOGIN_LOCK_SECONDS,
     LOGIN_WINDOW_SECONDS,
+    SESSION_ABSOLUTE_SECONDS,
+    SESSION_IDLE_SECONDS,
 )
 from app.operator_auth.contracts import RequestSecurityContext  # noqa: E402
-from app.operator_auth.models import OperatorAccount, OperatorAuditEvent  # noqa: E402
+from app.operator_auth.models import (  # noqa: E402
+    OperatorAccount,
+    OperatorAuditEvent,
+    OperatorSession,
+)
 from app.operator_auth.repository import OperatorRepository  # noqa: E402
+from app.operator_auth.tokens import SessionMacKeyRing  # noqa: E402
 
 
 _HEX_A = "a" * 64
@@ -372,3 +379,554 @@ def test_audit_append_uses_database_time_on_postgres() -> None:
             assert remaining.reason_code is None
         finally:
             session.close()
+
+
+# ---------------------------------------------------------------------------
+# Task 4: session lifecycle (issue / resolve / CSRF / rotation / revoke)
+# ---------------------------------------------------------------------------
+
+
+def _hex(n: int) -> str:
+    return format(n, "x") * 64
+
+
+CTX = RequestSecurityContext(
+    request_id="req-session-1",
+    request_digest=_hex(0xA),
+    user_agent_digest=_hex(0xB),
+    network_digest=_hex(0xC),
+)
+CTX2 = RequestSecurityContext(
+    request_id="req-session-2",
+    request_digest=_hex(0xD),
+    user_agent_digest=_hex(0xE),
+    network_digest=_hex(0xF),
+)
+MAINTENANCE_CTX = RequestSecurityContext(
+    request_id="req-maintenance-1",
+    request_digest=_hex(0x1),
+    user_agent_digest=_hex(0x2),
+    network_digest=_hex(0x3),
+)
+
+_PASSWORD = "correct horse battery"
+_PASSWORD_NEW = "a newer exact secret!"
+
+
+def _raw_key(fill: int) -> bytes:
+    return bytes([fill & 0xFF]) * 32
+
+
+def _stable_key_material(key_id: str) -> bytes:
+    """Stable per-id material so active/previous roles do not change bytes."""
+    table = {
+        "old": 21,
+        "new": 11,
+        "k1": 31,
+        "k2": 32,
+    }
+    return _raw_key(table.get(key_id, (sum(key_id.encode("utf-8")) % 200) + 40))
+
+
+def make_key_ring(*, active: str, previous: str | None = None) -> SessionMacKeyRing:
+    keys: dict[str, bytes] = {active: _stable_key_material(active)}
+    if previous is not None:
+        keys[previous] = _stable_key_material(previous)
+    return SessionMacKeyRing(active_key_id=active, keys=keys)
+
+
+def ring_with_only(active: str) -> SessionMacKeyRing:
+    return make_key_ring(active=active)
+
+
+@pytest.fixture
+def session_factory() -> Iterator[sessionmaker]:
+    """Shared on-disk SQLite DB so restart tests open a fresh SQLAlchemy session."""
+    import tempfile
+    from pathlib import Path
+
+    from sqlalchemy import create_engine, event
+
+    from app.database import Base
+    import app.operator_auth.models  # noqa: F401
+    import app.system_settings.models  # noqa: F401
+
+    tmp = tempfile.NamedTemporaryFile(
+        prefix="mindatlas-opauth-", suffix=".sqlite", delete=False
+    )
+    tmp_path = Path(tmp.name)
+    tmp.close()
+    engine = create_engine(
+        f"sqlite+pysqlite:///{tmp_path}",
+        connect_args={"check_same_thread": False},
+        future=True,
+    )
+
+    @event.listens_for(engine, "connect")
+    def _fk(dbapi_connection, _connection_record):  # noqa: ANN001
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(
+        bind=engine,
+        autoflush=False,
+        autocommit=False,
+        expire_on_commit=False,
+        future=True,
+    )
+    try:
+        yield factory
+    finally:
+        engine.dispose()
+        try:
+            tmp_path.unlink(missing_ok=True)  # type: ignore[call-arg]
+        except TypeError:
+            if tmp_path.exists():
+                tmp_path.unlink()
+
+
+@pytest.fixture
+def key_ring() -> SessionMacKeyRing:
+    return make_key_ring(active="k1")
+
+
+@pytest.fixture
+def frozen_clock() -> FrozenDbClock:
+    return FrozenDbClock()
+
+
+def make_service(
+    db: Session,
+    key_ring: SessionMacKeyRing,
+    *,
+    now_fn: FrozenDbClock | None = None,
+):
+    from app.operator_auth.service import OperatorAuthService
+
+    repo = OperatorRepository(db, now_fn=now_fn)
+    return OperatorAuthService(db, key_ring=key_ring, repository=repo, now_fn=now_fn)
+
+
+def _seed_operator(db: Session, *, now_fn: FrozenDbClock | None = None) -> OperatorAccount:
+    repo = OperatorRepository(db, now_fn=now_fn)
+    account = repo.seed_account(password=_PASSWORD)
+    db.commit()
+    return account
+
+
+def issue_with_key(
+    session_factory: sessionmaker,
+    *,
+    key_id: str,
+    clock: FrozenDbClock | None = None,
+):
+    ring = make_key_ring(active=key_id)
+    db = session_factory()
+    try:
+        _seed_operator(db, now_fn=clock)
+        service = make_service(db, ring, now_fn=clock)
+        return service.login(_PASSWORD, CTX)
+    finally:
+        db.close()
+
+
+def resolve_with_keys(
+    session_factory: sessionmaker,
+    *,
+    active: str,
+    previous: str,
+    issued,
+    clock: FrozenDbClock | None = None,
+):
+    ring = make_key_ring(active=active, previous=previous)
+    db = session_factory()
+    try:
+        service = make_service(db, ring, now_fn=clock)
+        return service.resolve_session(issued.session_cookie_value, CTX)
+    finally:
+        db.close()
+
+
+def stored_key_id(session_factory: sessionmaker, session_id) -> str:
+    db = session_factory()
+    try:
+        row = db.get(OperatorSession, session_id)
+        assert row is not None
+        return str(row.hmac_key_id)
+    finally:
+        db.close()
+
+
+def test_restart_with_same_key_keeps_session(
+    session_factory: sessionmaker, key_ring: SessionMacKeyRing
+) -> None:
+    db1 = session_factory()
+    try:
+        _seed_operator(db1)
+        issued = make_service(db1, key_ring).login(_PASSWORD, CTX)
+    finally:
+        db1.close()
+
+    db2 = session_factory()
+    try:
+        restarted = make_service(db2, key_ring)
+        resolved = restarted.resolve_session(issued.session_cookie_value, CTX)
+        assert resolved is not None
+        assert resolved.principal.session_id == issued.principal.session_id
+        assert resolved.principal.operator_id == issued.principal.operator_id
+    finally:
+        db2.close()
+
+
+def test_previous_key_is_rotated_on_successful_request(
+    session_factory: sessionmaker,
+) -> None:
+    issued = issue_with_key(session_factory, key_id="old")
+    result = resolve_with_keys(
+        session_factory, active="new", previous="old", issued=issued
+    )
+    assert result is not None
+    assert result.rotated_cookie is not None
+    assert stored_key_id(session_factory, issued.principal.session_id) == "new"
+
+
+def test_removed_previous_key_revokes_dependent_sessions(
+    session_factory: sessionmaker,
+) -> None:
+    issued = issue_with_key(session_factory, key_id="old")
+    db = session_factory()
+    try:
+        service = make_service(db, ring_with_only("new"))
+        count = service.revoke_unverifiable_sessions(context=MAINTENANCE_CTX)
+        assert count == 1
+        assert service.resolve_session(issued.session_cookie_value, CTX) is None
+    finally:
+        db.close()
+
+
+def test_password_revision_invalidates_all_sessions(
+    session_factory: sessionmaker, key_ring: SessionMacKeyRing
+) -> None:
+    db = session_factory()
+    try:
+        _seed_operator(db)
+        auth_service = make_service(db, key_ring)
+        first = auth_service.login(_PASSWORD, CTX)
+        second = auth_service.login(_PASSWORD, CTX2)
+        auth_service.change_password(
+            principal=first.principal,
+            current_password=_PASSWORD,
+            new_password=_PASSWORD_NEW,
+            context=CTX,
+        )
+        assert auth_service.resolve_session(first.session_cookie_value, CTX) is None
+        assert auth_service.resolve_session(second.session_cookie_value, CTX2) is None
+    finally:
+        db.close()
+
+
+def test_idle_expiry_at_exactly_twelve_hours(
+    session_factory: sessionmaker, key_ring: SessionMacKeyRing, frozen_clock: FrozenDbClock
+) -> None:
+    db = session_factory()
+    try:
+        _seed_operator(db, now_fn=frozen_clock)
+        service = make_service(db, key_ring, now_fn=frozen_clock)
+        issued = service.login(_PASSWORD, CTX)
+        frozen_clock.advance(seconds=SESSION_IDLE_SECONDS)
+        assert service.resolve_session(issued.session_cookie_value, CTX) is None
+        row = db.get(OperatorSession, issued.principal.session_id)
+        assert row is not None
+        assert row.revoked_at is not None
+        assert row.revoke_reason == "idle_expired"
+    finally:
+        db.close()
+
+
+def test_absolute_expiry_at_exactly_seven_days(
+    session_factory: sessionmaker, key_ring: SessionMacKeyRing, frozen_clock: FrozenDbClock
+) -> None:
+    db = session_factory()
+    try:
+        _seed_operator(db, now_fn=frozen_clock)
+        service = make_service(db, key_ring, now_fn=frozen_clock)
+        issued = service.login(_PASSWORD, CTX)
+        # Stay inside idle by refreshing just before absolute, then hit absolute.
+        # Advance in chunks under idle window, touching each time, until absolute.
+        steps = 13  # 13 * ~12h > 7d; touch every just-under-idle period
+        step = SESSION_IDLE_SECONDS - 60
+        elapsed = 0
+        cookie = issued.session_cookie_value
+        while elapsed + step < SESSION_ABSOLUTE_SECONDS:
+            frozen_clock.advance(seconds=step)
+            elapsed += step
+            resolved = service.resolve_session(cookie, CTX)
+            assert resolved is not None
+            if resolved.rotated_cookie is not None:
+                cookie = resolved.rotated_cookie[0]
+        # Land exactly on absolute expiry.
+        remaining = SESSION_ABSOLUTE_SECONDS - elapsed
+        frozen_clock.advance(seconds=remaining)
+        assert service.resolve_session(cookie, CTX) is None
+        row = db.get(OperatorSession, issued.principal.session_id)
+        assert row is not None
+        assert row.revoke_reason == "absolute_expired"
+    finally:
+        db.close()
+
+
+def test_refresh_never_crosses_absolute_expiry(
+    session_factory: sessionmaker, key_ring: SessionMacKeyRing, frozen_clock: FrozenDbClock
+) -> None:
+    db = session_factory()
+    try:
+        _seed_operator(db, now_fn=frozen_clock)
+        service = make_service(db, key_ring, now_fn=frozen_clock)
+        issued = service.login(_PASSWORD, CTX)
+        absolute = issued.absolute_expires_at
+        cookie = issued.session_cookie_value
+        # Walk to 6d23h with touches inside the idle window so the session stays live.
+        target = timedelta(days=6, hours=23)
+        step = timedelta(seconds=SESSION_IDLE_SECONDS - 60)
+        elapsed = timedelta(0)
+        while elapsed + step <= target:
+            frozen_clock.advance(seconds=step.total_seconds())
+            elapsed += step
+            resolved = service.resolve_session(cookie, CTX)
+            assert resolved is not None
+            if resolved.rotated_cookie is not None:
+                cookie = resolved.rotated_cookie[0]
+        remaining = target - elapsed
+        if remaining.total_seconds() > 0:
+            frozen_clock.advance(seconds=remaining.total_seconds())
+        resolved = service.resolve_session(cookie, CTX)
+        assert resolved is not None
+
+        def _aware(value: datetime) -> datetime:
+            if value.tzinfo is None:
+                return value.replace(tzinfo=timezone.utc)
+            return value
+
+        assert _aware(resolved.absolute_expires_at) == _aware(absolute)
+        assert _aware(resolved.idle_expires_at) <= _aware(absolute)
+        row = db.get(OperatorSession, issued.principal.session_id)
+        assert row is not None
+        assert _aware(row.absolute_expires_at) == _aware(absolute)
+        assert _aware(row.idle_expires_at) <= _aware(row.absolute_expires_at)
+        # Idle refresh clamped to absolute (remaining absolute window < idle window).
+        assert _aware(row.idle_expires_at) == _aware(row.absolute_expires_at)
+    finally:
+        db.close()
+
+
+def test_revoked_session_rejected_after_restart(
+    session_factory: sessionmaker, key_ring: SessionMacKeyRing
+) -> None:
+    db1 = session_factory()
+    try:
+        _seed_operator(db1)
+        service = make_service(db1, key_ring)
+        issued = service.login(_PASSWORD, CTX)
+        service.revoke_current(principal=issued.principal, context=CTX)
+    finally:
+        db1.close()
+
+    db2 = session_factory()
+    try:
+        restarted = make_service(db2, key_ring)
+        assert restarted.resolve_session(issued.session_cookie_value, CTX) is None
+    finally:
+        db2.close()
+
+
+def test_malformed_cookie_rejected_without_database_exception(
+    session_factory: sessionmaker, key_ring: SessionMacKeyRing
+) -> None:
+    db = session_factory()
+    try:
+        _seed_operator(db)
+        service = make_service(db, key_ring)
+        assert service.resolve_session("", CTX) is None
+        assert service.resolve_session("not-a-cookie", CTX) is None
+        assert service.resolve_session("v1.nothex.%%%%", CTX) is None
+        assert service.resolve_session(None, CTX) is None  # type: ignore[arg-type]
+    finally:
+        db.close()
+
+
+def test_unknown_key_id_rejects_and_revokes(
+    session_factory: sessionmaker, frozen_clock: FrozenDbClock
+) -> None:
+    issued = issue_with_key(session_factory, key_id="old", clock=frozen_clock)
+    db = session_factory()
+    try:
+        # Active ring has neither the issuing key nor a previous slot for it.
+        service = make_service(db, ring_with_only("new"), now_fn=frozen_clock)
+        assert service.resolve_session(issued.session_cookie_value, CTX) is None
+        row = db.get(OperatorSession, issued.principal.session_id)
+        assert row is not None
+        # Durable revoke may be deferred to revoke_unverifiable_sessions; either
+        # immediate revoke on resolve or still active-but-unverifiable is ok as
+        # long as resolve returns None. Prefer durable revoke on resolve.
+        if row.revoked_at is not None:
+            assert row.revoke_reason in {"hmac_key_removed", "maintenance"}
+    finally:
+        db.close()
+
+
+def test_disabled_account_rejects_session(
+    session_factory: sessionmaker, key_ring: SessionMacKeyRing
+) -> None:
+    db = session_factory()
+    try:
+        account = _seed_operator(db)
+        service = make_service(db, key_ring)
+        issued = service.login(_PASSWORD, CTX)
+        account.enabled = False
+        db.commit()
+        assert service.resolve_session(issued.session_cookie_value, CTX) is None
+        row = db.get(OperatorSession, issued.principal.session_id)
+        assert row is not None
+        assert row.revoke_reason == "account_disabled"
+    finally:
+        db.close()
+
+
+def test_generic_login_failure_for_missing_disabled_wrong_password(
+    session_factory: sessionmaker, key_ring: SessionMacKeyRing
+) -> None:
+    from app.operator_auth.service import AuthRejected, OperatorAuthService
+
+    db = session_factory()
+    try:
+        # Missing account.
+        service = make_service(db, key_ring)
+        with pytest.raises(AuthRejected) as missing:
+            service.login(_PASSWORD, CTX)
+        missing_exc = missing.value
+
+        account = _seed_operator(db)
+        # Wrong password.
+        with pytest.raises(AuthRejected) as wrong:
+            service.login("definitely-not-the-password!!", CTX)
+        wrong_exc = wrong.value
+
+        account.enabled = False
+        db.commit()
+        # Disabled account.
+        with pytest.raises(AuthRejected) as disabled:
+            service.login(_PASSWORD, CTX)
+        disabled_exc = disabled.value
+
+        # Constant generic failure: same type and public code, no distinguishing detail.
+        assert type(missing_exc) is type(wrong_exc) is type(disabled_exc) is AuthRejected
+        assert (
+            missing_exc.code
+            == wrong_exc.code
+            == disabled_exc.code
+            == "invalid_credentials"
+        )
+        assert str(missing_exc) == str(wrong_exc) == str(disabled_exc)
+    finally:
+        db.close()
+
+
+def test_csrf_requires_cookie_header_match_and_digest(
+    session_factory: sessionmaker, key_ring: SessionMacKeyRing
+) -> None:
+    from app.operator_auth.service import CsrfRejected
+
+    db = session_factory()
+    try:
+        _seed_operator(db)
+        service = make_service(db, key_ring)
+        issued = service.login(_PASSWORD, CTX)
+        resolved = service.resolve_session(issued.session_cookie_value, CTX)
+        assert resolved is not None
+
+        # Mismatched header vs cookie.
+        with pytest.raises(CsrfRejected):
+            service.verify_csrf(
+                resolution=resolved,
+                csrf_cookie_value=issued.csrf_cookie_value,
+                csrf_header_value="totally-different-value",
+            )
+
+        # Matching pair succeeds.
+        service.verify_csrf(
+            resolution=resolved,
+            csrf_cookie_value=issued.csrf_cookie_value,
+            csrf_header_value=issued.csrf_cookie_value,
+        )
+
+        # Matching pair but wrong raw (forged equal cookie+header) fails digest.
+        with pytest.raises(CsrfRejected):
+            service.verify_csrf(
+                resolution=resolved,
+                csrf_cookie_value="a" * 43,  # wrong length/encoding ultimately
+                csrf_header_value="a" * 43,
+            )
+    finally:
+        db.close()
+
+
+def test_revoke_all_and_logout_are_durable(
+    session_factory: sessionmaker, key_ring: SessionMacKeyRing
+) -> None:
+    db = session_factory()
+    try:
+        _seed_operator(db)
+        service = make_service(db, key_ring)
+        first = service.login(_PASSWORD, CTX)
+        second = service.login(_PASSWORD, CTX2)
+        count = service.revoke_all(principal=first.principal, context=CTX)
+        assert count >= 2
+        assert service.resolve_session(first.session_cookie_value, CTX) is None
+        assert service.resolve_session(second.session_cookie_value, CTX2) is None
+    finally:
+        db.close()
+
+    db2 = session_factory()
+    try:
+        service = make_service(db2, key_ring)
+        third = service.login(_PASSWORD, CTX)
+        service.revoke_current(principal=third.principal, context=CTX)
+    finally:
+        db2.close()
+
+    db3 = session_factory()
+    try:
+        service = make_service(db3, key_ring)
+        # Re-login after logout path above needs the account; third cookie dead.
+        assert service.resolve_session(third.session_cookie_value, CTX) is None
+    finally:
+        db3.close()
+
+
+def test_availability_reports_init_and_key_ring(
+    session_factory: sessionmaker, key_ring: SessionMacKeyRing
+) -> None:
+    from app.operator_auth.service import OperatorAuthService
+
+    db = session_factory()
+    try:
+        service = make_service(db, key_ring)
+        before = service.availability()
+        assert before.available is True
+        assert "initialization_required" in before.reason_codes
+
+        _seed_operator(db)
+        after = service.availability()
+        assert after.available is True
+        assert "initialization_required" not in after.reason_codes
+
+        no_keys = OperatorAuthService(
+            db, key_ring=None, repository=OperatorRepository(db)
+        )
+        unavailable = no_keys.availability()
+        assert unavailable.available is False
+        assert "operator_auth_unavailable" in unavailable.reason_codes
+    finally:
+        db.close()

@@ -303,3 +303,10 @@ class OperatorRepository:
         if for_update:
             stmt = stmt.with_for_update()
         return list(self.db.execute(stmt).scalars().all())
+
+    def list_active_sessions(self, *, for_update: bool = False) -> list[OperatorSession]:
+        """Return every non-revoked session (maintenance / key-ring sweeps)."""
+        stmt = select(OperatorSession).where(OperatorSession.revoked_at.is_(None))
+        if for_update:
+            stmt = stmt.with_for_update()
+        return list(self.db.execute(stmt).scalars().all())
