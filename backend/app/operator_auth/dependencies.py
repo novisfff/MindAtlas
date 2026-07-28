@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from starlette.requests import Request
 
 from app.common.exceptions import ApiException
+from app.common.request_context import normalize_request_id
 from app.config import Settings, get_settings
 from app.database import get_db
 from app.operator_auth.constants import (
@@ -171,11 +172,14 @@ def request_security_context(
     Uses the server-generated request id (middleware), raw User-Agent, and
     ``request.client.host`` only as HMAC input material.
     """
-    request_id = getattr(request.state, "request_id", None)
-    if not request_id:
-        request_id = request.headers.get("x-request-id") or ""
-    if not isinstance(request_id, str):
-        request_id = str(request_id)
+    # Prefer middleware-populated state; always re-normalize so oversized or
+    # unsafe values never reach String(128) audit / lockout columns.
+    raw_request_id = getattr(request.state, "request_id", None)
+    if not raw_request_id:
+        raw_request_id = request.headers.get("x-request-id")
+    request_id = normalize_request_id(
+        raw_request_id if isinstance(raw_request_id, str) else None
+    )
 
     user_agent = request.headers.get("user-agent") or ""
     network = ""

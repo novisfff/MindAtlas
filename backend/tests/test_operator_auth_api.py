@@ -6,7 +6,6 @@ import base64
 import json
 from collections.abc import Iterator
 from typing import Any
-from uuid import uuid4
 
 import pytest
 from fastapi import FastAPI
@@ -21,6 +20,7 @@ reset_caches()
 
 from app.common.exceptions import register_exception_handlers  # noqa: E402
 from app.common.request_context import (  # noqa: E402
+    normalize_request_id,
     reset_request_id,
     set_request_id,
 )
@@ -167,7 +167,7 @@ def app(
 
     @application.middleware("http")
     async def _request_id_middleware(request, call_next):  # noqa: ANN001
-        request_id = request.headers.get("x-request-id") or uuid4().hex
+        request_id = normalize_request_id(request.headers.get("x-request-id"))
         request.state.request_id = request_id
         token = set_request_id(request_id)
         try:
@@ -433,6 +433,74 @@ def test_login_lockout_returns_retry_after(
     assert isinstance(retry, int)
     assert 0 < retry <= 15 * 60
     assert locked.headers.get("retry-after") == str(retry)
+
+
+def test_oversized_request_id_does_not_block_lockout(
+    client: TestClient,
+    origin_headers: dict[str, str],
+    session_factory: sessionmaker,
+) -> None:
+    """Oversized X-Request-ID must not 500 or skip durable failure/lockout rows."""
+    oversized = "R" * 200
+    for _ in range(LOGIN_FAILURE_LIMIT):
+        failed = client.post(
+            "/api/operator-auth/login",
+            json={"password": "wrong-password-xx"},
+            headers={**origin_headers, "X-Request-ID": oversized},
+        )
+        assert failed.status_code in {401, 429}, failed.text
+        assert failed.status_code != 500
+        # Response echoes the normalized (server-generated) id, not the raw oversize.
+        echoed = failed.headers.get("x-request-id") or ""
+        assert echoed != oversized
+        assert len(echoed) <= 128
+
+    locked = client.post(
+        "/api/operator-auth/login",
+        json={"password": _PASSWORD},
+        headers={**origin_headers, "X-Request-ID": oversized},
+    )
+    assert locked.status_code == 429, locked.text
+    assert locked.json()["message"] == "login_locked"
+
+    db = session_factory()
+    try:
+        rows = list(
+            db.execute(
+                select(OperatorAuditEvent).order_by(OperatorAuditEvent.occurred_at)
+            ).scalars()
+        )
+        assert rows
+        failure_rows = [r for r in rows if r.event_type == "login_rejected"]
+        # Failures before the lockout threshold stage login_rejected; the final
+        # attempt that trips the lock may stage login_locked instead.
+        assert len(failure_rows) >= max(1, LOGIN_FAILURE_LIMIT - 1)
+        for row in rows:
+            assert row.request_id
+            assert len(row.request_id) <= 128
+            assert oversized not in (row.request_id or "")
+    finally:
+        db.close()
+
+
+def test_login_invalid_body_is_generic_422(
+    client: TestClient, origin_headers: dict[str, str]
+) -> None:
+    """Manual model_validate must not 500 or echo submitted password material."""
+    secret = "should-never-echo-this-password-value"
+    response = client.post(
+        "/api/operator-auth/login",
+        # password too long for OperatorLoginRequest max_length=1024
+        json={"password": secret + ("x" * 1100)},
+        headers=origin_headers,
+    )
+    assert response.status_code == 422
+    body = response.json()
+    assert body["message"] == "login_request_invalid"
+    dumped = json.dumps(body)
+    assert secret not in dumped
+    assert "x" * 50 not in dumped
+    assert response.status_code != 500
 
 
 def test_session_probe_unauthenticated(client: TestClient) -> None:
@@ -826,7 +894,7 @@ def setup_app(
 
     @application.middleware("http")
     async def _request_id_middleware(request, call_next):  # noqa: ANN001
-        request_id = request.headers.get("x-request-id") or uuid4().hex
+        request_id = normalize_request_id(request.headers.get("x-request-id"))
         request.state.request_id = request_id
         token = set_request_id(request_id)
         try:

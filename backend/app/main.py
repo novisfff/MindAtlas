@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import os
 import time
-import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -21,6 +20,7 @@ if (os.environ.get("MINDATLAS_FAULTHANDLER") or "").strip().lower() in {"1", "tr
 
 from app.common.exceptions import register_exception_handlers
 from app.common.request_context import (
+    normalize_request_id,
     reset_request_id,
     reset_request_locale,
     set_request_id,
@@ -124,7 +124,7 @@ register_exception_handlers(app, debug=settings.debug)
 @app.middleware("http")
 async def request_logging_middleware(request, call_next):
     logger = logging.getLogger("app.request")
-    request_id = request.headers.get("x-request-id") or uuid.uuid4().hex
+    request_id = normalize_request_id(request.headers.get("x-request-id"))
     request.state.request_id = request_id
     locale = normalize_system_locale(request.headers.get("x-mindatlas-locale"))
     request.state.locale = locale

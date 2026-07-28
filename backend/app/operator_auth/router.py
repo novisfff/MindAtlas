@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Response
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 from sqlalchemy.orm import Session
 from starlette.requests import Request
 
@@ -89,7 +90,17 @@ async def login(
             code=40010,
             message="invalid_json_body",
         ) from exc
-    body = OperatorLoginRequest.model_validate(raw_body)
+    try:
+        body = OperatorLoginRequest.model_validate(raw_body)
+    except ValidationError as exc:
+        # Manual model_validate raises raw Pydantic ValidationError (not
+        # RequestValidationError). Return a generic 422 without echoing input
+        # values (password) into logs or the response body.
+        raise ApiException(
+            status_code=422,
+            code=42210,
+            message="login_request_invalid",
+        ) from exc
 
     if load_session_mac_key_ring(settings) is None:
         raise ApiException(
