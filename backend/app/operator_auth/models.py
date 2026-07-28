@@ -23,7 +23,13 @@ from sqlalchemy.orm import relationship
 from app.common.time import utcnow
 from app.database import Base
 
-_HEX64 = r"^[0-9a-f]{64}$"
+# Portable ORM digest checks (length only). Full lowercase-hex regex is
+# enforced in the PostgreSQL Alembic migration, matching skills/durable pattern.
+
+
+def _sha256_check(column: str, *, name: str) -> CheckConstraint:
+    return CheckConstraint(f"length({column}) = 64", name=name)
+
 
 # Bounded revoke reasons used by session lifecycle (Task 4+) and maintenance.
 OPERATOR_SESSION_REVOKE_REASONS = (
@@ -121,24 +127,24 @@ class OperatorSession(Base):
     account = relationship("OperatorAccount", back_populates="sessions")
 
     __table_args__ = (
-        CheckConstraint(
-            f"token_digest ~ '{_HEX64}'",
+        _sha256_check(
+            "token_digest",
             name="ck_operator_session_token_digest_hex",
         ),
-        CheckConstraint(
-            f"csrf_digest ~ '{_HEX64}'",
+        _sha256_check(
+            "csrf_digest",
             name="ck_operator_session_csrf_digest_hex",
         ),
-        CheckConstraint(
-            f"request_digest ~ '{_HEX64}'",
+        _sha256_check(
+            "request_digest",
             name="ck_operator_session_request_digest_hex",
         ),
-        CheckConstraint(
-            f"user_agent_digest ~ '{_HEX64}'",
+        _sha256_check(
+            "user_agent_digest",
             name="ck_operator_session_user_agent_digest_hex",
         ),
-        CheckConstraint(
-            f"network_digest ~ '{_HEX64}'",
+        _sha256_check(
+            "network_digest",
             name="ck_operator_session_network_digest_hex",
         ),
         CheckConstraint(
@@ -203,16 +209,16 @@ class OperatorAuditEvent(Base):
     metadata_json = Column(JSONB, nullable=False, default=dict)
 
     __table_args__ = (
-        CheckConstraint(
-            f"request_digest ~ '{_HEX64}'",
+        _sha256_check(
+            "request_digest",
             name="ck_operator_audit_event_request_digest_hex",
         ),
-        CheckConstraint(
-            f"user_agent_digest ~ '{_HEX64}'",
+        _sha256_check(
+            "user_agent_digest",
             name="ck_operator_audit_event_user_agent_digest_hex",
         ),
-        CheckConstraint(
-            f"network_digest ~ '{_HEX64}'",
+        _sha256_check(
+            "network_digest",
             name="ck_operator_audit_event_network_digest_hex",
         ),
         CheckConstraint(
