@@ -666,6 +666,9 @@ export function SystemInitializationPage() {
   const [discoveredModels, setDiscoveredModels] = useState<string[]>([])
   const [discoveredEmbeddingModels, setDiscoveredEmbeddingModels] = useState<string[]>([])
   const [discoverError, setDiscoverError] = useState<string | null>(null)
+  // Setup token + operator password stay in component state only — never storage/Zustand/URL.
+  const [setupToken, setSetupToken] = useState('')
+  const [operatorPassword, setOperatorPassword] = useState('')
   const [rerankMode, setRerankMode] = useState<'enabled' | 'disabled'>(() => {
     return resolveRerankMode(useInitializationWizardStore.getState().runtimeConfigDraft.knowledgeGraph)
   })
@@ -822,6 +825,22 @@ export function SystemInitializationPage() {
       }
     }
 
+    // Exact Unicode password: no trim; minimum 12 code points.
+    if ([...operatorPassword].length < 12) {
+      return {
+        step: 5,
+        message: t('initialization.validation.operatorPassword'),
+      }
+    }
+
+    // Setup token: exact value, at least 32 UTF-8 bytes, never trimmed for transport.
+    if (new TextEncoder().encode(setupToken).length < 32) {
+      return {
+        step: 5,
+        message: t('initialization.validation.setupToken'),
+      }
+    }
+
     return null
   }
 
@@ -846,30 +865,39 @@ export function SystemInitializationPage() {
       return
     }
 
+    // Capture secrets into locals so finally can clear component state even on failure.
+    const setupTokenForRequest = setupToken
+    const operatorPasswordForRequest = operatorPassword
+
     try {
       const storeState = useInitializationWizardStore.getState()
       const result = await initializeMutation.mutateAsync({
-        locale,
-        aiCredential: {
-          name: aiCredential.name.trim(),
-          baseUrl: aiCredential.baseUrl.trim(),
-          apiKey: aiCredential.apiKey.trim(),
+        payload: {
+          locale,
+          // Exact password — never trim or normalize.
+          operatorPassword: operatorPasswordForRequest,
+          aiCredential: {
+            name: aiCredential.name.trim(),
+            baseUrl: aiCredential.baseUrl.trim(),
+            apiKey: aiCredential.apiKey.trim(),
+          },
+          llmModel: {
+            name: llmModelName.trim(),
+          },
+          entryTypes: entryTypes.map((item) => ({
+            code: item.origin === 'default' ? item.code : undefined,
+            name: item.name.trim(),
+            description: item.description?.trim() || undefined,
+            color: item.color?.trim() || undefined,
+            icon: item.icon?.trim() || undefined,
+            graphEnabled: true,
+            aiEnabled: true,
+            enabled: true,
+            origin: item.origin,
+          })),
+          runtimeConfig: buildRuntimeConfigPayload(storeState, locale),
         },
-        llmModel: {
-          name: llmModelName.trim(),
-        },
-        entryTypes: entryTypes.map((item) => ({
-          code: item.origin === 'default' ? item.code : undefined,
-          name: item.name.trim(),
-          description: item.description?.trim() || undefined,
-          color: item.color?.trim() || undefined,
-          icon: item.icon?.trim() || undefined,
-          graphEnabled: true,
-          aiEnabled: true,
-          enabled: true,
-          origin: item.origin,
-        })),
-        runtimeConfig: buildRuntimeConfigPayload(storeState, locale),
+        setupToken: setupTokenForRequest,
       })
 
       resetDraft(result.locale)
@@ -881,14 +909,19 @@ export function SystemInitializationPage() {
       })
       queryClient.setQueryData(initializationKeys.status, {
         initialized: true,
-        legacyAutoCompleted: false,
         locale: result.locale,
       })
+      // Initialization response sets session cookies; refresh session probe for OperatorGate.
       await queryClient.invalidateQueries({ queryKey: initializationKeys.status })
+      await queryClient.invalidateQueries({ queryKey: ['operator-session'] })
       toast.success(t('initialization.success'))
       navigate('/dashboard', { replace: true })
     } catch (error) {
       toast.error(error instanceof Error ? error.message : t('initialization.submitError'))
+    } finally {
+      // Always clear secrets from component state after an attempt.
+      setSetupToken('')
+      setOperatorPassword('')
     }
   }
 
@@ -1572,6 +1605,47 @@ export function SystemInitializationPage() {
           <p className="mt-4 text-sm leading-6 text-slate-600">
             {t('initialization.review.automationNote')}
           </p>
+        </div>
+
+        <div className="rounded-[24px] border border-slate-200 bg-white p-5 shadow-sm">
+          <p className="text-sm font-semibold text-slate-900">
+            {t('initialization.review.operatorAccessTitle')}
+          </p>
+          <p className="mt-2 text-sm leading-6 text-slate-600">
+            {t('initialization.review.operatorAccessDescription')}
+          </p>
+          <div className="mt-5 grid gap-5">
+            <div className="space-y-2">
+              <Label>{t('initialization.review.fields.setupToken')}</Label>
+              <input
+                type="password"
+                autoComplete="off"
+                value={setupToken}
+                onChange={(event) => setSetupToken(event.target.value)}
+                className={FIELD_CLASSNAME}
+                placeholder={t('initialization.review.placeholders.setupToken')}
+                disabled={initializeMutation.isPending}
+              />
+              <p className="text-xs leading-5 text-slate-500">
+                {t('initialization.review.hints.setupToken')}
+              </p>
+            </div>
+            <div className="space-y-2">
+              <Label>{t('initialization.review.fields.operatorPassword')}</Label>
+              <input
+                type="password"
+                autoComplete="new-password"
+                value={operatorPassword}
+                onChange={(event) => setOperatorPassword(event.target.value)}
+                className={FIELD_CLASSNAME}
+                placeholder={t('initialization.review.placeholders.operatorPassword')}
+                disabled={initializeMutation.isPending}
+              />
+              <p className="text-xs leading-5 text-slate-500">
+                {t('initialization.review.hints.operatorPassword')}
+              </p>
+            </div>
+          </div>
         </div>
       </div>
     )

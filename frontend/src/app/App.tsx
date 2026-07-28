@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next'
 import { AppProviders } from './providers'
 import { AppLayout } from '@/components/layout'
 import { InitializationGate } from '@/features/initialization'
+import { OperatorGate, OperatorLoginPage } from '@/features/operator-auth'
 
 function lazyNamed<TModule extends Record<string, ComponentType<any>>, TKey extends keyof TModule>(
   loader: () => Promise<TModule>,
@@ -92,8 +93,10 @@ export default function App() {
     <AppProviders>
       <BrowserRouter>
         <InitializationGate>
+          <OperatorGate>
           <Routes>
             <Route path="/initialize" element={withPageFallback(<SystemInitializationPage />)} />
+            <Route path="/login" element={withPageFallback(<OperatorLoginPage />)} />
             <Route path="/" element={<Navigate to="/dashboard" replace />} />
             <Route
               path="/settings/workflow-editor/:workflowId"
@@ -171,6 +174,7 @@ export default function App() {
               <Route path="/assistant" element={withPageFallback(<AssistantPage />)} />
             </Route>
           </Routes>
+          </OperatorGate>
         </InitializationGate>
       </BrowserRouter>
     </AppProviders>
