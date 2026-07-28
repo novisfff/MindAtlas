@@ -33,7 +33,6 @@ class SystemLocaleUpdateRequest(CamelModel):
 
 class InitializationStatusResponse(CamelModel):
     initialized: bool
-    legacy_auto_completed: bool = Field(alias="legacyAutoCompleted")
     locale: SystemLocale
 
 
@@ -287,10 +286,19 @@ class InitializationEntryTypeRequest(CamelModel):
 
 class InitializeSystemRequest(CamelModel):
     locale: SystemLocale
+    operator_password: str = Field(
+        min_length=1,
+        max_length=1024,
+        alias="operatorPassword",
+    )
     ai_credential: InitializationAiCredentialRequest = Field(alias="aiCredential")
     llm_model: InitializationLlmModelRequest = Field(alias="llmModel")
-    entry_types: list[InitializationEntryTypeRequest] = Field(default_factory=list, alias="entryTypes")
-    runtime_config: RuntimeConfigPayloadRequest | None = Field(default=None, alias="runtimeConfig")
+    entry_types: list[InitializationEntryTypeRequest] = Field(
+        default_factory=list, alias="entryTypes"
+    )
+    runtime_config: RuntimeConfigPayloadRequest | None = Field(
+        default=None, alias="runtimeConfig"
+    )
 
 
 class InitializationCompletionResponse(CamelModel):

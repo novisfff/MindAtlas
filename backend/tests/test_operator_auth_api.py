@@ -649,3 +649,334 @@ def test_auth_unavailable_without_key_ring(
     )
     assert response.status_code == 503
     assert response.json()["message"] == "operator_auth_unavailable"
+
+
+# ---------------------------------------------------------------------------
+# Task 6: setup-authorized clean initialization
+# ---------------------------------------------------------------------------
+
+
+_SETUP_TOKEN = "a" * 32  # 32 UTF-8 bytes; never logged in assertions below
+
+
+def _init_body(**overrides: Any) -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "locale": "en",
+        "operatorPassword": _PASSWORD,
+        "aiCredential": {
+            "name": "OpenAI",
+            "baseUrl": "https://api.openai.com/v1",
+            "apiKey": "sk-test-1234567890",
+        },
+        "llmModel": {"name": "gpt-4.1-mini"},
+        "entryTypes": [
+            {
+                "code": "KNOWLEDGE",
+                "name": "Knowledge",
+                "description": "Concepts",
+                "color": "#3B82F6",
+                "icon": "book",
+                "graphEnabled": True,
+                "aiEnabled": True,
+                "enabled": True,
+                "origin": "default",
+            }
+        ],
+    }
+    body.update(overrides)
+    return body
+
+
+@pytest.fixture
+def setup_settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
+    """Settings with a configured Setup Token + session MAC key, no operator yet."""
+    import os
+
+    reset_caches()
+    # Fernet key for AI credential staging during initialize.
+    os.environ.setdefault(
+        "AI_PROVIDER_FERNET_KEY",
+        "07v02gVBdreNrXjLJZkIMdohHtgy6aDFKBHxakHjbrQ=",
+    )
+    monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.setenv("MINDATLAS_CANONICAL_ORIGIN", _ORIGIN)
+    monkeypatch.setenv("CORS_ORIGINS", _ORIGIN)
+    monkeypatch.setenv("MINDATLAS_SESSION_HMAC_ACTIVE_KEY_ID", _KEY_ID)
+    monkeypatch.setenv("MINDATLAS_SESSION_HMAC_KEYS", _encoded_keys())
+    monkeypatch.setenv("MINDATLAS_INITIAL_SETUP_TOKEN", _SETUP_TOKEN)
+    settings = Settings(
+        APP_ENV="development",
+        MINDATLAS_CANONICAL_ORIGIN=_ORIGIN,
+        CORS_ORIGINS=_ORIGIN,
+        MINDATLAS_SESSION_HMAC_ACTIVE_KEY_ID=_KEY_ID,
+        MINDATLAS_SESSION_HMAC_KEYS=_encoded_keys(),
+        MINDATLAS_INITIAL_SETUP_TOKEN=_SETUP_TOKEN,
+        AI_PROVIDER_FERNET_KEY=os.environ["AI_PROVIDER_FERNET_KEY"],
+    )
+    get_settings.cache_clear()
+    monkeypatch.setattr("app.config.get_settings", lambda: settings)
+    monkeypatch.setattr("app.operator_auth.dependencies.get_settings", lambda: settings)
+    monkeypatch.setattr("app.operator_auth.router.get_settings", lambda: settings)
+    monkeypatch.setattr("app.system_settings.router.get_settings", lambda: settings)
+    return settings
+
+
+@pytest.fixture
+def uninitialized_session_factory() -> Iterator[sessionmaker]:
+    """Session factory with full metadata (for initialize) and no operator account."""
+    import os
+    import tempfile
+    from pathlib import Path
+
+    from sqlalchemy import create_engine, event
+
+    import tests._db  # noqa: F401 — JSONB→JSON for SQLite
+    import app.operator_auth.models  # noqa: F401 — register tables
+    from app.database import Base  # noqa: E402
+
+    os.environ.setdefault(
+        "AI_PROVIDER_FERNET_KEY",
+        "07v02gVBdreNrXjLJZkIMdohHtgy6aDFKBHxakHjbrQ=",
+    )
+
+    tmp = tempfile.NamedTemporaryFile(
+        prefix="mindatlas-setup-init-", suffix=".sqlite", delete=False
+    )
+    tmp_path = Path(tmp.name)
+    tmp.close()
+    engine = create_engine(
+        f"sqlite+pysqlite:///{tmp_path}",
+        connect_args={"check_same_thread": False},
+        future=True,
+    )
+
+    @event.listens_for(engine, "connect")
+    def _fk(dbapi_connection, _connection_record):  # noqa: ANN001
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+    # Full metadata so AI/entry/assistant tables exist for coordinator staging.
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(
+        bind=engine,
+        autoflush=False,
+        autocommit=False,
+        expire_on_commit=False,
+        future=True,
+    )
+    try:
+        yield factory
+    finally:
+        engine.dispose()
+        try:
+            tmp_path.unlink(missing_ok=True)  # type: ignore[call-arg]
+        except TypeError:
+            if tmp_path.exists():
+                tmp_path.unlink()
+
+
+@pytest.fixture
+def setup_app(
+    setup_settings: Settings,
+    uninitialized_session_factory: sessionmaker,
+) -> FastAPI:
+    application = FastAPI()
+    register_exception_handlers(application)
+
+    @application.middleware("http")
+    async def _request_id_middleware(request, call_next):  # noqa: ANN001
+        request_id = request.headers.get("x-request-id") or uuid4().hex
+        request.state.request_id = request_id
+        token = set_request_id(request_id)
+        try:
+            response = await call_next(request)
+        finally:
+            reset_request_id(token)
+        response.headers["x-request-id"] = request_id
+        return response
+
+    def _override_db() -> Iterator[Session]:
+        db = uninitialized_session_factory()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    application.dependency_overrides[get_db] = _override_db
+    application.dependency_overrides[get_settings] = lambda: setup_settings
+    application.include_router(operator_auth_router)
+    application.include_router(system_settings_router)
+    return application
+
+
+@pytest.fixture
+def setup_client(setup_app: FastAPI) -> Iterator[TestClient]:
+    with TestClient(setup_app) as test_client:
+        yield test_client
+
+
+def _setup_headers(**extra: str) -> dict[str, str]:
+    headers = _origin_headers(**{"Authorization": f"Setup {_SETUP_TOKEN}"})
+    headers.update(extra)
+    return headers
+
+
+def test_initialize_rejects_invalid_setup_before_body_validation(
+    setup_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Invalid Setup authorization must 401 before body domain validation."""
+    calls: list[str] = []
+
+    from app.system_settings import schemas as schemas_mod
+
+    real_validate = schemas_mod.InitializeSystemRequest.model_validate
+
+    @classmethod  # type: ignore[misc]
+    def spy_validate(cls, raw):  # noqa: ANN001
+        calls.append("validated")
+        return real_validate(raw)
+
+    monkeypatch.setattr(
+        schemas_mod.InitializeSystemRequest,
+        "model_validate",
+        spy_validate,
+    )
+
+    # Missing Authorization entirely + deliberately invalid body.
+    response = setup_client.post(
+        "/api/system-settings/initialize",
+        json={"locale": "not-a-locale", "operatorPassword": "x"},
+        headers=_origin_headers(),
+    )
+    assert response.status_code == 401
+    assert response.json()["message"] == "invalid_setup_authorization"
+    assert calls == []
+
+    # Wrong token also 401s first.
+    response = setup_client.post(
+        "/api/system-settings/initialize",
+        json={"locale": "not-a-locale"},
+        headers=_origin_headers(**{"Authorization": "Setup wrong-token-value-xxxxxxxx"}),
+    )
+    assert response.status_code == 401
+    assert response.json()["message"] == "invalid_setup_authorization"
+    assert calls == []
+    # Token must never echo.
+    dumped = json.dumps(response.json())
+    assert _SETUP_TOKEN not in dumped
+    assert "wrong-token" not in dumped
+
+
+def test_initialize_rejects_cross_origin_before_setup(
+    setup_client: TestClient,
+) -> None:
+    response = setup_client.post(
+        "/api/system-settings/initialize",
+        json=_init_body(),
+        headers={
+            "Origin": "https://evil.example",
+            "Sec-Fetch-Site": "cross-site",
+            "Content-Type": "application/json",
+            "Authorization": f"Setup {_SETUP_TOKEN}",
+        },
+    )
+    assert response.status_code == 403
+    assert response.json()["message"] == "same_origin_required"
+
+
+def test_initialize_requires_json_content_type(setup_client: TestClient) -> None:
+    response = setup_client.post(
+        "/api/system-settings/initialize",
+        content=b'{"locale":"en"}',
+        headers={
+            "Origin": _ORIGIN,
+            "Sec-Fetch-Site": "same-origin",
+            "Content-Type": "text/plain",
+            "Authorization": f"Setup {_SETUP_TOKEN}",
+        },
+    )
+    assert response.status_code == 415
+    assert response.json()["message"] == "json_content_type_required"
+
+
+def test_initialize_success_sets_session_cookies(
+    setup_client: TestClient,
+    uninitialized_session_factory: sessionmaker,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.system_settings.initialization_service.sync_scheduler",
+        lambda: None,
+    )
+    response = setup_client.post(
+        "/api/system-settings/initialize",
+        json=_init_body(),
+        headers=_setup_headers(),
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["success"] is True
+    assert body["data"]["initialized"] is True
+    assert body["data"]["locale"] == "en"
+    assert "legacyAutoCompleted" not in body["data"]
+
+    session = response.cookies.get(SESSION_COOKIE_NAME)
+    csrf = response.cookies.get(CSRF_COOKIE_NAME)
+    assert session and csrf and session != csrf
+    cookies = _set_cookies(response)
+    assert any("HttpOnly" in item and SESSION_COOKIE_NAME in item for item in cookies)
+    assert all("SameSite=strict" in item for item in cookies)
+
+    # Secrets never echo.
+    dumped = json.dumps(body)
+    assert _PASSWORD not in dumped
+    assert _SETUP_TOKEN not in dumped
+    assert session not in dumped
+    assert csrf not in dumped
+
+    # One enabled operator + clean marker.
+    from app.operator_auth.models import OperatorAccount
+    from app.system_settings.initialization_service import (
+        SYSTEM_INITIALIZATION_STATE_KEY,
+    )
+    from app.system_settings.models import AppSetting
+
+    db = uninitialized_session_factory()
+    try:
+        assert db.query(OperatorAccount).filter(OperatorAccount.enabled.is_(True)).count() == 1
+        marker = (
+            db.query(AppSetting)
+            .filter(AppSetting.key == SYSTEM_INITIALIZATION_STATE_KEY)
+            .first()
+        )
+        assert marker is not None
+        assert marker.value_json.get("initialized") is True
+        assert marker.value_json.get("source") == "user"
+    finally:
+        db.close()
+
+    # Setup token unusable after init (system already initialized).
+    again = setup_client.post(
+        "/api/system-settings/initialize",
+        json=_init_body(locale="zh"),
+        headers=_setup_headers(),
+    )
+    assert again.status_code == 409
+    assert again.json()["message"] == "system_already_initialized"
+
+    # Session cookies work for authenticated probe.
+    probe = setup_client.get("/api/operator-auth/session")
+    assert probe.status_code == 200
+    assert probe.json()["data"]["authenticated"] is True
+    assert probe.json()["data"]["role"] == "operator"
+
+
+def test_initialization_status_is_clean_only(setup_client: TestClient) -> None:
+    response = setup_client.get("/api/system-settings/initialization-status")
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["initialized"] is False
+    assert "legacyAutoCompleted" not in data
+    assert "locale" in data

@@ -311,23 +311,23 @@ def require_csrf(
         ) from exc
 
 
-def require_setup_authorization(
-    request: Request,
-    settings: Settings = Depends(get_settings),
+def verify_setup_header(
+    authorization_header: str | None,
+    *,
+    configured_token: str | None,
 ) -> SetupAuthorization:
     """Validate ``Authorization: Setup <token>`` without echoing the secret.
 
     The Setup Token is never a Principal and never appears in responses.
+    Accepts the raw header value and the configured secret string (or ``None``).
     """
-    header = request.headers.get("authorization") or ""
+    header = authorization_header or ""
     scheme, _, remainder = header.partition(" ")
     provided = remainder.strip() if scheme.lower() == SETUP_AUTH_SCHEME.lower() else ""
-    expected = ""
-    if settings.initial_setup_token is not None:
-        expected = settings.initial_setup_token.get_secret_value() or ""
+    expected = configured_token or ""
 
-    # Constant-time compare only when both sides are non-empty and equal length
-    # is not guaranteed — digests avoid length oracle on the raw token.
+    # Constant-time compare only when both sides are non-empty; digests avoid a
+    # length oracle on the raw token.
     if not expected or not provided:
         raise ApiException(
             status_code=401,
@@ -343,3 +343,17 @@ def require_setup_authorization(
             message="invalid_setup_authorization",
         )
     return SetupAuthorization(validated=True)
+
+
+def require_setup_authorization(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+) -> SetupAuthorization:
+    """FastAPI dependency wrapper around ``verify_setup_header``."""
+    expected = ""
+    if settings.initial_setup_token is not None:
+        expected = settings.initial_setup_token.get_secret_value() or ""
+    return verify_setup_header(
+        request.headers.get("authorization"),
+        configured_token=expected or None,
+    )

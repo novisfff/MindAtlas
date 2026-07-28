@@ -334,6 +334,21 @@ class OperatorAuthService:
         self.db.commit()
         return issued
 
+    def issue_initial_session(
+        self,
+        operator_account_id: UUID,
+        context: RequestSecurityContext,
+    ) -> IssuedSession:
+        """Issue the first browser session after a successful init commit.
+
+        Runs in a fresh transaction independent of the outer init unit of work.
+        Does not emit ``login_succeeded`` (password was not re-checked here).
+        """
+        account = self.repository.get_account_by_id(operator_account_id)
+        if account is None or not account.enabled:
+            raise RuntimeError("operator_auth_unavailable")
+        return self.issue_session(account, context, commit=True)
+
     # ------------------------------------------------------------------
     # Resolve / touch / rotate
     # ------------------------------------------------------------------
