@@ -101,6 +101,16 @@ function readCookie(name: string): string | undefined {
     ?.slice(prefix.length)
 }
 
+/** Decode a CSRF cookie value; return undefined on malformed percent-encoding. */
+function safeDecodeCookieValue(value: string): string | undefined {
+  try {
+    return decodeURIComponent(value)
+  } catch {
+    // Malformed `%` sequences must not throw client-side; omit CSRF and fail closed server-side.
+    return undefined
+  }
+}
+
 function reportSessionExpired(path: string, status: number): void {
   if (
     status === 401 &&
@@ -183,7 +193,10 @@ export class ApiClient {
 
     if (!SAFE_METHODS.has(options.method.toUpperCase()) && !headers.has(CSRF_HEADER)) {
       const csrf = readCookie(CSRF_COOKIE)
-      if (csrf) headers.set(CSRF_HEADER, decodeURIComponent(csrf))
+      if (csrf) {
+        const decoded = safeDecodeCookieValue(csrf)
+        if (decoded !== undefined) headers.set(CSRF_HEADER, decoded)
+      }
     }
 
     const init: RequestInit = {

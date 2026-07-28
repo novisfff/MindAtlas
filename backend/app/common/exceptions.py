@@ -41,6 +41,46 @@ def _make_json_safe(value: Any) -> Any:
     return str(value)
 
 
+# Keys that commonly carry submitted request values (incl. secrets) in Pydantic v2
+# validation error dicts. Loc/msg/type remain for clients; inputs are redacted.
+_VALIDATION_ERROR_REDACT_KEYS = frozenset({"input", "url"})
+
+
+def sanitize_validation_errors(errors: Any) -> list[Any]:
+    """Return client/log-safe validation errors without submitted input values.
+
+    Pydantic v2 ``exc.errors()`` includes an ``input`` field with the raw
+    submitted value (e.g. passwords on change-password). Strip that and other
+    high-risk keys while preserving loc/msg/type for debugging. Nested ``ctx``
+    is retained only as JSON-safe constraint metadata (not raw inputs).
+    """
+    if not isinstance(errors, list):
+        safe = _make_json_safe(errors)
+        return safe if isinstance(safe, list) else [safe]
+
+    sanitized: list[Any] = []
+    for error in errors:
+        if not isinstance(error, dict):
+            sanitized.append(_make_json_safe(error))
+            continue
+        cleaned: dict[str, Any] = {}
+        for key, value in error.items():
+            key_str = str(key)
+            if key_str in _VALIDATION_ERROR_REDACT_KEYS:
+                continue
+            if key_str == "ctx" and isinstance(value, dict):
+                # Keep schema constraint metadata; drop any nested input-like keys.
+                cleaned[key_str] = {
+                    str(ck): _make_json_safe(cv)
+                    for ck, cv in value.items()
+                    if str(ck) not in _VALIDATION_ERROR_REDACT_KEYS
+                }
+                continue
+            cleaned[key_str] = _make_json_safe(value)
+        sanitized.append(cleaned)
+    return sanitized
+
+
 def register_exception_handlers(app: "FastAPI", *, debug: bool = False) -> None:
     from fastapi.exceptions import RequestValidationError
     from fastapi.responses import JSONResponse
@@ -76,19 +116,20 @@ def register_exception_handlers(app: "FastAPI", *, debug: bool = False) -> None:
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
         request_id = get_request_id() or getattr(request.state, "request_id", None)
+        safe_errors = sanitize_validation_errors(exc.errors())
         logger.warning(
             "validation_error request_id=%s method=%s path=%s errors=%s",
             request_id,
             request.method,
             request.url.path,
-            exc.errors(),
+            safe_errors,
         )
         return JSONResponse(
             status_code=422,
             content=ApiResponse.fail(
                 code=42200,
                 message="Validation Error",
-                data=_make_json_safe(exc.errors()),
+                data=safe_errors,
             ).model_dump(),
         )
 

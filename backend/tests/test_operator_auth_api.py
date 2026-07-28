@@ -513,6 +513,38 @@ def test_password_change_clears_cookies_and_revokes(
     assert login.status_code == 200
 
 
+def test_password_change_validation_422_does_not_echo_submitted_secrets(
+    authenticated_client: TestClient,
+) -> None:
+    """Pydantic field rejection must not echo password/input in the 422 body."""
+    # Over max_length (1024) so the submitted secret lands in error.input without sanitization.
+    leaked_current = "cur-secret-" + ("A" * 1020)
+    leaked_new = "new-secret-" + ("B" * 1020)
+    assert len(leaked_current) > 1024
+    assert len(leaked_new) > 1024
+    response = authenticated_client.post(
+        "/api/operator-auth/password",
+        json={
+            "currentPassword": leaked_current,
+            "newPassword": leaked_new,
+        },
+        headers=_csrf_headers(authenticated_client),
+    )
+    assert response.status_code == 422
+    dumped = response.text
+    assert leaked_current not in dumped
+    assert leaked_new not in dumped
+    assert "cur-secret-" not in dumped
+    assert "new-secret-" not in dumped
+    payload = response.json()
+    assert payload["code"] == 42200
+    assert isinstance(payload["data"], list)
+    for error in payload["data"]:
+        assert "input" not in error
+        assert "cur-secret-" not in json.dumps(error)
+        assert "new-secret-" not in json.dumps(error)
+
+
 def test_revoke_all_clears_cookies(authenticated_client: TestClient) -> None:
     response = authenticated_client.post(
         "/api/operator-auth/sessions/revoke-all",

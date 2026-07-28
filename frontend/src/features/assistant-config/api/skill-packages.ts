@@ -7,7 +7,7 @@
  * UI never supplies authority. Session cookies (and CSRF in Task 9) carry
  * the Operator principal — never client-asserted identity headers.
  */
-import { apiClient, ApiError, isApiError } from '@/lib/api/client'
+import { apiClient, ApiError, isApiError, SESSION_EXPIRED_EVENT } from '@/lib/api/client'
 
 function readViteEnv(key: string): string | undefined {
   try {
@@ -393,6 +393,10 @@ export async function fetchSkillPackageResourceBlob(
     credentials: 'same-origin',
   })
   if (!response.ok) {
+    // Match ApiClient: raw fetch bypasses throwApiError, so dispatch session expiry here.
+    if (response.status === 401 && typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent(SESSION_EXPIRED_EVENT))
+    }
     throw new ApiError({
       message: `Failed to fetch resource ${resourcePath}`,
       status: response.status,

@@ -1,9 +1,10 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
   SKILL_ADMIN_BASE,
   SKILL_PACKAGES_BASE,
   archiveSkillPackage,
+  fetchSkillPackageResourceBlob,
   isDangerousMarkupMediaType,
   isRasterImageMediaType,
   isScriptResourcePath,
@@ -11,9 +12,14 @@ import {
   mapSkillPackageError,
   newRequestId,
 } from './skill-packages'
-import { ApiError, apiClient } from '@/lib/api/client'
+import { ApiError, apiClient, SESSION_EXPIRED_EVENT } from '@/lib/api/client'
 
 describe('skill-packages API contract', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
   it('pins Plan 01 and Plan 09 path prefixes', () => {
     expect(SKILL_PACKAGES_BASE).toBe('/api/assistant-config/skill-packages')
     expect(SKILL_ADMIN_BASE).toBe('/api/assistant-config/skill-admin')
@@ -70,5 +76,49 @@ describe('skill-packages API contract', () => {
     expect(headers.has('X-MindAtlas-Operator-Id')).toBe(false)
     expect(headers.has('X-MindAtlas-Operator-Role')).toBe(false)
     spy.mockRestore()
+  })
+
+  it('dispatches SESSION_EXPIRED_EVENT when resource blob fetch returns 401', async () => {
+    const listener = vi.fn()
+    window.addEventListener(SESSION_EXPIRED_EVENT, listener)
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 401,
+        blob: async () => new Blob(),
+      }),
+    )
+
+    await expect(
+      fetchSkillPackageResourceBlob('pkg-1', 'ver-1', 'references/notes.md'),
+    ).rejects.toMatchObject({
+      name: 'ApiError',
+      status: 401,
+    })
+    expect(listener).toHaveBeenCalledTimes(1)
+    window.removeEventListener(SESSION_EXPIRED_EVENT, listener)
+  })
+
+  it('does not dispatch SESSION_EXPIRED_EVENT on non-401 resource blob failures', async () => {
+    const listener = vi.fn()
+    window.addEventListener(SESSION_EXPIRED_EVENT, listener)
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 404,
+        blob: async () => new Blob(),
+      }),
+    )
+
+    await expect(
+      fetchSkillPackageResourceBlob('pkg-1', 'ver-1', 'references/notes.md'),
+    ).rejects.toMatchObject({
+      name: 'ApiError',
+      status: 404,
+    })
+    expect(listener).not.toHaveBeenCalled()
+    window.removeEventListener(SESSION_EXPIRED_EVENT, listener)
   })
 })
