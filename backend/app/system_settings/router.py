@@ -8,6 +8,8 @@ from sqlalchemy.orm import Session
 from app.common.exceptions import ApiException
 from app.common.responses import ApiResponse
 from app.database import get_db
+from app.operator_auth.contracts import OperatorPrincipal
+from app.operator_auth.dependencies import require_csrf, require_operator_principal
 from app.system_settings.initialization_service import SystemInitializationService
 from app.system_settings.runtime_config_service import SystemRuntimeConfigService
 from app.system_settings.schemas import (
@@ -90,7 +92,11 @@ def get_system_locale(db: Session = Depends(get_db)) -> ApiResponse:
 def update_system_locale(
     request: SystemLocaleUpdateRequest,
     db: Session = Depends(get_db),
+    _principal: OperatorPrincipal = Depends(require_operator_principal),
+    _: None = Depends(require_csrf),
 ) -> ApiResponse:
+    # Browser control-plane mutation: Operator + CSRF (Task 5 boundary).
+    # Task 7 will hoist this into the protected parent router.
     service = SystemSettingsService(db)
     try:
         locale = service.set_locale(request.locale)

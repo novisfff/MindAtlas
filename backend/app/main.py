@@ -54,6 +54,7 @@ from app.openclaw_integration.router import (
 )
 from app.report.router import router as report_router
 from app.scheduler import setup_scheduler, shutdown_scheduler
+from app.operator_auth.router import router as operator_auth_router
 from app.system_settings.router import router as system_settings_router
 from app.system_settings.service import normalize_system_locale
 
@@ -149,6 +150,7 @@ async def request_logging_middleware(request, call_next):
     return response
 
 # Register routers
+app.include_router(operator_auth_router)
 app.include_router(entry_type_router)
 app.include_router(tag_router)
 app.include_router(entry_router)
