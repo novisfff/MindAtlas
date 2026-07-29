@@ -4,6 +4,7 @@ import { Menu } from 'lucide-react'
 import { useSearchParams } from 'react-router-dom'
 import { uiChrome, uiRadius, uiSurface } from '@/components/ui/styles'
 import { cn } from '@/lib/utils'
+import { AssistantReadinessGate } from '@/features/assistant-runtime'
 import { ChatWindow } from './components/ChatWindow'
 import { ConversationList } from './components/ConversationList'
 import { ChatStoreProvider } from './components/ChatStoreProvider'
@@ -264,7 +265,9 @@ function AssistantPageContent() {
           </div>
         </header>
 
-        <ChatWindow className="min-h-0 flex-1" />
+        <AssistantReadinessGate>
+          <ChatWindow className="min-h-0 flex-1" />
+        </AssistantReadinessGate>
       </div>
     </div>
   )

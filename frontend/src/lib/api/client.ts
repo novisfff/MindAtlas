@@ -177,6 +177,17 @@ export interface ApiMutationOptions extends ApiCallOptions {
   body?: unknown
 }
 
+export interface StatusAwareResult<T> {
+  status: number
+  data: T
+}
+
+type InternalRequestOptions = (ApiCallOptions | ApiMutationOptions) & {
+  method: string
+  acceptedErrorStatuses?: ReadonlySet<number>
+  returnStatus?: boolean
+}
+
 export class ApiClient {
   private readonly baseUrl: string
   private readonly fetcher: typeof fetch
@@ -189,30 +200,60 @@ export class ApiClient {
     this.defaultHeaders = config.defaultHeaders
   }
 
-  get<T>(path: string, options: ApiCallOptions = {}) {
+  get<T>(path: string, options: ApiCallOptions = {}): Promise<T> {
     return this.request<T>(path, { ...options, method: 'GET' })
   }
 
-  post<T>(path: string, options: ApiMutationOptions = {}) {
+  /**
+   * GET that accepts specific non-2xx HTTP statuses when the body is still a
+   * valid ApiResponse with code === 0 (e.g. public /ready returning 503).
+   * Mutations intentionally do not expose this path.
+   */
+  getAllowingStatuses<T>(
+    path: string,
+    statuses: readonly number[],
+    options: ApiCallOptions = {},
+  ): Promise<StatusAwareResult<T>> {
+    return this.request<T>(path, {
+      ...options,
+      method: 'GET',
+      acceptedErrorStatuses: new Set(statuses),
+      returnStatus: true,
+    })
+  }
+
+  post<T>(path: string, options: ApiMutationOptions = {}): Promise<T> {
     return this.request<T>(path, { ...options, method: 'POST' })
   }
 
-  put<T>(path: string, options: ApiMutationOptions = {}) {
+  put<T>(path: string, options: ApiMutationOptions = {}): Promise<T> {
     return this.request<T>(path, { ...options, method: 'PUT' })
   }
 
-  patch<T>(path: string, options: ApiMutationOptions = {}) {
+  patch<T>(path: string, options: ApiMutationOptions = {}): Promise<T> {
     return this.request<T>(path, { ...options, method: 'PATCH' })
   }
 
-  delete<T>(path: string, options: ApiCallOptions = {}) {
+  delete<T>(path: string, options: ApiCallOptions = {}): Promise<T> {
     return this.request<T>(path, { ...options, method: 'DELETE' })
   }
 
+  private request<T>(
+    path: string,
+    options: InternalRequestOptions & { returnStatus: true },
+  ): Promise<StatusAwareResult<T>>
+  private request<T>(
+    path: string,
+    options: InternalRequestOptions & { returnStatus?: false | undefined },
+  ): Promise<T>
+  private request<T>(
+    path: string,
+    options: InternalRequestOptions,
+  ): Promise<T | StatusAwareResult<T>>
   private async request<T>(
     path: string,
-    options: (ApiCallOptions | ApiMutationOptions) & { method: string }
-  ): Promise<T> {
+    options: InternalRequestOptions,
+  ): Promise<T | StatusAwareResult<T>> {
     const queryString = buildQueryString(options.query)
     const url = joinUrl(this.baseUrl, `${path}${queryString}`)
 
@@ -262,20 +303,47 @@ export class ApiClient {
 
     const rawText = await response.text()
     const payload: unknown = rawText ? parseMaybeJson(rawText) : null
+    const accepted =
+      options.acceptedErrorStatuses != null &&
+      options.acceptedErrorStatuses.has(response.status)
 
-    if (response.ok) {
+    if (response.ok || accepted) {
       if (isApiResponse(payload)) {
-        if (payload.code === 0) return payload.data as T
+        if (payload.code === 0) {
+          const data = payload.data as T
+          if (options.returnStatus) {
+            return { status: response.status, data }
+          }
+          return data
+        }
         return throwApiError(
           path,
           new ApiError({
-            message: payload.message || 'API error',
+            message: payload.message || (response.ok ? 'API error' : response.statusText || 'Request failed'),
             status: response.status,
             code: payload.code,
             url,
             details: payload.data,
           }),
         )
+      }
+      // Accepted non-2xx still requires a structurally valid ApiResponse envelope.
+      if (accepted && !response.ok) {
+        return throwApiError(
+          path,
+          new ApiError({
+            message:
+              (typeof payload === 'string' && payload.trim()) ||
+              response.statusText ||
+              'Request failed',
+            status: response.status,
+            url,
+            details: payload,
+          }),
+        )
+      }
+      if (options.returnStatus) {
+        return { status: response.status, data: payload as T }
       }
       return payload as T
     }

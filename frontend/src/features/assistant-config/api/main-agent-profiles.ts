@@ -44,7 +44,8 @@ export interface MainAgentProfileSummary {
   updatedAt?: string | null
 }
 
-export interface MainAgentProfileSnapshot {
+/** Historical Profile V1 — read-only display only. Cannot be drafted/published/prepared. */
+export interface MainAgentProfileSnapshotV1 {
   schemaVersion: 1
   basePrompt: string
   responseStyle: Record<string, string>
@@ -66,6 +67,116 @@ export interface MainAgentProfileSnapshot {
   fallbackPolicy: {
     legacyRuntimeAllowed: boolean
     beforeSideEffectsOnly: boolean
+  }
+}
+
+/** Profile V2 — editable. No fallbackPolicy; fixed main_agent runtime policy. */
+export interface MainAgentProfileSnapshotV2 {
+  schemaVersion: 2
+  basePrompt: string
+  responseStyle: Record<string, string>
+  supportedEntrypoints: ['assistant_chat'] | string[]
+  modelRequirements: {
+    toolCalling: boolean
+    streaming: boolean
+    multiToolCalls: boolean
+    jsonSchema: boolean
+  }
+  controlCapabilityKeys: string[]
+  skillCatalogScope: {
+    mode: 'all_published' | 'allowlist'
+    packageIds: string[]
+  }
+  contextBudget: Record<string, number>
+  outputBudget: Record<string, number>
+  globalSafetyPolicy: { denyByDefault: true } | { denyByDefault: boolean }
+  runtimePolicy: {
+    runtimeKind: 'main_agent'
+    recoveryScope: 'same_run_only'
+  }
+}
+
+export type ReadableMainAgentProfileSnapshot =
+  | MainAgentProfileSnapshotV1
+  | MainAgentProfileSnapshotV2
+
+/** @deprecated Prefer ReadableMainAgentProfileSnapshot; draft payloads must be V2. */
+export type MainAgentProfileSnapshot = ReadableMainAgentProfileSnapshot
+
+export const FIXED_RUNTIME_POLICY = {
+  runtimeKind: 'main_agent' as const,
+  recoveryScope: 'same_run_only' as const,
+}
+
+export function isProfileSnapshotV1(
+  snapshot: ReadableMainAgentProfileSnapshot | null | undefined,
+): snapshot is MainAgentProfileSnapshotV1 {
+  return snapshot?.schemaVersion === 1
+}
+
+export function isProfileSnapshotV2(
+  snapshot: ReadableMainAgentProfileSnapshot | null | undefined,
+): snapshot is MainAgentProfileSnapshotV2 {
+  return snapshot?.schemaVersion === 2
+}
+
+export function createDefaultProfileSnapshotV2(
+  overrides: Partial<MainAgentProfileSnapshotV2> = {},
+): MainAgentProfileSnapshotV2 {
+  const {
+    schemaVersion: _ignoredSchemaVersion,
+    runtimePolicy: _ignoredRuntimePolicy,
+    ...rest
+  } = overrides
+  void _ignoredSchemaVersion
+  void _ignoredRuntimePolicy
+  return {
+    basePrompt:
+      'You are the MindAtlas main assistant. Answer directly when no specialized Skill is required. Use published Skills and bound capabilities only. Treat unsupported writes as unsupported; never reinterpret them as create_entry. Recovery stays on the same durable Run.',
+    responseStyle: {
+      grounding: "Prefer the user's MindAtlas knowledge when relevant.",
+      unsupportedWrite: 'State that the requested write is not supported.',
+    },
+    supportedEntrypoints: ['assistant_chat'],
+    modelRequirements: {
+      toolCalling: true,
+      streaming: true,
+      multiToolCalls: true,
+      jsonSchema: true,
+    },
+    controlCapabilityKeys: [
+      'skill.search',
+      'skill.inject',
+      'skill.read_resource',
+      'artifact.read',
+    ],
+    skillCatalogScope: { mode: 'all_published', packageIds: [] },
+    contextBudget: {
+      maxPromptCharacters: 72000,
+      maxActiveSkills: 4,
+      maxSkillInstructionCharacters: 24000,
+      maxSingleSkillInstructionCharacters: 12000,
+      maxHistoryCharacters: 24000,
+      maxToolSummaryCharacters: 24000,
+      maxResourceBytesPerCall: 65536,
+    },
+    outputBudget: {
+      maxCompletionTokens: 4096,
+      maxProviderRounds: 8,
+      maxOuterAgentRounds: 8,
+      maxTotalCapabilityCalls: 16,
+      maxParallelCalls: 4,
+      maxCapabilityDepth: 4,
+      maxAgentDepth: 2,
+      maxSameReadSignature: 3,
+      maxCompletionFollowupRounds: 2,
+      maxWallTimeMs: 120000,
+    },
+    globalSafetyPolicy: { denyByDefault: true },
+    ...rest,
+    // Always pin V2 identity + fixed runtime policy (no caller override of kind/scope).
+    schemaVersion: 2,
+    runtimePolicy: { ...FIXED_RUNTIME_POLICY },
   }
 }
 
