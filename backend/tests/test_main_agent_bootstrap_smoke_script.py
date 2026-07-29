@@ -24,7 +24,12 @@ from scripts.smoke_main_agent_bootstrap import (  # noqa: E402
     SENSITIVE_FRAGMENTS,
     ComposeRunner,
     EvidenceSchemaError,
+    SmokeFailure,
+    extract_status_fields,
     finalize_evidence,
+    parse_sse_status_buffer,
+    resolve_chat_completion_evidence,
+    terminal_after_active_cleared,
     validate_evidence,
     write_evidence_atomic,
 )
@@ -355,3 +360,132 @@ def test_compose_down_command_includes_volumes() -> None:
     assert "down" in args
     assert "--volumes" in args
     assert "--remove-orphans" in args
+
+
+def test_terminal_after_active_cleared_never_soft_assumes_completed() -> None:
+    """Active-cleared path must not mint completed without an observed terminal."""
+    assert terminal_after_active_cleared(stream_observed_terminal=None) is None
+    assert terminal_after_active_cleared(stream_observed_terminal="") is None
+    assert terminal_after_active_cleared(stream_observed_terminal="running") is None
+    assert terminal_after_active_cleared(stream_observed_terminal="queued") is None
+    assert terminal_after_active_cleared(stream_observed_terminal="completed") == "completed"
+    assert terminal_after_active_cleared(stream_observed_terminal="failed") == "failed"
+    assert terminal_after_active_cleared(stream_observed_terminal="cancelled") == "cancelled"
+
+
+def test_parse_sse_status_buffer_extracts_terminal_kind_and_run_id() -> None:
+    text = "\n".join(
+        [
+            "event: run_status",
+            'data: {"status": "queued", "runtimeKind": "main_agent", "runId": "run-1", "seq": 1}',
+            "",
+            "event: content_delta",
+            'data: {"delta": "should-not-be-required", "runId": "run-1", "seq": 2}',
+            "",
+            "event: run_status",
+            'data: {"status": "completed", "runId": "run-1", "seq": 3}',
+            "",
+            "data: [DONE]",
+        ]
+    )
+    obs = parse_sse_status_buffer(text)
+    assert obs.terminal_status == "completed"
+    assert obs.runtime_kinds == frozenset({"main_agent"})
+    assert obs.run_ids == frozenset({"run-1"})
+
+
+def test_parse_sse_status_buffer_ignores_malformed_and_non_terminal() -> None:
+    text = "\n".join(
+        [
+            "data: not-json",
+            'data: {"status": "running", "runtime_kind": "main_agent", "run_id": "r2"}',
+            'data: ["array"]',
+        ]
+    )
+    obs = parse_sse_status_buffer(text)
+    assert obs.terminal_status is None
+    assert obs.runtime_kinds == frozenset({"main_agent"})
+    assert obs.run_ids == frozenset({"r2"})
+
+
+def test_extract_status_fields_reads_camel_and_snake() -> None:
+    assert extract_status_fields(
+        {"status": "completed", "runtimeKind": "main_agent", "runId": "a"}
+    ) == ("completed", "main_agent", "a")
+    assert extract_status_fields(
+        {"status": "failed", "runtime_kind": "legacy", "run_id": "b"}
+    ) == ("failed", "legacy", "b")
+    assert extract_status_fields({}) == (None, None, None)
+
+
+def test_resolve_chat_completion_evidence_happy_path() -> None:
+    terminal, kind, count = resolve_chat_completion_evidence(
+        observed_terminal="completed",
+        observed_runtime_kinds={"main_agent"},
+        observed_run_ids={"run-abc"},
+        admitted_run_id="run-abc",
+    )
+    assert terminal == "completed"
+    assert kind == "main_agent"
+    assert count == 1
+
+
+def test_resolve_chat_completion_evidence_fails_unobserved_terminal() -> None:
+    with pytest.raises(SmokeFailure, match="unobserved"):
+        resolve_chat_completion_evidence(
+            observed_terminal="",
+            observed_runtime_kinds={"main_agent"},
+            observed_run_ids={"run-abc"},
+            admitted_run_id="run-abc",
+        )
+
+
+def test_resolve_chat_completion_evidence_rejects_non_completed_terminal() -> None:
+    with pytest.raises(SmokeFailure, match="expected completed got failed"):
+        resolve_chat_completion_evidence(
+            observed_terminal="failed",
+            observed_runtime_kinds={"main_agent"},
+            observed_run_ids={"run-abc"},
+            admitted_run_id="run-abc",
+        )
+
+
+def test_resolve_chat_completion_evidence_requires_observed_runtime_kind() -> None:
+    with pytest.raises(SmokeFailure, match="runtimeKind never observed"):
+        resolve_chat_completion_evidence(
+            observed_terminal="completed",
+            observed_runtime_kinds=set(),
+            observed_run_ids={"run-abc"},
+            admitted_run_id="run-abc",
+        )
+    with pytest.raises(SmokeFailure, match="runtimeKind expected main_agent"):
+        resolve_chat_completion_evidence(
+            observed_terminal="completed",
+            observed_runtime_kinds={"legacy"},
+            observed_run_ids={"run-abc"},
+            admitted_run_id="run-abc",
+        )
+
+
+def test_resolve_chat_completion_evidence_requires_single_admitted_run_id() -> None:
+    with pytest.raises(SmokeFailure, match="no run ids observed"):
+        resolve_chat_completion_evidence(
+            observed_terminal="completed",
+            observed_runtime_kinds={"main_agent"},
+            observed_run_ids=set(),
+            admitted_run_id="run-abc",
+        )
+    with pytest.raises(SmokeFailure, match="exactly one run id"):
+        resolve_chat_completion_evidence(
+            observed_terminal="completed",
+            observed_runtime_kinds={"main_agent"},
+            observed_run_ids={"run-abc", "run-other"},
+            admitted_run_id="run-abc",
+        )
+    with pytest.raises(SmokeFailure, match="exactly one run id"):
+        resolve_chat_completion_evidence(
+            observed_terminal="completed",
+            observed_runtime_kinds={"main_agent"},
+            observed_run_ids={"run-other"},
+            admitted_run_id="run-abc",
+        )

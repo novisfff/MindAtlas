@@ -76,6 +76,7 @@ SMOKE_MODEL = "mindatlas-smoke-model"
 PROVIDER_BASE_URL = "http://provider-stub:8089/v1"
 CHAT_MESSAGE = "Return the deterministic smoke response."
 TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
+EXPECTED_RUNTIME_KIND = "main_agent"
 
 # Env vars that name secret *files* (never CLI secret values).
 ENV_SETUP_TOKEN_FILE = "MINDATLAS_SMOKE_SETUP_TOKEN_FILE"
@@ -91,6 +92,135 @@ class EvidenceSchemaError(ValueError):
 
 class SmokeFailure(RuntimeError):
     """Non-secret failure during the fixed smoke sequence."""
+
+
+class StreamObservation:
+    """Status-only fields parsed from SSE/active payloads (never content)."""
+
+    __slots__ = ("terminal_status", "runtime_kinds", "run_ids")
+
+    def __init__(
+        self,
+        *,
+        terminal_status: str | None = None,
+        runtime_kinds: frozenset[str] | set[str] | None = None,
+        run_ids: frozenset[str] | set[str] | None = None,
+    ) -> None:
+        self.terminal_status = terminal_status
+        self.runtime_kinds = frozenset(runtime_kinds or ())
+        self.run_ids = frozenset(run_ids or ())
+
+
+def extract_status_fields(
+    payload: Mapping[str, Any],
+) -> tuple[str | None, str | None, str | None]:
+    """Extract (status, runtime_kind, run_id) from a status-bearing JSON object.
+
+    Only reads status identity fields — never content/prompt/body text.
+    """
+    if not isinstance(payload, Mapping):
+        return None, None, None
+    status_raw = payload.get("status")
+    status = str(status_raw).strip() if status_raw is not None else ""
+    status_s = status or None
+    kind_raw = payload.get("runtimeKind")
+    if kind_raw is None:
+        kind_raw = payload.get("runtime_kind")
+    kind = str(kind_raw).strip() if kind_raw is not None else ""
+    kind_s = kind or None
+    run_raw = payload.get("runId")
+    if run_raw is None:
+        run_raw = payload.get("run_id")
+    run_id = str(run_raw).strip() if run_raw is not None else ""
+    run_s = run_id or None
+    return status_s, kind_s, run_s
+
+
+def parse_sse_status_buffer(text: str) -> StreamObservation:
+    """Parse SSE ``data:`` lines for terminal status, runtimeKind, and runId only."""
+    terminal: str | None = None
+    kinds: set[str] = set()
+    run_ids: set[str] = set()
+    for line in text.splitlines():
+        if not line.startswith("data:"):
+            continue
+        raw = line[5:].strip()
+        if not raw or raw == "[DONE]":
+            continue
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        status, kind, run_id = extract_status_fields(payload)
+        if run_id:
+            run_ids.add(run_id)
+        if kind:
+            kinds.add(kind)
+        if status in TERMINAL_STATUSES:
+            terminal = status
+    return StreamObservation(
+        terminal_status=terminal,
+        runtime_kinds=kinds,
+        run_ids=run_ids,
+    )
+
+
+def terminal_after_active_cleared(
+    *,
+    stream_observed_terminal: str | None,
+) -> str | None:
+    """When active run clears, accept only an observed stream terminal status.
+
+    Never soft-assumes ``completed`` from a prior non-terminal active status or
+    from a stream that ended without a terminal event.
+    """
+    if stream_observed_terminal in TERMINAL_STATUSES:
+        return str(stream_observed_terminal)
+    return None
+
+
+def resolve_chat_completion_evidence(
+    *,
+    observed_terminal: str,
+    observed_runtime_kinds: set[str] | frozenset[str],
+    observed_run_ids: set[str] | frozenset[str],
+    admitted_run_id: str,
+) -> tuple[str, str, int]:
+    """Fail-closed resolution of terminal, runtime kind, and chat run count.
+
+    Returns ``(chatTerminalStatus, activeRuntimeKind, chatRunCount)``.
+    """
+    if observed_terminal not in TERMINAL_STATUSES:
+        raise SmokeFailure(
+            f"chat terminal status unobserved got {observed_terminal or 'unknown'!r}"
+        )
+    if observed_terminal != "completed":
+        raise SmokeFailure(
+            f"chat terminal status expected completed got {observed_terminal}"
+        )
+    kinds = {str(k).strip() for k in observed_runtime_kinds if str(k).strip()}
+    if not kinds:
+        raise SmokeFailure(
+            "runtimeKind never observed from durable/stream evidence"
+        )
+    if kinds != {EXPECTED_RUNTIME_KIND}:
+        raise SmokeFailure(
+            f"runtimeKind expected {EXPECTED_RUNTIME_KIND} got {sorted(kinds)}"
+        )
+    admitted = str(admitted_run_id or "").strip()
+    if not admitted:
+        raise SmokeFailure("admitted run id missing for chat run count")
+    run_ids = {str(r).strip() for r in observed_run_ids if str(r).strip()}
+    if not run_ids:
+        raise SmokeFailure("no run ids observed from active/stream evidence")
+    if run_ids != {admitted}:
+        raise SmokeFailure(
+            f"expected exactly one run id equal to admitted {admitted!r}, "
+            f"observed {sorted(run_ids)}"
+        )
+    return "completed", EXPECTED_RUNTIME_KIND, len(run_ids)
 
 
 def _canonical_json_bytes(value: Any) -> bytes:
@@ -899,86 +1029,80 @@ def run_smoke_sequence(
         raise SmokeFailure("chat did not yield run id")
     transitions.append("chat_admitted")
 
+    # Observation accumulators — never soft-assume terminal/kind/count.
     terminal_status = {"value": ""}
-    runtime_kind = {"value": "main_agent"}  # schema enforces main_agent-only
-
-    def _terminal() -> bool:
-        st, bd, _ = client.request(
-            "GET", f"/api/assistant/conversations/{conversation_id}/runs/active"
-        )
-        # Active endpoint returns null when terminal; probe stream endpoint status
-        # via conversation detail is not available. Re-check by attempting active
-        # and, if null, treat as need for durable status via a second chat forbid.
-        if st != 200:
-            return False
-        data = _data(bd)
-        if data is None or data == {} or data.get("runId") is None:
-            # Active cleared — confirm via SSE-less approach: conversation still
-            # only admits one run; fetch readiness still ok and assume completed
-            # only after we saw running. Poll a short SSE stream for terminal event.
-            return False
-        status_value = str(data.get("status") or "")
-        if status_value in TERMINAL_STATUSES:
-            terminal_status["value"] = status_value
-            return True
-        return False
+    runtime_kinds: set[str] = set()
+    observed_run_ids: set[str] = set()
+    if run_id:
+        observed_run_ids.add(str(run_id))
 
     # Prefer watching active until it disappears or becomes terminal; then
-    # confirm completed by reading one stream event without logging content.
+    # confirm terminal via stream events without logging content.
     deadline = time.time() + 180.0
-    last_status = ""
     while time.time() < deadline:
         st, bd, _ = client.request(
             "GET", f"/api/assistant/conversations/{conversation_id}/runs/active"
         )
         data = _data(bd) if st == 200 else None
-        if data and data.get("status"):
-            last_status = str(data["status"])
-            if last_status in TERMINAL_STATUSES:
-                terminal_status["value"] = last_status
+        if data and isinstance(data, dict) and data.get("runId") is not None:
+            status_s, kind_s, run_s = extract_status_fields(data)
+            if run_s:
+                observed_run_ids.add(run_s)
+            if kind_s:
+                runtime_kinds.add(kind_s)
+            if status_s in TERMINAL_STATUSES:
+                terminal_status["value"] = str(status_s)
                 break
         elif st == 200 and (data is None or data == {} or data.get("runId") is None):
-            # Active cleared — open a bounded stream to observe terminal event name only.
-            stream_status, observed = _observe_terminal_via_stream(
+            # Active cleared — open a bounded stream to observe terminal + kind.
+            # Never mint completed from a prior non-terminal last_status alone.
+            _stream_http, observation = _observe_terminal_via_stream(
                 client, conversation_id, run_id
             )
-            if observed:
-                terminal_status["value"] = observed
+            observed_run_ids.update(observation.run_ids)
+            runtime_kinds.update(observation.runtime_kinds)
+            observed_terminal = terminal_after_active_cleared(
+                stream_observed_terminal=observation.terminal_status,
+            )
+            if observed_terminal is not None:
+                terminal_status["value"] = observed_terminal
                 break
-            if last_status == "completed" or observed == "completed":
-                terminal_status["value"] = "completed"
-                break
-            # If stream ended without status, assume completed only when last was running.
-            if last_status in {"running", "queued", ""}:
-                # One more active poll; if still empty after a completed stream, mark completed.
-                terminal_status["value"] = "completed"
-                break
+            # Keep polling until deadline; fail closed if still unobserved.
         time.sleep(1.5)
 
-    if terminal_status["value"] != "completed":
-        raise SmokeFailure(
-            f"chat terminal status expected completed got {terminal_status['value'] or last_status or 'unknown'}"
+    # If terminal was observed without runtimeKind (active payload omits it),
+    # one bounded stream pass collects durable admission/status evidence only.
+    if terminal_status["value"] in TERMINAL_STATUSES and not runtime_kinds:
+        _http, observation = _observe_terminal_via_stream(
+            client, conversation_id, run_id
         )
+        observed_run_ids.update(observation.run_ids)
+        runtime_kinds.update(observation.runtime_kinds)
+
+    chat_terminal, active_runtime_kind, chat_run_count = resolve_chat_completion_evidence(
+        observed_terminal=terminal_status["value"],
+        observed_runtime_kinds=runtime_kinds,
+        observed_run_ids=observed_run_ids,
+        admitted_run_id=str(run_id),
+    )
     print("chat: main_agent completed")
     transitions.append("chat_completed")
-
-    # chatRunCount: one admitted run — active is clear and we only posted once.
-    chat_run_count = 1
 
     return {
         "healthStatus": "ok",
         "readinessTransitions": transitions,
         "compatibleWorkerCount": int(compatible_count["value"]),
-        "activeRuntimeKind": runtime_kind["value"],
+        "activeRuntimeKind": active_runtime_kind,
         "chatRunCount": chat_run_count,
-        "chatTerminalStatus": terminal_status["value"],
+        "chatTerminalStatus": chat_terminal,
     }
 
 
 def _observe_terminal_via_stream(
     client: SmokeHttpClient, conversation_id: str, run_id: str
-) -> tuple[int, str | None]:
-    """Read a short SSE prefix; return terminal status if present (no content log)."""
+) -> tuple[int, StreamObservation]:
+    """Read a short SSE prefix; return status-only observation (no content log)."""
+    empty = StreamObservation()
     url = (
         f"{client.base_url}/api/assistant/conversations/{conversation_id}"
         f"/runs/{run_id}/stream?afterSeq=0"
@@ -994,8 +1118,8 @@ def _observe_terminal_via_stream(
             status = int(getattr(resp, "status", 200) or 200)
             buf = b""
             deadline = time.time() + 15.0
-            observed: str | None = None
-            while time.time() < deadline and observed is None:
+            observation = empty
+            while time.time() < deadline and observation.terminal_status is None:
                 chunk = resp.read(512)
                 if not chunk:
                     break
@@ -1003,30 +1127,20 @@ def _observe_terminal_via_stream(
                 if len(buf) > 64_000:
                     break
                 text = buf.decode("utf-8", errors="replace")
-                for line in text.splitlines():
-                    if not line.startswith("data:"):
-                        continue
-                    raw = line[5:].strip()
-                    if not raw or raw == "[DONE]":
-                        continue
-                    try:
-                        payload = json.loads(raw)
-                    except json.JSONDecodeError:
-                        continue
-                    if not isinstance(payload, dict):
-                        continue
-                    st = payload.get("status")
-                    if st in TERMINAL_STATUSES:
-                        observed = str(st)
-                        break
+                observation = parse_sse_status_buffer(text)
             client.trace.append(
-                TraceRecord("GET", f"/api/assistant/conversations/{conversation_id}/runs/{run_id}/stream", status, ())
+                TraceRecord(
+                    "GET",
+                    f"/api/assistant/conversations/{conversation_id}/runs/{run_id}/stream",
+                    status,
+                    (),
+                )
             )
-            return status, observed
+            return status, observation
     except urllib.error.HTTPError as exc:
-        return int(exc.code), None
+        return int(exc.code), empty
     except urllib.error.URLError:
-        return 0, None
+        return 0, empty
 
 
 def build_compose_env(
