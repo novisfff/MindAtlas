@@ -27,6 +27,11 @@ from app.ai_registry.models import (  # noqa: E402, F401
     AiComponentBinding,
 )
 from app.assistant.models import Conversation, Message  # noqa: E402, F401
+from app.assistant.runtime.models import (  # noqa: E402, F401
+    AssistantMainAgentRolloutControl,
+    AssistantMainAgentRolloutEvent,
+    AssistantMainAgentRolloutRevision,
+)
 from app.assistant.capability_calls.models import (  # noqa: E402, F401
     AssistantCapabilityCall,
     AssistantCapabilityCallAttempt,
