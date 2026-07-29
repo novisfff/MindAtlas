@@ -203,11 +203,35 @@ class AssistantReadinessService:
         """Admission/activation path: control already selected FOR UPDATE."""
         return self._evaluate(control=control, lock=True)
 
+    def evaluate_activation_candidate_locked(
+        self,
+        *,
+        control: AssistantMainAgentRolloutControl,
+        candidate: AssistantRuntimeClosure,
+    ) -> AssistantReadinessSnapshot:
+        """Activation path: evaluate a candidate closure instead of the active pointer.
+
+        Ignores ``rollout_inactive`` (candidate may become the first active) and
+        ``new_runs_disabled`` (Operator may switch while emergency ceilings stay
+        closed). Still requires initialization, Operator/auth, seed, Profile,
+        Model, schema, and a compatible Worker for the candidate.
+        """
+        return self._evaluate(
+            control=control,
+            lock=True,
+            candidate=candidate,
+            ignore_rollout_inactive=True,
+            ignore_new_runs_disabled=True,
+        )
+
     def _evaluate(
         self,
         *,
         control: AssistantMainAgentRolloutControl | None,
         lock: bool,
+        candidate: AssistantRuntimeClosure | None = None,
+        ignore_rollout_inactive: bool = False,
+        ignore_new_runs_disabled: bool = False,
     ) -> AssistantReadinessSnapshot:
         # Note: schema_incompatible is listed after worker_unavailable in the
         # public reason-code tuple, but structural schema failure short-circuits
@@ -229,30 +253,35 @@ class AssistantReadinessService:
             return self._blocked("profile_unpublished")
         if not self.model_probe.has_active_assistant_binding(self.db):
             return self._blocked("model_unbound")
-        if control is None or control.active_rollout_revision_id is None:
-            return self._blocked("rollout_inactive")
-
-        try:
-            closure = self.closure_builder.build(
-                rollout_revision_id=control.active_rollout_revision_id,
-                lock=lock,
-            )
-        except RuntimeClosureDrift:
-            return self._blocked(
-                "runtime_closure_drift",
-                active_rollout_revision_id=control.active_rollout_revision_id,
-            )
-        except Exception:
-            return self._blocked(
-                "runtime_closure_drift",
-                active_rollout_revision_id=control.active_rollout_revision_id,
-            )
+        if candidate is None:
+            if control is None or control.active_rollout_revision_id is None:
+                if ignore_rollout_inactive:
+                    return self._blocked("rollout_inactive")
+                return self._blocked("rollout_inactive")
+            try:
+                closure = self.closure_builder.build(
+                    rollout_revision_id=control.active_rollout_revision_id,
+                    lock=lock,
+                )
+            except RuntimeClosureDrift:
+                return self._blocked(
+                    "runtime_closure_drift",
+                    active_rollout_revision_id=control.active_rollout_revision_id,
+                )
+            except Exception:
+                return self._blocked(
+                    "runtime_closure_drift",
+                    active_rollout_revision_id=control.active_rollout_revision_id,
+                )
+        else:
+            closure = candidate
 
         reasons: set[str] = set()
-        if not bool(getattr(self.settings, "assistant_new_runs_enabled", True)):
-            reasons.add("new_runs_disabled")
-        if not bool(control.new_runs_enabled):
-            reasons.add("new_runs_disabled")
+        if not ignore_new_runs_disabled:
+            if not bool(getattr(self.settings, "assistant_new_runs_enabled", True)):
+                reasons.add("new_runs_disabled")
+            if control is not None and not bool(control.new_runs_enabled):
+                reasons.add("new_runs_disabled")
         workers = self._compatible_workers(closure)
         if not workers:
             reasons.add("worker_unavailable")

@@ -1,9 +1,15 @@
 """Main-Agent runtime package (Plan 2).
 
 Exports durable contracts, ORM models, repository, seed loader, canonical
-closure builder, and shared readiness evaluator.
+closure builder, shared readiness evaluator, and activation control plane.
 """
 
+from app.assistant.runtime.activation import (
+    AssistantRuntimeActivationService,
+    RolloutNotPrepared,
+    RuntimeActivationRejected,
+    RuntimeGateEvidenceMissing,
+)
 from app.assistant.runtime.closure import (
     AssistantRuntimeClosureBuilder,
     BoundAssistantModelIdentity,
@@ -29,6 +35,9 @@ from app.assistant.runtime.contracts import (
     RuntimeControlResult,
     RuntimeRequestReuseConflict,
     SetNewRunsEnabledRequest,
+    digest_activation_request,
+    digest_new_runs_request,
+    digest_prepare_request,
     require_sha256,
     rollout_revision_id_for_request,
 )
@@ -67,6 +76,7 @@ __all__ = (
     "AssistantMainAgentRolloutRevision",
     "AssistantReadinessService",
     "AssistantReadinessSnapshot",
+    "AssistantRuntimeActivationService",
     "AssistantRuntimeClosure",
     "AssistantRuntimeClosureBuilder",
     "AssistantRuntimeRepository",
@@ -80,9 +90,12 @@ __all__ = (
     "PreparedRolloutResult",
     "PreparedRolloutRevision",
     "PrepareRolloutRequest",
+    "RolloutNotPrepared",
+    "RuntimeActivationRejected",
     "RuntimeClosureDrift",
     "RuntimeControlConflict",
     "RuntimeControlResult",
+    "RuntimeGateEvidenceMissing",
     "RuntimeRequestReuseConflict",
     "SEED_CONTRACT_DIGEST",
     "SEED_MANIFEST_DIGEST",
@@ -92,6 +105,9 @@ __all__ = (
     "SetNewRunsEnabledRequest",
     "SystemSeedInvalid",
     "VerifiedAssistantSystemSeed",
+    "digest_activation_request",
+    "digest_new_runs_request",
+    "digest_prepare_request",
     "load_verified_assistant_system_seed",
     "project_authenticated_readiness",
     "project_public_readiness",

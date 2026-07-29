@@ -76,6 +76,74 @@ class RuntimeRequestReuseConflict(RuntimeError):
         super().__init__(message)
 
 
+class RolloutNotPrepared(RuntimeError):
+    """Raised when activation targets an unknown or unprepared revision."""
+
+    code = "assistant_rollout_not_prepared"
+
+    def __init__(self, message: str = "assistant rollout not prepared") -> None:
+        super().__init__(message)
+
+
+class RuntimeActivationRejected(RuntimeError):
+    """Raised when activation revalidation rejects the candidate under locks."""
+
+    code = "assistant_rollout_activation_rejected"
+
+    def __init__(self, reason_code: str) -> None:
+        self.reason_code = str(reason_code)
+        super().__init__(self.reason_code)
+
+
+class RuntimeGateEvidenceMissing(RuntimeError):
+    """Raised when prepare/activate cannot find current gate or bootstrap evidence."""
+
+    code = "assistant_gate_evidence_missing"
+
+    def __init__(self, reason_code: str = "gate_evidence_missing") -> None:
+        self.reason_code = str(reason_code)
+        super().__init__(self.reason_code)
+
+
+def digest_prepare_request(request: "PrepareRolloutRequest") -> str:
+    return sha256_canonical_json(
+        {
+            "action": "prepared",
+            "profileVersionId": str(request.profile_version_id),
+            "modelId": str(request.model_id),
+            "requestId": str(request.request_id),
+            "reason": request.reason,
+        }
+    )
+
+
+def digest_activation_request(
+    revision_id: UUID, request: "ActivateRolloutRequest"
+) -> str:
+    return sha256_canonical_json(
+        {
+            "action": "activated",
+            "revisionId": str(revision_id),
+            "expectedControlRevision": int(request.expected_control_revision),
+            "requestId": str(request.request_id),
+            "reason": request.reason,
+        }
+    )
+
+
+def digest_new_runs_request(request: "SetNewRunsEnabledRequest") -> str:
+    action = "new_runs_enabled" if request.enabled else "new_runs_disabled"
+    return sha256_canonical_json(
+        {
+            "action": action,
+            "enabled": bool(request.enabled),
+            "expectedControlRevision": int(request.expected_control_revision),
+            "requestId": str(request.request_id),
+            "reason": request.reason,
+        }
+    )
+
+
 class AssistantRuntimeSubject(FrozenContract):
     """Non-circular runtime subject used to derive revision digests.
 
@@ -377,4 +445,42 @@ class NewRolloutEvent:
                 seed_manifest_digest, field_name="seed_manifest_digest"
             ),
             result_json=result_json,
+        )
+
+    @classmethod
+    def for_new_runs_switch(
+        cls,
+        *,
+        previous: Any,
+        updated: Any,
+        request: "SetNewRunsEnabledRequest",
+        request_digest: str,
+        principal: Any,
+        result: "RuntimeControlResult",
+    ) -> "NewRolloutEvent":
+        action = "new_runs_enabled" if request.enabled else "new_runs_disabled"
+        evidence_digest = sha256_canonical_json(
+            {
+                "action": action,
+                "controlRevision": int(updated.state_revision),
+                "enabled": bool(request.enabled),
+                "activeRolloutRevisionId": (
+                    str(updated.active_rollout_revision_id)
+                    if updated.active_rollout_revision_id is not None
+                    else None
+                ),
+            }
+        )
+        return cls(
+            action=action,
+            from_rollout_revision_id=previous.active_rollout_revision_id,
+            to_rollout_revision_id=updated.active_rollout_revision_id,
+            control_revision=int(updated.state_revision),
+            request_id=request.request_id,
+            request_digest=request_digest,
+            operator_id=getattr(principal, "operator_id", None),
+            operator_session_id=getattr(principal, "session_id", None),
+            reason=request.reason,
+            evidence_digest=evidence_digest,
+            result_json=result.model_dump(mode="json", by_alias=True),
         )

@@ -5,13 +5,17 @@ All methods flush but never commit. Callers own the surrounding transaction.
 
 from __future__ import annotations
 
-from uuid import UUID
+import threading
+from typing import Any
+from uuid import UUID, uuid5
 
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 from sqlalchemy.orm import Session
 
 from app.assistant.runtime.contracts import (
     CONTROL_KEY_MAIN_AGENT,
+    ActivatedRolloutResult,
+    ActivateRolloutRequest,
     NewRolloutEvent,
     PreparedRolloutRevision,
     RuntimeControlConflict,
@@ -24,6 +28,11 @@ from app.assistant.runtime.models import (
     AssistantMainAgentRolloutRevision,
 )
 from app.common.time import utcnow
+from app.operator_auth.contracts import OperatorPrincipal
+
+# Process-local request-id locks for SQLite unit tests (no advisory locks).
+_SQLITE_REQUEST_LOCKS: dict[str, threading.Lock] = {}
+_SQLITE_REQUEST_LOCKS_GUARD = threading.Lock()
 
 
 class AssistantRuntimeRepository:
@@ -56,6 +65,15 @@ class AssistantRuntimeRepository:
     def get_control(self) -> AssistantMainAgentRolloutControl | None:
         """Read-only control lookup; never creates the singleton."""
         return self.db.get(AssistantMainAgentRolloutControl, CONTROL_KEY_MAIN_AGENT)
+
+    def get_control_for_update(self) -> AssistantMainAgentRolloutControl | None:
+        """Lock the control singleton without creating it when absent."""
+        stmt = (
+            select(AssistantMainAgentRolloutControl)
+            .where(AssistantMainAgentRolloutControl.control_key == CONTROL_KEY_MAIN_AGENT)
+            .with_for_update()
+        )
+        return self.db.execute(stmt).scalar_one_or_none()
 
     def get_active_revision_for_update(
         self,
@@ -140,6 +158,43 @@ class AssistantRuntimeRepository:
             )
         return existing
 
+    def replay_or_conflict(
+        self, *, request_id: UUID, request_digest: str
+    ) -> AssistantMainAgentRolloutEvent | None:
+        """Alias for assert_request_replay — returns matching event or raises."""
+        return self.assert_request_replay(
+            request_id=request_id, request_digest=request_digest
+        )
+
+    def lock_request_id(self, request_id: UUID) -> None:
+        """Serialize mutations that share a request_id before replay lookup.
+
+        PostgreSQL: transaction-scoped advisory lock over
+        ``hashtextextended('assistant-runtime:' || request_id, 0)``.
+        SQLite/other: process-local threading lock (unit-test only).
+        """
+        bind = self.db.get_bind() if hasattr(self.db, "get_bind") else self.db.bind
+        dialect_name = bind.dialect.name if bind is not None else None
+        key = f"assistant-runtime:{request_id}"
+        if dialect_name == "postgresql":
+            self.db.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+                {"key": key},
+            )
+            return
+        with _SQLITE_REQUEST_LOCKS_GUARD:
+            lock = _SQLITE_REQUEST_LOCKS.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                _SQLITE_REQUEST_LOCKS[key] = lock
+        # Non-blocking acquire for same-thread re-entry safety is not required —
+        # unit tests are single-threaded per request_id path. Hold for process
+        # lifetime of the test; real concurrency is proven on PostgreSQL.
+        lock.acquire(blocking=False)
+        # If already held by this or another thread, still proceed: the durable
+        # unique request_id constraint + digest check is the source of truth.
+        # Best-effort process lock reduces flakiness only.
+
     def append_control_event(
         self, event: NewRolloutEvent
     ) -> AssistantMainAgentRolloutEvent:
@@ -159,6 +214,73 @@ class AssistantRuntimeRepository:
         self.db.add(row)
         self.db.flush()
         return row
+
+    def append_activation_events(
+        self,
+        *,
+        previous_revision_id: UUID | None,
+        target_revision_id: UUID,
+        request: ActivateRolloutRequest,
+        request_digest: str,
+        principal: OperatorPrincipal,
+        result: ActivatedRolloutResult,
+        evidence_digest: str,
+    ) -> tuple[AssistantMainAgentRolloutEvent, ...]:
+        """Append request-owned activated event (+ derived superseded when needed)."""
+        activated = self.append_control_event(
+            NewRolloutEvent(
+                action="activated",
+                from_rollout_revision_id=previous_revision_id,
+                to_rollout_revision_id=target_revision_id,
+                control_revision=int(result.control_revision),
+                request_id=request.request_id,
+                request_digest=request_digest,
+                operator_id=principal.operator_id,
+                operator_session_id=principal.session_id,
+                reason=request.reason,
+                evidence_digest=evidence_digest,
+                result_json=result.model_dump(mode="json", by_alias=True),
+            )
+        )
+        events: list[AssistantMainAgentRolloutEvent] = [activated]
+        if previous_revision_id is not None and previous_revision_id != target_revision_id:
+            from app.assistant.domain.digests import sha256_canonical_json
+
+            superseded_request_id = uuid5(request.request_id, "superseded")
+            superseded_digest = require_sha256(
+                sha256_canonical_json(
+                    {
+                        "action": "superseded",
+                        "fromRevisionId": str(previous_revision_id),
+                        "toRevisionId": str(target_revision_id),
+                        "parentRequestId": str(request.request_id),
+                        "controlRevision": int(result.control_revision),
+                    }
+                ),
+                field_name="request_digest",
+            )
+            superseded = self.append_control_event(
+                NewRolloutEvent(
+                    action="superseded",
+                    from_rollout_revision_id=previous_revision_id,
+                    to_rollout_revision_id=target_revision_id,
+                    control_revision=int(result.control_revision),
+                    request_id=superseded_request_id,
+                    request_digest=superseded_digest,
+                    operator_id=principal.operator_id,
+                    operator_session_id=principal.session_id,
+                    reason=f"superseded by activation: {request.reason}"[:500],
+                    evidence_digest=evidence_digest,
+                    result_json={
+                        "fromRolloutRevisionId": str(previous_revision_id),
+                        "toRolloutRevisionId": str(target_revision_id),
+                        "controlRevision": int(result.control_revision),
+                        "parentRequestId": str(request.request_id),
+                    },
+                )
+            )
+            events.append(superseded)
+        return tuple(events)
 
     def compare_and_set_control(
         self,
@@ -189,3 +311,13 @@ class AssistantRuntimeRepository:
         self.db.flush()
         control = self.get_or_create_control_for_update()
         return control
+
+    def list_revisions(self, *, limit: int = 50) -> list[AssistantMainAgentRolloutRevision]:
+        limit = max(1, min(int(limit), 200))
+        rows = (
+            self.db.query(AssistantMainAgentRolloutRevision)
+            .order_by(AssistantMainAgentRolloutRevision.created_at.desc())
+            .limit(limit)
+            .all()
+        )
+        return list(rows)
