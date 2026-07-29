@@ -1,4 +1,4 @@
-import { apiClient } from '@/lib/api/client'
+import { apiClient, browserFetchInit, reportBrowserSessionExpired } from '@/lib/api/client'
 import { withMindAtlasLocale } from '@/lib/api/locale'
 import { SSEParser } from '@/lib/sse/SSEParser'
 
@@ -257,16 +257,21 @@ export const runAgentTestStream = async (
   payload: AgentTestRunRequest,
   options: AgentTestStreamOptions = {},
 ) => {
-  const response = await fetch(`/api/assistant-config/agents/${agentProfileId}/test-run`, {
-    method: 'POST',
-    headers: withMindAtlasLocale({
-      'Content-Type': 'application/json',
+  const path = `/api/assistant-config/agents/${agentProfileId}/test-run`
+  const response = await fetch(
+    path,
+    browserFetchInit({
+      method: 'POST',
+      headers: withMindAtlasLocale({
+        'Content-Type': 'application/json',
+      }),
+      body: JSON.stringify(payload),
+      signal: options.signal,
     }),
-    body: JSON.stringify(payload),
-    signal: options.signal,
-  })
+  )
 
   if (!response.ok || !response.body) {
+    reportBrowserSessionExpired(path, response.status)
     const text = await response.text()
     let message = `HTTP ${response.status}: ${response.statusText}`
     try {

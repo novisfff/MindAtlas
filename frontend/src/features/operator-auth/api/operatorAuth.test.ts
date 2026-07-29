@@ -4,6 +4,8 @@ import {
   ApiClient,
   SESSION_EXPIRED_EVENT,
   apiClient,
+  browserFetchInit,
+  reportBrowserSessionExpired,
 } from '@/lib/api/client'
 import {
   getOperatorSession,
@@ -102,6 +104,45 @@ describe('ApiClient session + CSRF', () => {
       client.post('/api/system-settings/initialize', { body: {} }),
     ).rejects.toMatchObject({ status: 401 })
     expect(listener).not.toHaveBeenCalled()
+    window.removeEventListener(SESSION_EXPIRED_EVENT, listener)
+  })
+})
+
+describe('browserFetchInit', () => {
+  beforeEach(() => {
+    clearCookies()
+  })
+
+  afterEach(() => {
+    clearCookies()
+  })
+
+  it('attaches same-origin credentials and CSRF on POST', () => {
+    document.cookie = 'mindatlas_csrf=stream-csrf; Path=/'
+    const init = browserFetchInit({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    })
+    expect(init.credentials).toBe('same-origin')
+    expect(new Headers(init.headers).get('X-MindAtlas-CSRF')).toBe('stream-csrf')
+    expect(new Headers(init.headers).get('Content-Type')).toBe('application/json')
+  })
+
+  it('does not invent CSRF on GET but still sets credentials', () => {
+    document.cookie = 'mindatlas_csrf=stream-csrf; Path=/'
+    const init = browserFetchInit({ method: 'GET' })
+    expect(init.credentials).toBe('same-origin')
+    expect(new Headers(init.headers).has('X-MindAtlas-CSRF')).toBe(false)
+  })
+
+  it('reportBrowserSessionExpired emits for protected 401 only', () => {
+    const listener = vi.fn()
+    window.addEventListener(SESSION_EXPIRED_EVENT, listener)
+    reportBrowserSessionExpired('/api/assistant-config/agents/x/test-run', 401)
+    expect(listener).toHaveBeenCalledTimes(1)
+    reportBrowserSessionExpired('/api/operator-auth/login', 401)
+    expect(listener).toHaveBeenCalledTimes(1)
     window.removeEventListener(SESSION_EXPIRED_EVENT, listener)
   })
 })

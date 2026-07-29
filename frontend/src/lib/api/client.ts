@@ -123,6 +123,37 @@ function reportSessionExpired(path: string, status: number): void {
   }
 }
 
+/**
+ * RequestInit for raw browser ``fetch`` (SSE / blob) that mirrors ApiClient:
+ * same-origin credentials always, and CSRF header on unsafe methods.
+ *
+ * Prefer ``apiClient`` for JSON; use this only when the response body must be
+ * consumed as a stream or blob outside ApiClient.
+ */
+export function browserFetchInit(init: RequestInit = {}): RequestInit {
+  const method = String(init.method ?? 'GET').toUpperCase()
+  const headers = new Headers(init.headers)
+
+  if (!SAFE_METHODS.has(method) && !headers.has(CSRF_HEADER)) {
+    const csrf = readCookie(CSRF_COOKIE)
+    if (csrf) {
+      const decoded = safeDecodeCookieValue(csrf)
+      if (decoded !== undefined) headers.set(CSRF_HEADER, decoded)
+    }
+  }
+
+  return {
+    ...init,
+    headers,
+    credentials: init.credentials ?? 'same-origin',
+  }
+}
+
+/** Dispatch session-expired for raw-fetch 401s (mirrors ApiClient). */
+export function reportBrowserSessionExpired(path: string, status: number): void {
+  reportSessionExpired(path, status)
+}
+
 function throwApiError(path: string, error: ApiError): never {
   if (error.status != null) {
     reportSessionExpired(path, error.status)

@@ -3,7 +3,7 @@
  * Mounted under the protected browser session with skill-admin.
  * Client never authors digests — server resolves all pins.
  */
-import { apiClient } from '@/lib/api/client'
+import { apiClient, browserFetchInit, reportBrowserSessionExpired } from '@/lib/api/client'
 import { withMindAtlasLocale } from '@/lib/api/locale'
 import { SSEParser } from '@/lib/sse/SSEParser'
 
@@ -402,11 +402,14 @@ export async function streamEvalRunEvents(
 
   let response: Response
   try {
-    response = await fetch(url, {
-      method: 'GET',
-      headers,
-      signal: options.signal,
-    })
+    response = await fetch(
+      url,
+      browserFetchInit({
+        method: 'GET',
+        headers,
+        signal: options.signal,
+      }),
+    )
   } catch (error) {
     if (options.signal?.aborted) return 'aborted'
     options.onError?.(error instanceof Error ? error : new Error(String(error)))
@@ -414,6 +417,7 @@ export async function streamEvalRunEvents(
   }
 
   if (!response.ok || !response.body) {
+    reportBrowserSessionExpired(url, response.status)
     const message = `SSE transport failed: HTTP ${response.status}`
     options.onError?.(new Error(message))
     return 'transport_failure'
