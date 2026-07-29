@@ -10,20 +10,22 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID, uuid5
-from urllib.parse import urlsplit
 
 from sqlalchemy.orm import Session
 
-from app.ai_registry.models import AiComponentBinding, AiCredential, AiModel
 from app.assistant.domain.digests import sha256_canonical_json
 from app.assistant.durable.codec import CURRENT_CHECKPOINT_CODEC_VERSION
 from app.assistant.durable.worker_registry import (
     RUNTIME_CONTRACT_VERSION,
     default_capability_feature_digest,
 )
+from app.assistant.runtime.closure import (
+    AssistantRuntimeClosureBuilder,
+    ModelIdentityUnavailable,
+    RuntimeClosureDrift,
+)
 from app.assistant.runtime.contracts import (
     ASSISTANT_ROLLOUT_NAMESPACE,
-    AssistantRuntimeSubject,
     NewRolloutEvent,
     PreparedRolloutRevision,
     require_sha256,
@@ -113,40 +115,6 @@ class PreparedAssistantBootstrap:
     seed_manifest_digest: str
 
 
-@dataclass(frozen=True)
-class _BootstrapClosureView:
-    """Minimal closure view for bootstrap evidence (Task 5 owns the full builder)."""
-
-    rollout_revision_id: UUID
-    rollout_revision_digest: str
-    profile_version_id: UUID
-    profile_content_digest: str
-    model_id: UUID
-    model_identity_digest: str
-    package_closure_digest: str
-    capability_closure_digest: str
-    seed_manifest_digest: str
-    build_revision: str
-    runtime_contract_version: int
-    checkpoint_codec_version: int
-    capability_feature_digest: str
-    closure_digest: str
-
-
-def _credential_config_digest(*, base_url: str, runtime_revision: int) -> str:
-    parts = urlsplit((base_url or "").strip())
-    return sha256_canonical_json(
-        {
-            "schemaVersion": 1,
-            "scheme": parts.scheme or None,
-            "host": parts.hostname,
-            "port": parts.port,
-            "path": parts.path or None,
-            "runtimeRevision": int(runtime_revision or 1),
-        }
-    )
-
-
 def _frontmatter_json(parsed: ParsedSkillPackage) -> dict[str, Any]:
     return parsed.frontmatter.model_dump(by_alias=True, exclude_none=False)
 
@@ -182,6 +150,7 @@ class AssistantSystemBootstrapper:
     def __init__(self, db: Session) -> None:
         self.db = db
         self.runtime_repo = AssistantRuntimeRepository(db)
+        self.closure_builder = AssistantRuntimeClosureBuilder(db)
 
     # ------------------------------------------------------------------
     # Fresh preconditions
@@ -252,19 +221,25 @@ class AssistantSystemBootstrapper:
         profile, profile_version = self._stage_system_profile(
             seed.profile, package_id=package.id
         )
-        model_identity_digest = self._resolve_model_identity_digest(
-            model_id=request.model_id,
-            build_revision=request.build_revision,
-        )
-        subject = self._build_subject(
-            profile_version=profile_version,
-            model_id=request.model_id,
-            model_identity_digest=model_identity_digest,
-            package=package,
-            version=version,
-            seed=seed,
-            build_revision=request.build_revision,
-        )
+        try:
+            subject = self.closure_builder.build_subject(
+                profile_version=profile_version,
+                model_id=request.model_id,
+                seed=seed,
+                package=package,
+                version=version,
+                bindings=list(
+                    self.db.query(AssistantSkillCapabilityBinding)
+                    .filter(
+                        AssistantSkillCapabilityBinding.skill_version_id == version.id
+                    )
+                    .all()
+                ),
+                build_revision=request.build_revision,
+            )
+        except (ModelIdentityUnavailable, RuntimeClosureDrift) as exc:
+            reason = getattr(exc, "reason_code", None) or "runtime_closure_drift"
+            raise AssistantBootstrapRejected(str(reason)) from exc
         bootstrap_request_id = uuid5(
             ASSISTANT_ROLLOUT_NAMESPACE,
             (
@@ -284,7 +259,15 @@ class AssistantSystemBootstrapper:
                 prepared_reason="system_bootstrap",
             )
         )
-        closure = self._build_closure_view(subject=subject, rollout=rollout)
+        try:
+            closure = self.closure_builder.build(
+                rollout_revision_id=rollout.id,
+                lock=True,
+            )
+        except RuntimeClosureDrift as exc:
+            raise AssistantBootstrapRejected(
+                getattr(exc, "reason_code", None) or "runtime_closure_drift"
+            ) from exc
         control = self.runtime_repo.get_or_create_control_for_update()
         if control.active_rollout_revision_id is not None:
             raise AssistantBootstrapRejected("rollout_already_active")
@@ -712,141 +695,10 @@ class AssistantSystemBootstrapper:
         self.db.flush()
         return profile, publish
 
-    def _resolve_model_identity_digest(
-        self, *, model_id: UUID, build_revision: str
-    ) -> str:
-        """Deterministic non-secret model identity (no decrypt, no probe)."""
-        binding = (
-            self.db.query(AiComponentBinding)
-            .filter(AiComponentBinding.component == "assistant")
-            .one_or_none()
-        )
-        if binding is None or binding.llm_model_id is None:
-            raise AssistantBootstrapRejected("model_unbound")
-        if binding.llm_model_id != model_id:
-            raise AssistantBootstrapRejected("model_binding_mismatch")
-
-        model = self.db.get(AiModel, model_id)
-        if model is None:
-            raise AssistantBootstrapRejected("model_missing")
-        if str(model.model_type or "") != "llm":
-            raise AssistantBootstrapRejected("model_type_unsupported")
-        credential = self.db.get(AiCredential, model.credential_id)
-        if credential is None:
-            raise AssistantBootstrapRejected("credential_missing")
-
-        credential_config_digest = _credential_config_digest(
-            base_url=str(credential.base_url or ""),
-            runtime_revision=int(credential.runtime_revision or 1),
-        )
-        return require_sha256(
-            sha256_canonical_json(
-                {
-                    "schemaVersion": 1,
-                    "kind": "bound_assistant_model_identity",
-                    "modelId": str(model.id),
-                    "modelName": str(model.name or ""),
-                    "modelType": "llm",
-                    "modelRuntimeRevision": int(model.runtime_revision or 1),
-                    "credentialId": str(credential.id),
-                    "credentialRuntimeRevision": int(credential.runtime_revision or 1),
-                    "credentialConfigDigest": credential_config_digest,
-                    "buildRevision": str(build_revision),
-                }
-            ),
-            field_name="model_identity_digest",
-        )
-
-    def _build_subject(
-        self,
-        *,
-        profile_version: AssistantMainAgentProfileVersion,
-        model_id: UUID,
-        model_identity_digest: str,
-        package: AssistantSkillPackage,
-        version: AssistantSkillVersion,
-        seed: VerifiedAssistantSystemSeed,
-        build_revision: str,
-    ) -> AssistantRuntimeSubject:
-        package_entry = {
-            "packageId": str(package.id),
-            "canonicalName": str(package.canonical_name),
-            "versionId": str(version.id),
-            "versionDigest": str(version.version_digest),
-            "contentDigest": str(version.content_digest),
-            "bindingSetDigest": str(version.binding_set_digest),
-            "isSystem": True,
-            "catalogEnabled": True,
-        }
-        package_closure = (package_entry,)
-        package_closure_digest = require_sha256(
-            sha256_canonical_json(list(package_closure)),
-            field_name="package_closure_digest",
-        )
-        capability_closure_digest = require_sha256(
-            str(version.binding_set_digest),
-            field_name="capability_closure_digest",
-        )
-        return AssistantRuntimeSubject(
-            profile_version_id=profile_version.id,
-            profile_content_digest=str(profile_version.content_digest),
-            model_id=model_id,
-            model_identity_digest=model_identity_digest,
-            package_closure=package_closure,
-            package_closure_digest=package_closure_digest,
-            capability_closure_digest=capability_closure_digest,
-            seed_manifest_digest=seed.manifest.manifest_digest,
-            build_revision=build_revision,
-            runtime_contract_version=RUNTIME_CONTRACT_VERSION,
-            checkpoint_codec_version=CURRENT_CHECKPOINT_CODEC_VERSION,
-            capability_feature_digest=default_capability_feature_digest(),
-        )
-
-    def _build_closure_view(
-        self, *, subject: AssistantRuntimeSubject, rollout: Any
-    ) -> _BootstrapClosureView:
-        closure_digest = require_sha256(
-            sha256_canonical_json(
-                {
-                    "schemaVersion": 1,
-                    "rolloutRevisionId": str(rollout.id),
-                    "rolloutRevisionDigest": str(rollout.revision_digest),
-                    "profileVersionId": str(subject.profile_version_id),
-                    "profileContentDigest": subject.profile_content_digest,
-                    "modelId": str(subject.model_id),
-                    "modelIdentityDigest": subject.model_identity_digest,
-                    "packageClosureDigest": subject.package_closure_digest,
-                    "capabilityClosureDigest": subject.capability_closure_digest,
-                    "seedManifestDigest": subject.seed_manifest_digest,
-                    "buildRevision": subject.build_revision,
-                    "runtimeContractVersion": subject.runtime_contract_version,
-                    "checkpointCodecVersion": subject.checkpoint_codec_version,
-                    "capabilityFeatureDigest": subject.capability_feature_digest,
-                }
-            ),
-            field_name="closure_digest",
-        )
-        return _BootstrapClosureView(
-            rollout_revision_id=rollout.id,
-            rollout_revision_digest=str(rollout.revision_digest),
-            profile_version_id=subject.profile_version_id,
-            profile_content_digest=subject.profile_content_digest,
-            model_id=subject.model_id,
-            model_identity_digest=subject.model_identity_digest,
-            package_closure_digest=subject.package_closure_digest,
-            capability_closure_digest=subject.capability_closure_digest,
-            seed_manifest_digest=subject.seed_manifest_digest,
-            build_revision=subject.build_revision,
-            runtime_contract_version=subject.runtime_contract_version,
-            checkpoint_codec_version=subject.checkpoint_codec_version,
-            capability_feature_digest=subject.capability_feature_digest,
-            closure_digest=closure_digest,
-        )
-
     def _safe_bootstrap_evidence(
         self,
         *,
-        closure: _BootstrapClosureView,
+        closure: Any,
         seed: VerifiedAssistantSystemSeed,
         profile_version: AssistantMainAgentProfileVersion,
         skill_version: AssistantSkillVersion,
@@ -866,11 +718,11 @@ class AssistantSystemBootstrapper:
             "skillVersionId": str(skill_version.id),
             "skillVersionDigest": str(skill_version.version_digest),
             "rolloutRevisionId": str(closure.rollout_revision_id),
-            "rolloutRevisionDigest": closure.rollout_revision_digest,
+            "rolloutRevisionDigest": str(closure.rollout_revision_digest),
             "modelId": str(request.model_id),
-            "modelIdentityDigest": closure.model_identity_digest,
+            "modelIdentityDigest": str(closure.model_identity_digest),
             "buildRevision": request.build_revision,
-            "closureDigest": closure.closure_digest,
+            "closureDigest": str(closure.closure_digest),
             "origin": "system_bootstrap",
         }
 

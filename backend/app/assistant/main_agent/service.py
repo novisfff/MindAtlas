@@ -14,7 +14,6 @@ import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
-from urllib.parse import urlsplit
 from uuid import UUID
 
 from sqlalchemy.orm import Session
@@ -442,16 +441,10 @@ def should_construct_main_agent(
 
 
 def _credential_config_digest(*, base_url: str, runtime_revision: int) -> str:
-    parts = urlsplit((base_url or "").strip())
-    return sha256_canonical_json(
-        {
-            "schemaVersion": 1,
-            "scheme": parts.scheme or None,
-            "host": parts.hostname,
-            "port": parts.port,
-            "path": parts.path or None,
-            "runtimeRevision": int(runtime_revision or 1),
-        }
+    from app.assistant.runtime.closure import credential_config_digest
+
+    return credential_config_digest(
+        base_url=base_url, runtime_revision=runtime_revision
     )
 
 
@@ -729,14 +722,18 @@ def build_base_manifest_with_controls(
     )
 
 
-def construct_openai_adapter_after_eligibility(
+def construct_openai_adapter_after_identity_recheck(
     db: Session,
     *,
     frozen: FrozenModelIdentity,
     provider_ref: ProviderRef,
     app_build_revision: str,
 ) -> ProviderAdapter:
-    """Decrypt credential and build adapter only after eligibility + recheck."""
+    """Decrypt credential and build adapter after identity recheck.
+
+    Probe is optional: when ``frozen`` carries no diagnostic probe, recheck
+    compares only model/credential revisions and config digests.
+    """
     from app.ai_provider.crypto import decrypt_api_key
     from app.ai_registry.models import AiCredential, AiModel, AiModelCapabilityProbe
     from app.assistant.provider_loop.adapters.openai_chat import (
@@ -817,6 +814,22 @@ def construct_openai_adapter_after_eligibility(
         endpoint_identity=endpoint,
     )
     return OpenAIChatCompletionsAdapter(runtime_config=runtime_config)
+
+
+def construct_openai_adapter_after_eligibility(
+    db: Session,
+    *,
+    frozen: FrozenModelIdentity,
+    provider_ref: ProviderRef,
+    app_build_revision: str,
+) -> ProviderAdapter:
+    """Backward-compatible alias for identity-recheck adapter construction."""
+    return construct_openai_adapter_after_identity_recheck(
+        db,
+        frozen=frozen,
+        provider_ref=provider_ref,
+        app_build_revision=app_build_revision,
+    )
 
 
 class _CancelBridge:
@@ -1533,6 +1546,7 @@ __all__ = [
     "chunk_text",
     "compute_main_agent_effective_policy_digest",
     "construct_openai_adapter_after_eligibility",
+    "construct_openai_adapter_after_identity_recheck",
     "load_default_published_profile",
     "resolve_assistant_model_identity",
     "select_runtime_for_mode",

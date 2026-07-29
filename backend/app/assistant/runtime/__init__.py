@@ -1,10 +1,17 @@
 """Main-Agent runtime package (Plan 2).
 
-Task 2 exports durable contracts, ORM models, and the repository.
-Task 3 exports the digest-locked system seed loader and identity constants.
-Bootstrap, closure builder, readiness, activation, and admission land later.
+Exports durable contracts, ORM models, repository, seed loader, canonical
+closure builder, and shared readiness evaluator.
 """
 
+from app.assistant.runtime.closure import (
+    AssistantRuntimeClosureBuilder,
+    BoundAssistantModelIdentity,
+    ModelIdentityUnavailable,
+    RuntimeClosureDrift,
+    resolve_bound_assistant_model_identity,
+    run_optional_assistant_model_probe,
+)
 from app.assistant.runtime.contracts import (
     ASSISTANT_ROLLOUT_NAMESPACE,
     RUNTIME_READINESS_REASON_CODES,
@@ -30,6 +37,13 @@ from app.assistant.runtime.models import (
     AssistantMainAgentRolloutEvent,
     AssistantMainAgentRolloutRevision,
 )
+from app.assistant.runtime.readiness import (
+    AssistantReadinessService,
+    Plan2AlembicHeadCompatibility,
+    project_authenticated_readiness,
+    project_public_readiness,
+    read_single_alembic_version,
+)
 from app.assistant.runtime.repository import AssistantRuntimeRepository
 from app.assistant.runtime.seed import (
     SEED_CONTRACT_DIGEST,
@@ -51,16 +65,22 @@ __all__ = (
     "AssistantMainAgentRolloutControl",
     "AssistantMainAgentRolloutEvent",
     "AssistantMainAgentRolloutRevision",
+    "AssistantReadinessService",
     "AssistantReadinessSnapshot",
     "AssistantRuntimeClosure",
+    "AssistantRuntimeClosureBuilder",
     "AssistantRuntimeRepository",
     "AssistantRuntimeSubject",
     "AssistantSystemSeedManifest",
+    "BoundAssistantModelIdentity",
+    "ModelIdentityUnavailable",
     "NewChatAdmission",
     "NewRolloutEvent",
+    "Plan2AlembicHeadCompatibility",
     "PreparedRolloutResult",
     "PreparedRolloutRevision",
     "PrepareRolloutRequest",
+    "RuntimeClosureDrift",
     "RuntimeControlConflict",
     "RuntimeControlResult",
     "RuntimeRequestReuseConflict",
@@ -73,6 +93,11 @@ __all__ = (
     "SystemSeedInvalid",
     "VerifiedAssistantSystemSeed",
     "load_verified_assistant_system_seed",
+    "project_authenticated_readiness",
+    "project_public_readiness",
+    "read_single_alembic_version",
     "require_sha256",
+    "resolve_bound_assistant_model_identity",
     "rollout_revision_id_for_request",
+    "run_optional_assistant_model_probe",
 )

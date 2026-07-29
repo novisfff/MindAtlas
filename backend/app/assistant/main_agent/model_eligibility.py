@@ -73,7 +73,12 @@ class ModelEligibilityError(ValueError):
 
 
 class FrozenModelIdentity(FrozenContract):
-    """Exact model/credential identity frozen at admission (no secrets)."""
+    """Exact model/credential identity frozen at admission (no secrets).
+
+    Probe fields are optional diagnostics. Fresh bootstrap / deterministic
+    readiness freezes both as ``None``; decrypt-time recheck only compares
+    probe identity when the frozen identity carries them.
+    """
 
     model_id: UUID
     model_name: str
@@ -84,8 +89,8 @@ class FrozenModelIdentity(FrozenContract):
     credential_config_digest: str
     model_config_digest: str
     provider_ref_digest: str | None = None
-    capability_probe_id: UUID
-    capability_probe_digest: str
+    capability_probe_id: UUID | None = None
+    capability_probe_digest: str | None = None
 
 
 class ModelEligibilityReport(FrozenContract):
@@ -323,7 +328,12 @@ def recheck_identity_before_decrypt(
     live_probe_id: UUID | None,
     live_probe_digest: str | None,
 ) -> None:
-    """Fail closed if model/credential/probe drifted after admission freeze."""
+    """Fail closed if model/credential (and optional probe) drifted after freeze.
+
+    Always compares model revision, credential revision, model config digest,
+    and credential config digest. Probe identity is compared only when the
+    frozen identity contains an optional diagnostic probe.
+    """
     if int(live_model_runtime_revision) != int(frozen.model_runtime_revision):
         raise ModelEligibilityError(MODEL_REVISION_DRIFT)
     if int(live_credential_runtime_revision) != int(frozen.credential_runtime_revision):
@@ -332,6 +342,8 @@ def recheck_identity_before_decrypt(
         raise ModelEligibilityError(PROBE_CONFIG_DIGEST_MISMATCH)
     if str(live_credential_config_digest) != str(frozen.credential_config_digest):
         raise ModelEligibilityError(CREDENTIAL_REVISION_DRIFT)
+    if frozen.capability_probe_id is None and frozen.capability_probe_digest is None:
+        return
     if live_probe_id is None or live_probe_id != frozen.capability_probe_id:
         raise ModelEligibilityError(PROBE_NOT_CURRENT)
     if live_probe_digest is None or str(live_probe_digest) != str(
