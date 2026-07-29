@@ -273,7 +273,25 @@ python3 -c 'import base64,secrets; print(base64.b64encode(secrets.token_bytes(32
 
 1. **Backup** the current `MINDATLAS_SESSION_HMAC_KEYS` / active key id before any rotation.
 2. **Rotate** by introducing a new active key while retaining the previous key (`active` + at most one `previous`). Existing sessions signed with the previous key are re-MACed onto the active key on a successful authenticated request that also supplies CSRF.
-3. **Revoke before removal**: sessions that still depend on the previous key must be durably revoked (maintenance path / `revoke_unverifiable_sessions`) **before** the previous key is removed from the ring. Removing a previous key without revocation leaves those sessions unverifiable and the service revokes them on the maintenance path with a safe audit event.
+3. **Revoke before removal**: sessions that still depend on the previous key must be durably revoked **before** the previous key is removed from the ring. Removing a previous key without revocation leaves those sessions unverifiable; the maintenance CLI below revokes them with a safe audit event (`session_key_revoked` / `hmac_key_removed`).
+
+   From the API container (or a host with the same `DATABASE_URL` + key-ring env as production):
+
+   ```bash
+   # Human-readable summary (safe counts only — no cookies, digests of secrets, or key material).
+   python -m scripts.revoke_unverifiable_operator_sessions
+
+   # Or as a script path from backend/:
+   python scripts/revoke_unverifiable_operator_sessions.py --json
+   ```
+
+   Typical rotation sequence:
+
+   1. Deploy with `active=new` + `previous=old` still in `MINDATLAS_SESSION_HMAC_KEYS`.
+   2. Let traffic re-MAC old sessions onto `new` (authenticated + CSRF requests).
+   3. Run the revoke CLI so any remaining sessions still bound to a removed/unknown key id are durably revoked.
+   4. Only then remove `old` from the ring and redeploy with `active=new` alone.
+
 4. Never commit real key material. Never log raw session/CSRF values.
 
 ### Initialization recovery
