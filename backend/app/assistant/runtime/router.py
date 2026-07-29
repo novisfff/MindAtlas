@@ -1,8 +1,11 @@
-"""Protected browser control-plane routes for Main-Agent runtime (Plan 2 Task 6).
+"""Protected browser control-plane routes for Main-Agent runtime (Plan 2 Task 6+10).
 
 Mounted under Plan 1 ``protected_browser_router`` so unsafe methods receive
 Operator + CSRF plus the generic same-transaction mutation audit. Public
-``/ready`` lands in Task 10 and is intentionally not mounted here.
+``/ready`` is mounted on the public router in ``app.main`` (process split);
+authenticated diagnostics stay here under ``/api/assistant-runtime/readiness``.
+Both surfaces share ``AssistantReadinessService`` + the projection helpers —
+do not fork reason-code logic.
 """
 
 from __future__ import annotations

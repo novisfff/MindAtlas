@@ -1,7 +1,10 @@
-"""Shared assistant readiness evaluator (Plan 2 Task 5).
+"""Shared assistant readiness evaluator (Plan 2 Task 5 + Task 10 projections).
 
-One evaluator for observational readiness and (later) admission. No writes,
-no Provider calls, no activation, no Worker registration.
+One evaluator for observational readiness, public ``/ready``, authenticated
+diagnostics, and Chat admission. No writes, no Provider calls, no activation,
+no Worker registration. Public and authenticated HTTP surfaces must call
+``project_public_readiness`` / ``project_authenticated_readiness`` rather than
+forking reason-code or payload shaping.
 """
 
 from __future__ import annotations

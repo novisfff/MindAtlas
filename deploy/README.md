@@ -203,12 +203,27 @@ docker compose exec minio mc mb --ignore-existing local/mindatlas
 
 **解决方案**:
 ```bash
-# 检查后端健康状态
+# 检查后端进程健康（Compose depends_on / Web bootstrap 使用 /health，不访问数据库）
 docker compose exec web curl http://api:8000/health
 
 # 查看后端日志
 docker compose logs api
 ```
+
+### 3b. Assistant Chat 无法准入（部署验收）
+
+**症状**: API 与 Web 已 healthy，但 Chat 创建 Run 返回 503 / 前端 readiness gate 关闭
+
+**说明**: Compose 与 Web 依赖的是进程 liveness `GET /health`，**不是** Assistant 准入就绪。
+初始化、兼容 Worker 注册、以及 Operator 激活之后，用下面命令做部署验收（不是 `depends_on`）：
+
+```bash
+# 期望 HTTP 200 且 data.ready=true；未初始化/未激活时 curl 因 503 非零退出
+curl --fail --silent --show-error http://localhost:8000/ready
+```
+
+公开 `/ready` 只返回 `ready` 与稳定 reason codes；带诊断 ID 的详情走认证
+`GET /api/assistant-runtime/readiness`。
 
 ### 4. 端口被占用
 
