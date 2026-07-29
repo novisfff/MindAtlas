@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -7,6 +8,12 @@ from unittest.mock import patch
 from tests._bootstrap import bootstrap_backend_imports, reset_caches
 from tests._db import make_session
 
+
+# Clean-only init encrypts the AI credential; tests must supply a Fernet key.
+os.environ.setdefault(
+    "AI_PROVIDER_FERNET_KEY",
+    "07v02gVBdreNrXjLJZkIMdohHtgy6aDFKBHxakHjbrQ=",
+)
 
 bootstrap_backend_imports()
 reset_caches()
@@ -32,6 +39,8 @@ class RuntimeConfigServiceTests(unittest.TestCase):
         return InitializeSystemRequest.model_validate(
             {
                 "locale": locale,
+                # Exact Operator password (Task 6 clean-only init); never log/echo.
+                "operatorPassword": "correct horse battery",
                 "aiCredential": {
                     "name": "OpenAI",
                     "baseUrl": "https://api.openai.com/v1",

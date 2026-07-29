@@ -166,6 +166,8 @@ class OpenClawSharedCapabilityRuntimeTests(unittest.TestCase):
             InitializeSystemRequest.model_validate(
                 {
                     "locale": locale,
+                    # Exact Operator password (Task 6 clean-only init); never log/echo.
+                    "operatorPassword": "correct horse battery",
                     "aiCredential": {
                         "name": "OpenAI",
                         "baseUrl": "https://api.openai.com/v1",
