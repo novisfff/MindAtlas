@@ -122,7 +122,25 @@ def test_blank_secret_str_coerced_to_none() -> None:
     assert settings.session_hmac_keys is None
 
 
-def test_settings_constructible_without_auth_secrets() -> None:
+def test_settings_constructible_without_auth_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Settings must construct without operator secrets even when CI injects them.
+
+    Operator Control Plane job secrets are step-scoped, but this test still
+    clears process env so a job-level leak (or local shell) cannot mask the
+    "optional secrets" contract. ``_env_file`` is ignored via empty overrides.
+    """
+    from app.config import get_settings
+
+    for key in (
+        "MINDATLAS_INITIAL_SETUP_TOKEN",
+        "MINDATLAS_SESSION_HMAC_KEYS",
+        "MINDATLAS_SESSION_HMAC_ACTIVE_KEY_ID",
+        "MINDATLAS_CANONICAL_ORIGIN",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    get_settings.cache_clear()
     settings = Settings(APP_ENV="development")
     assert settings.initial_setup_token is None
     assert settings.session_hmac_keys is None

@@ -84,12 +84,9 @@ jobs:
       # Hard-fail release-critical operator-auth PostgreSQL suite when URL missing.
       MINDATLAS_REQUIRE_POSTGRES: "1"
       AI_PROVIDER_FERNET_KEY: "07v02gVBdreNrXjLJZkIMdohHtgy6aDFKBHxakHjbrQ="
-      # Synthetic test-only operator secrets (disposable; never production values).
-      # Setup material is 48 url-safe bytes; HMAC keys are 32-byte base64.
+      # Origin only at job scope — operator secrets stay step-scoped so
+      # test_settings_constructible_without_auth_secrets stays honest under CI.
       MINDATLAS_CANONICAL_ORIGIN: "http://localhost:3000"
-      MINDATLAS_INITIAL_SETUP_TOKEN: "ci-only-operator-setup-material-not-for-production-use-48b"
-      MINDATLAS_SESSION_HMAC_ACTIVE_KEY_ID: "ci_active"
-      MINDATLAS_SESSION_HMAC_KEYS: '{"ci_active":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}'
       APP_ENV: test
       APP_BUILD_REVISION: "ci-operator-control-plane"
     steps:
@@ -107,6 +104,9 @@ jobs:
         run: python -m pip install -r requirements.txt pytest
 
       - name: Alembic upgrade to operator control-plane head
+        env:
+          # Empty CI DB must traverse Plan 10 B2 preflight en route to 9f3c1a7e2b40.
+          MINDATLAS_PLAN10_B2_TEST_OVERRIDE: "1"
         run: |
           set -euo pipefail
           alembic upgrade 9f3c1a7e2b40
@@ -114,6 +114,12 @@ jobs:
           alembic heads
 
       - name: Operator auth and route-inventory suites
+        env:
+          # Synthetic test-only operator secrets (disposable; never production values).
+          # Setup material is 48 url-safe bytes; HMAC keys are 32-byte base64.
+          MINDATLAS_INITIAL_SETUP_TOKEN: "ci-only-operator-setup-material-not-for-production-use-48b"
+          MINDATLAS_SESSION_HMAC_ACTIVE_KEY_ID: "ci_active"
+          MINDATLAS_SESSION_HMAC_KEYS: '{"ci_active":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}'
         run: |
           set -euo pipefail
           # Fixed Plan 1 suites. MINDATLAS_REQUIRE_POSTGRES=1 makes the
@@ -129,6 +135,10 @@ jobs:
             tests/test_operator_control_plane_evidence.py
 
       - name: Reject skipped release-critical postgres suite
+        env:
+          MINDATLAS_INITIAL_SETUP_TOKEN: "ci-only-operator-setup-material-not-for-production-use-48b"
+          MINDATLAS_SESSION_HMAC_ACTIVE_KEY_ID: "ci_active"
+          MINDATLAS_SESSION_HMAC_KEYS: '{"ci_active":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}'
         run: |
           set -euo pipefail
           # Re-run the postgres module alone and fail if any test was skipped.
@@ -234,6 +244,8 @@ jobs:
           MINDATLAS_PLAN10_B2_SKILL_DROP_DOWNGRADE_ACK: "1"
           MINDATLAS_PLAN10_B2_LEGACY_ID_DROP_DOWNGRADE_ACK: "1"
           MINDATLAS_PLAN10_B2_LEGACY_DIGEST_DROP_DOWNGRADE_ACK: "1"
+          # Plan 1 tip refuses destructive downgrade outside disposable non-prod DBs.
+          MINDATLAS_TEST_DESTRUCTIVE_DOWNGRADE: "1"
         run: |
           set -euo pipefail
           alembic upgrade head
