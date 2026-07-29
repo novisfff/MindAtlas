@@ -2064,7 +2064,13 @@ class MainAgentProfileService:
             payload = snapshot.normalized_payload()
             digest = snapshot.content_digest()
             version_name = command.version_name or "draft"
-            origin = command.origin
+            # Command-level origin is api|system_bootstrap. Persist only values
+            # allowed by ck_assistant_main_agent_profile_version_origin
+            # (bootstrap|api|legacy). Map system_bootstrap → bootstrap at write.
+            command_origin = command.origin
+            durable_origin = (
+                "bootstrap" if command_origin == "system_bootstrap" else command_origin
+            )
             source_ref = command.source_ref
             request_id = (command.request_id or "").strip()
             if not request_id:
@@ -2079,7 +2085,7 @@ class MainAgentProfileService:
             cas_payload = {
                 "profile_id": str(profile_id),
                 "version_name": version_name,
-                "origin": origin,
+                "origin": durable_origin,
                 "content_digest": digest,
                 "expected_aggregate_revision": int(
                     command.expected_aggregate_revision
@@ -2132,10 +2138,10 @@ class MainAgentProfileService:
                 )
 
             # Migration ownership:
-            # - origin=system_bootstrap keeps bootstrap state for seed/init paths
-            # - origin=api promotes bootstrap|shadow → native (administrator ownership)
+            # - command origin=system_bootstrap keeps bootstrap state for seed/init
+            # - command origin=api promotes bootstrap|shadow → native (admin ownership)
             # - never demote native/cutover via either path
-            if origin == "api":
+            if command_origin == "api":
                 if profile.migration_state in {"bootstrap", "shadow"}:
                     profile.migration_state = "native"
 
@@ -2162,7 +2168,7 @@ class MainAgentProfileService:
                 sequence_no=next_seq,
                 version_name=version_name,
                 version_source="save",
-                origin=origin,
+                origin=durable_origin,
                 source_draft_version_id=None,
                 snapshot=payload,
                 content_digest=digest,
