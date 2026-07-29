@@ -612,25 +612,26 @@ def test_chat_stream_maps_admission_error_to_503(ready_runtime, conversation, mo
 def test_chat_stream_does_not_call_legacy_selector(
     ready_runtime, conversation, monkeypatch
 ):
+    import importlib
+    import inspect
+
     from app.assistant.models import AssistantChatRun
     from app.assistant.runtime.admission import AssistantChatAdmissionService
     from app.assistant.service import AssistantService
 
-    calls: list[str] = []
+    # Task 9: legacy durable.admission module is gone — chat_stream must not
+    # depend on admit_and_select_runtime and must use AssistantChatAdmissionService.
+    with pytest.raises(ImportError):
+        importlib.import_module("app.assistant.durable.admission")
 
-    def _track_admit(*args, **kwargs):  # noqa: ANN001, ARG001
-        calls.append("legacy_admit")
-        raise AssertionError("legacy admit_and_select_runtime must not be called")
-
-    monkeypatch.setattr(
-        "app.assistant.durable.admission.admit_and_select_runtime",
-        _track_admit,
-    )
+    chat_src = inspect.getsource(AssistantService.chat_stream)
+    assert "AssistantChatAdmissionService" in chat_src
+    assert "admit_and_select_runtime" not in chat_src
 
     # chat_stream constructs AssistantChatAdmissionService(self.db) with default
     # readiness probes. Bridge to the ready harness so SQLite unit tests do not
     # depend on the Plan 2 alembic head row, while still exercising the live
-    # chat_stream path (no legacy selector).
+    # chat_stream path (Main-Agent admission only).
     original_admit = AssistantChatAdmissionService.admit_and_create
 
     def _admit_and_create(self, *, conversation_id, user_message):  # noqa: ANN001
@@ -662,7 +663,6 @@ def test_chat_stream_does_not_call_legacy_selector(
         )
     )
     assert chunks
-    assert calls == []
     runs = (
         ready_runtime.db.query(AssistantChatRun)
         .filter(AssistantChatRun.conversation_id == conversation.id)

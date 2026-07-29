@@ -50,7 +50,7 @@ INVENTORY_ALLOWLIST: frozenset[str] = frozenset(
         "test_ai_runtime_migration_repository_postgres.py:690",
         "test_ai_runtime_migration_repository_postgres.py:712",
         "test_assistant_atomic_admission.py:623",
-        "test_assistant_atomic_admission.py:626",
+        "test_assistant_atomic_admission.py:629",
         "test_assistant_runtime_config.py:15",
         "test_assistant_runtime_config.py:16",
         "test_assistant_runtime_config.py:27",
