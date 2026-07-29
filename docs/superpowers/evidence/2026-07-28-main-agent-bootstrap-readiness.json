@@ -1,0 +1,36 @@
+{
+  "activeRuntimeKind": "main_agent",
+  "aggregateDigest": "4e245ac5a87776076791bd29f4bbd85e316e4ab35b59bfa8574d0eae19ae2949",
+  "alembicHead": "b6e2d4f8a901",
+  "buildRevision": "plan2-smoke-f8c89ed1e039",
+  "chatRunCount": 1,
+  "chatTerminalStatus": "completed",
+  "compatibleWorkerCount": 1,
+  "generatedAtUtc": "2026-07-29T17:55:46+00:00",
+  "healthStatus": "ok",
+  "readinessTransitions": [
+    "health_ok",
+    "ready_system_not_initialized",
+    "initialized_pending_worker",
+    "ready_post_init_blocked",
+    "compatible_worker",
+    "ready_rollout_inactive",
+    "activation_committed",
+    "ready_ok",
+    "conversation_created",
+    "chat_admitted",
+    "chat_completed"
+  ],
+  "schemaVersion": "1",
+  "seedManifestDigest": "3ba69223e9c1a3ab1783c8a549a1b7cf56410f36f60a7fb67ba1f4fc84275237",
+  "testSuites": {
+    "passed": true,
+    "pytestVersion": "9.0.2",
+    "pythonVersion": "3.12.7",
+    "suiteCount": 1,
+    "totalFailed": 0,
+    "totalPassed": 17,
+    "totalSkipped": 0
+  },
+  "verificationKind": "main_agent_bootstrap_readiness"
+}

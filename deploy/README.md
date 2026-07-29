@@ -225,6 +225,34 @@ curl --fail --silent --show-error http://localhost:8000/ready
 公开 `/ready` 只返回 `ready` 与稳定 reason codes；带诊断 ID 的详情走认证
 `GET /api/assistant-runtime/readiness`。
 
+### 3c. Fresh Main-Agent bootstrap Compose smoke
+
+Plan 2 ships a disposable overlay and fixed runner that prove
+**initialization → compatible Worker → activation → `/ready` → one completed
+`main_agent` Chat** without committing secrets:
+
+```bash
+cd backend
+.venv/bin/python scripts/smoke_main_agent_bootstrap.py \
+  --compose-file ../deploy/docker-compose.yml \
+  --overlay-file ../deploy/compose.main-agent-smoke.yml \
+  --output ../docs/superpowers/evidence/2026-07-28-main-agent-bootstrap-readiness.json
+```
+
+Notes:
+
+- Overlay `deploy/compose.main-agent-smoke.yml` starts an internal-only OpenAI
+  stub (`provider-stub`), one Assistant Worker, and sets `APP_ENV=test` plus
+  `MINDATLAS_TEST_PROVIDER_HOST=provider-stub` (test-only private-host gate).
+- The runner generates ephemeral Setup/session/Fernet secrets into mode-0600
+  files, never CLI secret values, and always runs
+  `docker compose down --volumes --remove-orphans`.
+- Evidence JSON is allowlisted (no password/setup/token/cookie/api_key/prompt/
+  entry/artifact/provider payload). CI job
+  `main-agent-bootstrap-smoke` uploads only that sanitized file.
+- Base Compose still uses `/health` for depends_on; smoke acceptance uses
+  `/ready` after Operator activation.
+
 ### 4. 端口被占用
 
 **症状**: 启动时提示端口已被使用

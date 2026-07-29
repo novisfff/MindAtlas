@@ -1,0 +1,151 @@
+# Disposable Main-Agent bootstrap smoke overlay.
+# Used only with an explicit project name and env file from
+# backend/scripts/smoke_main_agent_bootstrap.py. Never commit secrets here.
+#
+#   docker compose -p <unique> \
+#     -f deploy/docker-compose.yml \
+#     -f deploy/compose.main-agent-smoke.yml \
+#     up -d --build
+#
+# Provider stub has no host port. API is published only via SMOKE_API_HOST_PORT
+# for the host-side smoke client. Fixed base container_name values are replaced
+# with COMPOSE_PROJECT_NAME-prefixed names for isolation.
+
+name: ${COMPOSE_PROJECT_NAME:-ma-smoke}
+
+services:
+  postgres:
+    container_name: ${COMPOSE_PROJECT_NAME:-ma-smoke}-postgres
+    ports: !reset []
+
+  minio:
+    container_name: ${COMPOSE_PROJECT_NAME:-ma-smoke}-minio
+    ports: !reset []
+
+  minio-init:
+    container_name: ${COMPOSE_PROJECT_NAME:-ma-smoke}-minio-init
+
+  neo4j:
+    container_name: ${COMPOSE_PROJECT_NAME:-ma-smoke}-neo4j
+    ports: !reset []
+    # Keep neo4j for api depends_on health; smoke disables LightRAG usage.
+
+  db-migrate:
+    container_name: ${COMPOSE_PROJECT_NAME:-ma-smoke}-db-migrate
+    build:
+      args:
+        APP_BUILD_REVISION: ${APP_BUILD_REVISION:?Set APP_BUILD_REVISION}
+    environment:
+      # Fresh disposable DB only — Plan 10 B2 preflight gate for empty upgrade path.
+      MINDATLAS_PLAN10_B2_TEST_OVERRIDE: "1"
+
+  provider-stub:
+    image: python:3.11-slim
+    container_name: ${COMPOSE_PROJECT_NAME:-ma-smoke}-provider-stub
+    working_dir: /stub
+    volumes:
+      - ../backend/tests/support/openai_stub_server.py:/stub/openai_stub_server.py:ro
+    command:
+      - python
+      - /stub/openai_stub_server.py
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8089"
+    networks:
+      - mindatlas-network
+    # No ports: — internal network only.
+    restart: "no"
+
+  api:
+    container_name: ${COMPOSE_PROJECT_NAME:-ma-smoke}-api
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+      target: runtime
+      args:
+        APP_BUILD_REVISION: ${APP_BUILD_REVISION:?Set APP_BUILD_REVISION}
+    environment:
+      APP_ENV: test
+      APP_BUILD_REVISION: ${APP_BUILD_REVISION:?Set APP_BUILD_REVISION}
+      ASSISTANT_NEW_RUNS_ENABLED: "true"
+      ASSISTANT_MAIN_AGENT_WRITE_MODE: "off"
+      MINDATLAS_TEST_PROVIDER_HOST: provider-stub
+      MINDATLAS_CANONICAL_ORIGIN: ${MINDATLAS_CANONICAL_ORIGIN}
+      CORS_ORIGINS: ${CORS_ORIGINS}
+      MINDATLAS_INITIAL_SETUP_TOKEN: ${MINDATLAS_INITIAL_SETUP_TOKEN}
+      MINDATLAS_SESSION_HMAC_ACTIVE_KEY_ID: ${MINDATLAS_SESSION_HMAC_ACTIVE_KEY_ID}
+      MINDATLAS_SESSION_HMAC_KEYS: ${MINDATLAS_SESSION_HMAC_KEYS}
+      AI_PROVIDER_FERNET_KEY: ${AI_PROVIDER_FERNET_KEY}
+      LIGHTRAG_ENABLED: "false"
+      DOCLING_WORKER_ENABLED: "false"
+      SCHEDULER_ENABLED: "false"
+      LIGHTRAG_WORKER_ENABLED: "false"
+    ports:
+      - "${SMOKE_API_HOST_PORT}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
+      provider-stub:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  assistant-worker:
+    container_name: ${COMPOSE_PROJECT_NAME:-ma-smoke}-assistant-worker
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+      target: assistant-worker
+      args:
+        APP_BUILD_REVISION: ${APP_BUILD_REVISION:?Set APP_BUILD_REVISION}
+    environment:
+      APP_ENV: test
+      APP_BUILD_REVISION: ${APP_BUILD_REVISION:?Set APP_BUILD_REVISION}
+      ASSISTANT_NEW_RUNS_ENABLED: "true"
+      ASSISTANT_MAIN_AGENT_WRITE_MODE: "off"
+      MINDATLAS_TEST_PROVIDER_HOST: provider-stub
+      AI_PROVIDER_FERNET_KEY: ${AI_PROVIDER_FERNET_KEY}
+      LIGHTRAG_ENABLED: "false"
+      DOCLING_WORKER_ENABLED: "false"
+      SCHEDULER_ENABLED: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
+      api:
+        condition: service_healthy
+      provider-stub:
+        condition: service_started
+
+  # Heavy optional workers — keep defined but disabled via profiles.
+  lightrag-worker:
+    container_name: ${COMPOSE_PROJECT_NAME:-ma-smoke}-lightrag-worker
+    profiles: ["smoke-disabled"]
+    environment:
+      LIGHTRAG_WORKER_ENABLED: "false"
+      LIGHTRAG_ENABLED: "false"
+
+  docling-worker:
+    container_name: ${COMPOSE_PROJECT_NAME:-ma-smoke}-docling-worker
+    profiles: ["smoke-disabled"]
+    environment:
+      DOCLING_WORKER_ENABLED: "false"
+
+  web:
+    container_name: ${COMPOSE_PROJECT_NAME:-ma-smoke}-web
+    profiles: ["smoke-disabled"]
+    ports: !reset []

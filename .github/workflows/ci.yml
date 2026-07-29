@@ -450,6 +450,75 @@ jobs:
           print("assistant readiness postgres gate: OK")
           PY
 
+  main-agent-bootstrap-smoke:
+    name: Main Agent Bootstrap Compose Smoke
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      APP_ENV: test
+      APP_BUILD_REVISION: "ci-main-agent-bootstrap-smoke"
+      ASSISTANT_NEW_RUNS_ENABLED: "true"
+      ASSISTANT_MAIN_AGENT_WRITE_MODE: "off"
+      # Disposable CI Fernet only — never production material.
+      AI_PROVIDER_FERNET_KEY: "07v02gVBdreNrXjLJZkIMdohHtgy6aDFKBHxakHjbrQ="
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install backend dependencies
+        run: python -m pip install -r requirements.txt pytest
+
+      - name: Unit tests for smoke evidence, stub, and SSRF gate
+        run: |
+          set -euo pipefail
+          python -m pytest tests/test_main_agent_bootstrap_smoke_script.py -q
+
+      - name: Fresh Compose bootstrap-to-chat smoke
+        run: |
+          set -euo pipefail
+          python scripts/smoke_main_agent_bootstrap.py \
+            --compose-file ../deploy/docker-compose.yml \
+            --overlay-file ../deploy/compose.main-agent-smoke.yml \
+            --build-revision "${APP_BUILD_REVISION}" \
+            --output ../docs/superpowers/evidence/2026-07-28-main-agent-bootstrap-readiness.json
+
+      - name: Validate evidence allowlist and digest
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          from scripts.smoke_main_agent_bootstrap import validate_evidence
+
+          path = Path("../docs/superpowers/evidence/2026-07-28-main-agent-bootstrap-readiness.json")
+          if not path.is_file():
+              raise SystemExit("evidence file missing after smoke")
+          payload = json.loads(path.read_text(encoding="utf-8"))
+          validate_evidence(payload)
+          assert payload["activeRuntimeKind"] == "main_agent"
+          assert payload["chatRunCount"] == 1
+          assert payload["chatTerminalStatus"] == "completed"
+          assert payload["alembicHead"] == "b6e2d4f8a901"
+          print("main agent bootstrap evidence: OK")
+          PY
+
+      - name: Upload sanitized evidence artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: main-agent-bootstrap-readiness-evidence
+          path: docs/superpowers/evidence/2026-07-28-main-agent-bootstrap-readiness.json
+          if-no-files-found: error
+
   frontend:
     name: Frontend Build And Tests
     runs-on: ubuntu-latest
