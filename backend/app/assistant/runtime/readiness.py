@@ -35,6 +35,7 @@ from app.assistant.skills.models import (
 )
 from app.assistant.skills.schemas import MainAgentProfileSnapshotV2
 from app.config import Settings, get_settings
+from app.operator_auth.dependencies import load_session_mac_key_ring
 from app.operator_auth.models import OperatorAccount
 from app.operator_auth.service import OperatorAuthService
 from app.operator_auth.tokens import SessionMacKeyRing
@@ -126,6 +127,9 @@ class _DefaultModelProbe:
         return model is not None and str(model.model_type or "") == "llm"
 
 
+_KEY_RING_UNSET = object()
+
+
 class AssistantReadinessService:
     """Observational readiness + lockable admission evaluator."""
 
@@ -135,7 +139,7 @@ class AssistantReadinessService:
         *,
         settings: Settings | Any | None = None,
         schema_compatibility: RuntimeSchemaCompatibility | None = None,
-        key_ring: SessionMacKeyRing | None = None,
+        key_ring: SessionMacKeyRing | None | object = _KEY_RING_UNSET,
         seed_probe: Any | None = None,
         initialization_probe: Any | None = None,
         operator_probe: Any | None = None,
@@ -150,7 +154,12 @@ class AssistantReadinessService:
             if schema_compatibility is not None
             else Plan2AlembicHeadCompatibility()
         )
-        self.key_ring = key_ring
+        # Mirror build_operator_auth_service → load_session_mac_key_ring(settings).
+        # Omitted key_ring loads from settings; explicit None stays injectable for tests.
+        if key_ring is _KEY_RING_UNSET:
+            self.key_ring = load_session_mac_key_ring(self.settings)
+        else:
+            self.key_ring = key_ring  # type: ignore[assignment]
         self.seed_probe = seed_probe if seed_probe is not None else _DefaultSeedProbe()
         self.initialization_probe = (
             initialization_probe

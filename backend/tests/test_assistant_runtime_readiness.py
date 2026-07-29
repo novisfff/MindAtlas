@@ -470,3 +470,75 @@ def test_authenticated_projection_may_expose_safe_ids(runtime_state):
 class _AlwaysCompatible:
     def is_compatible(self, db) -> bool:  # noqa: ANN001
         return True
+
+
+def _settings_with_session_mac_ring(**overrides):
+    """Real Settings carrying a parseable session-MAC ring (production default path)."""
+    import base64
+    import json
+
+    from app.config import Settings
+
+    material = base64.b64encode(b"k" * 32).decode("ascii")
+    encoded = json.dumps({"k1": material})
+    kwargs = {
+        "APP_ENV": "test",
+        "APP_BUILD_REVISION": BUILD,
+        "ASSISTANT_NEW_RUNS_ENABLED": "true",
+        "MINDATLAS_SESSION_HMAC_ACTIVE_KEY_ID": "k1",
+        "MINDATLAS_SESSION_HMAC_KEYS": encoded,
+    }
+    kwargs.update(overrides)
+    return Settings(**kwargs)
+
+
+def test_bare_readiness_defaults_key_ring_from_settings(db):
+    """Omitted key_ring loads via load_session_mac_key_ring(settings), like production auth.
+
+    Bare AssistantReadinessService(db, settings=...) must not force
+    operator_auth_unavailable solely because no ring was injected.
+    """
+    from app.assistant.runtime.readiness import AssistantReadinessService
+    from app.operator_auth.dependencies import load_session_mac_key_ring
+
+    settings = _settings_with_session_mac_ring()
+    expected = load_session_mac_key_ring(settings)
+    assert expected is not None
+
+    state = _RuntimeState(db=db, key_ring=_make_key_ring())
+    state._mark_initialized()
+    state._seed_operator()
+
+    # No key_ring= argument — production default path.
+    service = AssistantReadinessService(
+        db,
+        settings=settings,
+        schema_compatibility=_AlwaysCompatible(),
+        seed_probe=SimpleNamespace(is_valid=lambda: True),
+    )
+    assert service.key_ring is not None
+    assert service.key_ring.active_key_id == expected.active_key_id
+    assert set(service.key_ring.keys) == set(expected.keys)
+
+    snapshot = service.evaluate()
+    assert "operator_auth_unavailable" not in snapshot.reason_codes
+
+
+def test_explicit_none_key_ring_still_forces_auth_unavailable(db):
+    """Tests may still inject key_ring=None to force operator_auth_unavailable."""
+    from app.assistant.runtime.readiness import AssistantReadinessService
+
+    settings = _settings_with_session_mac_ring()
+    state = _RuntimeState(db=db, key_ring=_make_key_ring())
+    state._mark_initialized()
+    state._seed_operator()
+
+    snapshot = AssistantReadinessService(
+        db,
+        settings=settings,
+        schema_compatibility=_AlwaysCompatible(),
+        key_ring=None,
+        seed_probe=SimpleNamespace(is_valid=lambda: True),
+    ).evaluate()
+    assert snapshot.ready is False
+    assert snapshot.reason_codes == ("operator_auth_unavailable",)
