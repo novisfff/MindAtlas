@@ -21,7 +21,6 @@ from tests._bootstrap import bootstrap_backend_imports, reset_caches
 bootstrap_backend_imports()
 reset_caches()
 
-from app.main import app as production_app  # noqa: E402
 from app.operator_auth.models import OperatorAuditEvent  # noqa: E402
 from app.operator_auth.route_policy import (  # noqa: E402
     POLICY_AUTHENTICATED_MACHINE,
@@ -123,7 +122,20 @@ def unsafe_non_session_routes(app) -> set[tuple[str, str, str]]:
 
 @pytest.fixture
 def app():
-    return production_app
+    """Production FastAPI app — import lazily and never mutate its overrides/routes.
+
+    Earlier modules that pin ``get_settings`` or set ``dependency_overrides`` on a
+    shared app must not empty inventory results. We re-import ``app.main`` each
+    collection and clear any leftover overrides without touching ``app.routes``.
+    """
+    from app.main import app as production_app
+
+    # Inventory is read-only; clear overrides left by other suites (if any).
+    production_app.dependency_overrides.clear()
+    try:
+        yield production_app
+    finally:
+        production_app.dependency_overrides.clear()
 
 
 def test_every_application_route_has_exact_policy(app) -> None:
@@ -389,6 +401,7 @@ def authority_client(tmp_path, monkeypatch):
             "CSRF_COOKIE_NAME": CSRF_COOKIE_NAME,
         }
     finally:
+        application.dependency_overrides.clear()
         client.close()
         engine.dispose()
         try:
@@ -810,6 +823,7 @@ def test_audit_insert_failure_rolls_back_domain_mutation(monkeypatch) -> None:
         finally:
             verify.close()
     finally:
+        application.dependency_overrides.clear()
         client.close()
         cleanup = factory()
         try:

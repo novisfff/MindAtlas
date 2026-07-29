@@ -161,7 +161,7 @@ def app(
     auth_settings: Settings,
     session_factory: sessionmaker,
     initialized_operator: None,
-) -> FastAPI:
+) -> Iterator[FastAPI]:
     application = FastAPI()
     register_exception_handlers(application)
 
@@ -188,13 +188,20 @@ def app(
     application.dependency_overrides[get_settings] = lambda: auth_settings
     application.include_router(operator_auth_router)
     application.include_router(system_settings_router)
-    return application
+    try:
+        yield application
+    finally:
+        application.dependency_overrides.clear()
 
 
 @pytest.fixture
 def client(app: FastAPI) -> Iterator[TestClient]:
     with TestClient(app) as test_client:
-        yield test_client
+        try:
+            yield test_client
+        finally:
+            # Defensive: never leave overrides on a shared module-level app.
+            test_client.app.dependency_overrides.clear()
 
 
 @pytest.fixture
@@ -835,6 +842,7 @@ def uninitialized_session_factory() -> Iterator[sessionmaker]:
     from sqlalchemy import create_engine, event
 
     import tests._db  # noqa: F401 — JSONB→JSON for SQLite
+    import app.assistant.capability_calls.models  # noqa: F401 — FK target for Entry
     import app.entry.models  # noqa: F401 — resolve Relation→Entry mapper
     import app.operator_auth.models  # noqa: F401 — register tables
     import app.report.models  # noqa: F401 — register before full create_all
@@ -888,7 +896,7 @@ def uninitialized_session_factory() -> Iterator[sessionmaker]:
 def setup_app(
     setup_settings: Settings,
     uninitialized_session_factory: sessionmaker,
-) -> FastAPI:
+) -> Iterator[FastAPI]:
     application = FastAPI()
     register_exception_handlers(application)
 
@@ -915,13 +923,19 @@ def setup_app(
     application.dependency_overrides[get_settings] = lambda: setup_settings
     application.include_router(operator_auth_router)
     application.include_router(system_settings_router)
-    return application
+    try:
+        yield application
+    finally:
+        application.dependency_overrides.clear()
 
 
 @pytest.fixture
 def setup_client(setup_app: FastAPI) -> Iterator[TestClient]:
     with TestClient(setup_app) as test_client:
-        yield test_client
+        try:
+            yield test_client
+        finally:
+            test_client.app.dependency_overrides.clear()
 
 
 def _setup_headers(**extra: str) -> dict[str, str]:
