@@ -1,10 +1,11 @@
-"""Plan 06 Task 5: worker registration + compatible-admission tests.
+"""Plan 06 Task 5 + Plan 2 Task 7: worker registration + compatible-admission tests.
 
 Covers:
 - register / heartbeat / draining
 - build/codec mismatch is not admitted
 - API admission sees no compatible worker when build/codec differ
 - healthcheck validates fresh compatible registration (not mere PID)
+- WorkerCompatibility is the sole matcher (from_closure / from_run / order)
 """
 
 from __future__ import annotations
@@ -35,6 +36,19 @@ def _identity(**kwargs):
     )
     defaults.update(kwargs)
     return WorkerIdentity(**defaults)
+
+
+def _compat(**kwargs):
+    from app.assistant.durable.worker_registry import WorkerCompatibility
+
+    defaults = dict(
+        app_build_revision="build-test-1",
+        runtime_contract_version=1,
+        required_checkpoint_codec_version=1,
+        required_capability_feature_digest=DIGEST,
+    )
+    defaults.update(kwargs)
+    return WorkerCompatibility(**defaults)
 
 
 class WorkerRegistryUnitTests(unittest.TestCase):
@@ -83,7 +97,7 @@ class WorkerRegistryUnitTests(unittest.TestCase):
         self.assertFalse(reg.is_fresh(row, registration_ttl=timedelta(seconds=60)))
         self.assertFalse(
             reg.has_compatible_worker(
-                app_build_revision="build-test-1",
+                _compat(),
                 registration_ttl=timedelta(seconds=60),
             )
         )
@@ -95,13 +109,13 @@ class WorkerRegistryUnitTests(unittest.TestCase):
         reg.register(_identity(app_build_revision="build-A"))
         self.assertTrue(
             reg.has_compatible_worker(
-                app_build_revision="build-A",
+                _compat(app_build_revision="build-A"),
                 registration_ttl=timedelta(seconds=60),
             )
         )
         self.assertFalse(
             reg.has_compatible_worker(
-                app_build_revision="build-B",
+                _compat(app_build_revision="build-B"),
                 registration_ttl=timedelta(seconds=60),
             )
         )
@@ -114,15 +128,13 @@ class WorkerRegistryUnitTests(unittest.TestCase):
         reg.register(_identity(supported_checkpoint_codec_versions=(99,)))
         self.assertFalse(
             reg.has_compatible_worker(
-                app_build_revision="build-test-1",
-                required_checkpoint_codec_version=1,
+                _compat(required_checkpoint_codec_version=1),
                 registration_ttl=timedelta(seconds=60),
             )
         )
         self.assertTrue(
             reg.has_compatible_worker(
-                app_build_revision="build-test-1",
-                required_checkpoint_codec_version=99,
+                _compat(required_checkpoint_codec_version=99),
                 registration_ttl=timedelta(seconds=60),
             )
         )
@@ -138,9 +150,10 @@ class WorkerRegistryUnitTests(unittest.TestCase):
 
         self.assertFalse(
             reg.has_compatible_worker(
-                app_build_revision="build-test-1",
-                required_capability_feature_digest=(
-                    plan08_capability_ledger_feature_digest()
+                _compat(
+                    required_capability_feature_digest=(
+                        plan08_capability_ledger_feature_digest()
+                    )
                 ),
                 registration_ttl=timedelta(seconds=60),
             )
@@ -153,9 +166,10 @@ class WorkerRegistryUnitTests(unittest.TestCase):
         )
         self.assertTrue(
             reg.has_compatible_worker(
-                app_build_revision="build-test-1",
-                required_capability_feature_digest=(
-                    plan08_capability_ledger_feature_digest()
+                _compat(
+                    required_capability_feature_digest=(
+                        plan08_capability_ledger_feature_digest()
+                    )
                 ),
                 registration_ttl=timedelta(seconds=60),
             )
@@ -182,9 +196,10 @@ class WorkerRegistryUnitTests(unittest.TestCase):
 
         self.assertTrue(
             reg.has_compatible_worker(
-                app_build_revision="build-test-1",
-                required_capability_feature_digest=(
-                    plan08_capability_ledger_feature_digest()
+                _compat(
+                    required_capability_feature_digest=(
+                        plan08_capability_ledger_feature_digest()
+                    )
                 ),
                 registration_ttl=timedelta(seconds=60),
             )
@@ -204,7 +219,7 @@ class WorkerRegistryUnitTests(unittest.TestCase):
         self.db.commit()
         self.assertFalse(
             reg.has_compatible_worker(
-                app_build_revision="build-test-1",
+                _compat(),
                 registration_ttl=timedelta(seconds=20),
             )
         )
@@ -269,11 +284,15 @@ class WorkerRegistryUnitTests(unittest.TestCase):
         )
         ok = WorkerCompatibility(
             app_build_revision="b1",
+            runtime_contract_version=1,
             required_checkpoint_codec_version=2,
+            required_capability_feature_digest=DIGEST,
         )
         bad = WorkerCompatibility(
             app_build_revision="b1",
+            runtime_contract_version=1,
             required_checkpoint_codec_version=9,
+            required_capability_feature_digest=DIGEST,
         )
         self.assertTrue(ok.matches(identity))
         self.assertFalse(bad.matches(identity))
@@ -307,11 +326,29 @@ class WorkerRegistryUnitTests(unittest.TestCase):
             )
         )
         admitted = reg.has_compatible_worker(
-            app_build_revision="prod-build",
-            required_checkpoint_codec_version=1,
+            _compat(
+                app_build_revision="prod-build",
+                required_checkpoint_codec_version=1,
+            ),
             registration_ttl=timedelta(seconds=60),
         )
         self.assertFalse(admitted)
+
+    def test_find_compatible_workers_orders_by_worker_id_asc(self) -> None:
+        from app.assistant.durable.worker_registry import WorkerRegistry
+
+        reg = WorkerRegistry(self.db)
+        reg.register(_identity(worker_id="worker-z"))
+        reg.register(_identity(worker_id="worker-a"))
+        reg.register(_identity(worker_id="worker-m"))
+        rows = reg.find_compatible_workers(
+            _compat(),
+            registration_ttl=timedelta(seconds=60),
+        )
+        self.assertEqual(
+            [r.worker_id for r in rows],
+            ["worker-a", "worker-m", "worker-z"],
+        )
 
 
 if __name__ == "__main__":

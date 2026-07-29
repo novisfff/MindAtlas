@@ -321,16 +321,14 @@ class AssistantReadinessService:
         )
 
     def _compatible_workers(self, closure: AssistantRuntimeClosure) -> list[Any]:
-        rows = WorkerRegistry(self.db).find_compatible_workers(
-            app_build_revision=str(closure.build_revision),
-            runtime_contract_version=int(closure.runtime_contract_version),
-            required_checkpoint_codec_version=int(closure.checkpoint_codec_version),
-            required_capability_feature_digest=str(closure.capability_feature_digest),
-            require_not_draining=True,
+        from app.assistant.durable.worker_registry import WorkerCompatibility
+
+        # Canonical path: readiness and claim share WorkerCompatibility.
+        # find_compatible_workers already orders by worker_id ASC.
+        return WorkerRegistry(self.db).find_compatible_workers(
+            WorkerCompatibility.from_closure(closure),
             limit=50,
         )
-        # Stable order by worker_id ASC for deterministic projections.
-        return sorted(rows, key=lambda row: str(row.worker_id))
 
 
 def project_public_readiness(snapshot: AssistantReadinessSnapshot) -> dict[str, Any]:

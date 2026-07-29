@@ -129,12 +129,68 @@ class WorkerIdentity:
 
 @dataclass(frozen=True)
 class WorkerCompatibility:
-    """Run requirements that a worker registration must satisfy."""
+    """Canonical Run/closure requirements a worker registration must satisfy.
+
+    Feature digest is required for production Main Agent Runs — never optional
+    on the construction path. ``matches`` still tolerates a ``None`` digest only
+    for transitional healthcheck callers that have not yet migrated.
+    """
 
     app_build_revision: str
-    runtime_contract_version: int = RUNTIME_CONTRACT_VERSION
-    required_checkpoint_codec_version: int = 1
-    required_capability_feature_digest: str | None = None
+    runtime_contract_version: int
+    required_checkpoint_codec_version: int
+    required_capability_feature_digest: str
+
+    def __post_init__(self) -> None:
+        if not str(self.app_build_revision or "").strip():
+            raise ValueError("app_build_revision must be nonempty")
+        if int(self.runtime_contract_version) <= 0:
+            raise ValueError("runtime_contract_version must be positive")
+        if int(self.required_checkpoint_codec_version) <= 0:
+            raise ValueError("required_checkpoint_codec_version must be positive")
+        digest = str(self.required_capability_feature_digest or "")
+        if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest.lower()):
+            raise ValueError(
+                "required_capability_feature_digest must be a 64-char hex digest"
+            )
+
+    @classmethod
+    def from_closure(cls, closure: Any) -> "WorkerCompatibility":
+        """Build requirements from a release/runtime closure."""
+        return cls(
+            app_build_revision=str(getattr(closure, "build_revision", "") or ""),
+            runtime_contract_version=int(
+                getattr(closure, "runtime_contract_version", 0) or 0
+            ),
+            required_checkpoint_codec_version=int(
+                getattr(closure, "checkpoint_codec_version", 0) or 0
+            ),
+            required_capability_feature_digest=str(
+                getattr(closure, "capability_feature_digest", "") or ""
+            ),
+        )
+
+    @classmethod
+    def from_run(cls, run: Any) -> "WorkerCompatibility":
+        """Build requirements from a Run's frozen admission fields.
+
+        Never rewrites Run requirements to match a Worker — claim filters
+        consume the Run as-is.
+        """
+        return cls(
+            app_build_revision=str(
+                getattr(run, "required_app_build_revision", "") or ""
+            ),
+            runtime_contract_version=int(
+                getattr(run, "runtime_contract_version", 0) or 0
+            ),
+            required_checkpoint_codec_version=int(
+                getattr(run, "required_checkpoint_codec_version", 0) or 0
+            ),
+            required_capability_feature_digest=str(
+                getattr(run, "required_capability_feature_digest", "") or ""
+            ),
+        )
 
     def matches(self, identity: WorkerIdentity | AssistantWorkerRegistration) -> bool:
         build = str(getattr(identity, "app_build_revision", "") or "")
@@ -143,16 +199,16 @@ class WorkerCompatibility:
         if isinstance(supported, str):
             # Defensive: JSON may arrive as a string in some drivers.
             supported = []
-        supported_set = {int(v) for v in supported}
+        try:
+            supported_set = {int(v) for v in supported}
+        except (TypeError, ValueError):
+            return False
         feature_digest = str(getattr(identity, "capability_feature_digest", "") or "")
         return (
             build == str(self.app_build_revision)
             and contract == int(self.runtime_contract_version)
             and int(self.required_checkpoint_codec_version) in supported_set
-            and (
-                self.required_capability_feature_digest is None
-                or feature_digest == str(self.required_capability_feature_digest)
-            )
+            and feature_digest == str(self.required_capability_feature_digest)
         )
 
 
@@ -249,23 +305,15 @@ class WorkerRegistry:
 
     def has_compatible_worker(
         self,
+        compatibility: WorkerCompatibility,
         *,
-        app_build_revision: str,
-        runtime_contract_version: int = RUNTIME_CONTRACT_VERSION,
-        required_checkpoint_codec_version: int = 1,
-        required_capability_feature_digest: str | None = None,
         registration_ttl: timedelta | None = None,
-        require_not_draining: bool = True,
     ) -> bool:
-        """API admission: True when at least one fresh compatible worker exists."""
+        """True when at least one fresh non-draining compatible worker exists."""
         return (
             self.find_compatible_workers(
-                app_build_revision=app_build_revision,
-                runtime_contract_version=runtime_contract_version,
-                required_checkpoint_codec_version=required_checkpoint_codec_version,
-                required_capability_feature_digest=(required_capability_feature_digest),
+                compatibility,
                 registration_ttl=registration_ttl,
-                require_not_draining=require_not_draining,
                 limit=1,
             )
             != []
@@ -273,16 +321,18 @@ class WorkerRegistry:
 
     def find_compatible_workers(
         self,
+        compatibility: WorkerCompatibility,
         *,
-        app_build_revision: str,
-        runtime_contract_version: int = RUNTIME_CONTRACT_VERSION,
-        required_checkpoint_codec_version: int = 1,
-        required_capability_feature_digest: str | None = None,
         registration_ttl: timedelta | None = None,
-        require_not_draining: bool = True,
         limit: int = 50,
     ) -> list[AssistantWorkerRegistration]:
-        """Return fresh registrations matching build/contract/codec/feature."""
+        """Return fresh non-draining registrations matching ``compatibility``.
+
+        Filters by database-time heartbeat cutoff, ``draining_at IS NULL``, exact
+        build/contract/feature digest, then requires codec membership. Orders by
+        ``worker_id ASC`` after compatibility filtering. Never mutates
+        registration state.
+        """
         ttl = registration_ttl
         if ttl is None:
             s = get_settings()
@@ -291,37 +341,38 @@ class WorkerRegistry:
         cutoff = now - ttl
 
         # Codec versions are stored as JSON arrays of ints. Compare in Python
-        # after a build/contract/heartbeat prefilter — keeps SQLite + PG simple.
+        # after a build/contract/heartbeat/digest prefilter — keeps SQLite + PG
+        # simple while preserving deterministic worker_id order.
         stmt = (
             select(AssistantWorkerRegistration)
             .where(
-                AssistantWorkerRegistration.app_build_revision == str(app_build_revision),
+                AssistantWorkerRegistration.app_build_revision
+                == str(compatibility.app_build_revision),
                 AssistantWorkerRegistration.runtime_contract_version
-                == int(runtime_contract_version),
-                AssistantWorkerRegistration.heartbeat_at >= cutoff,
-            )
-            .order_by(AssistantWorkerRegistration.heartbeat_at.desc())
-            .limit(max(1, int(limit) * 4))
-        )
-        if require_not_draining:
-            stmt = stmt.where(AssistantWorkerRegistration.draining_at.is_(None))
-        if required_capability_feature_digest is not None:
-            stmt = stmt.where(
+                == int(compatibility.runtime_contract_version),
                 AssistantWorkerRegistration.capability_feature_digest
-                == str(required_capability_feature_digest)
+                == str(compatibility.required_capability_feature_digest),
+                AssistantWorkerRegistration.heartbeat_at >= cutoff,
+                AssistantWorkerRegistration.draining_at.is_(None),
             )
+            .order_by(AssistantWorkerRegistration.worker_id.asc())
+        )
 
         rows = list(self.db.scalars(stmt).all())
-        required = int(required_checkpoint_codec_version)
+        required = int(compatibility.required_checkpoint_codec_version)
         matched: list[AssistantWorkerRegistration] = []
         for row in rows:
+            if not compatibility.matches(row):
+                continue
+            # Belt-and-suspenders: matches already checks codec membership.
             supported = row.supported_checkpoint_codec_versions or []
             try:
                 supported_set = {int(v) for v in supported}
             except (TypeError, ValueError):
                 continue
-            if required in supported_set:
-                matched.append(row)
+            if required not in supported_set:
+                continue
+            matched.append(row)
             if len(matched) >= int(limit):
                 break
         return matched
@@ -339,6 +390,7 @@ class WorkerRegistry:
         """Validate a fresh compatible registration (not mere PID liveness).
 
         Used by the Docker healthcheck for the assistant-worker service.
+        Reports only stable reasons — never raw SQL/Alembic errors.
         """
         ttl = registration_ttl
         if ttl is None:
@@ -359,12 +411,24 @@ class WorkerRegistry:
                 "heartbeat_at": row.heartbeat_at.isoformat() if row.heartbeat_at else None,
                 "draining_at": row.draining_at.isoformat() if row.draining_at else None,
             }
-        compat = WorkerCompatibility(
-            app_build_revision=app_build_revision,
-            runtime_contract_version=runtime_contract_version,
-            required_checkpoint_codec_version=required_checkpoint_codec_version,
-            required_capability_feature_digest=required_capability_feature_digest,
-        )
+        digest = required_capability_feature_digest
+        if digest is None:
+            # Self-check against the worker's own advertised digest when the
+            # caller only validates process/build/codec freshness.
+            digest = str(row.capability_feature_digest or "")
+        try:
+            compat = WorkerCompatibility(
+                app_build_revision=app_build_revision,
+                runtime_contract_version=runtime_contract_version,
+                required_checkpoint_codec_version=required_checkpoint_codec_version,
+                required_capability_feature_digest=digest,
+            )
+        except ValueError:
+            return {
+                "ok": False,
+                "reason": "registration_incompatible",
+                "worker_id": worker_id,
+            }
         if not compat.matches(row):
             return {
                 "ok": False,

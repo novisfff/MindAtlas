@@ -57,6 +57,10 @@ DEFAULT_WORKER_STATE_PATH = Path(
     )
 )
 
+# Stable process exit when the live schema is incompatible with this build.
+# Plan 3 will swap the schema identity port; reason remains schema_incompatible.
+WORKER_SCHEMA_INCOMPATIBLE_EXIT = 78
+
 
 class RunExecutor(Protocol):
     """Task 6 port: execute a claimed Run under a live lease.
@@ -311,7 +315,9 @@ class AssistantWorker:
             self.worker_id,
             self.cfg.identity.app_build_revision,
         )
-        self._register()
+        registered = self._register()
+        if registered != 0:
+            return registered
         while not self._stop.is_set():
             try:
                 self._maybe_registration_heartbeat()
@@ -329,6 +335,15 @@ class AssistantWorker:
         self._maybe_scan_expired_interrupts()
         db = self.session_factory()
         try:
+            if not self._schema_is_compatible(db):
+                # Recheck before each claim loop; refuse claims on drift.
+                logger.error("assistant_worker_schema_incompatible")
+                self._write_state(
+                    ok=False,
+                    draining=self._draining,
+                    reason="schema_incompatible",
+                )
+                return 0
             leases = RunLeaseService(
                 db,
                 identity=self.cfg.identity,
@@ -480,9 +495,31 @@ class AssistantWorker:
         finally:
             db.close()
 
-    def _register(self) -> None:
+    def _schema_is_compatible(self, db: Any) -> bool:
+        """True when the live schema matches this build's interim Plan 2 head.
+
+        Always returns a boolean — never raises raw SQL/Alembic errors to
+        callers. Worker health reports only the stable reason
+        ``schema_incompatible``.
+        """
+        try:
+            from app.assistant.runtime.readiness import Plan2AlembicHeadCompatibility
+
+            return bool(Plan2AlembicHeadCompatibility().is_compatible(db))
+        except Exception:
+            logger.exception("assistant_worker_schema_probe_failed")
+            return False
+
+    def _register(self) -> int:
+        """Register this boot identity. Returns 0 on success, non-zero exit."""
         db = self.session_factory()
         try:
+            if not self._schema_is_compatible(db):
+                logger.error("assistant_worker_schema_incompatible")
+                self._write_state(
+                    ok=False, draining=False, reason="schema_incompatible"
+                )
+                return WORKER_SCHEMA_INCOMPATIBLE_EXIT
             reg = WorkerRegistry(db)
             row = reg.register(self.cfg.identity)
             self._last_reg_heartbeat = time.monotonic()
@@ -493,6 +530,7 @@ class AssistantWorker:
                 row.app_build_revision,
                 row.heartbeat_at,
             )
+            return 0
         finally:
             db.close()
 
@@ -503,6 +541,14 @@ class AssistantWorker:
             return
         db = self.session_factory()
         try:
+            if not self._schema_is_compatible(db):
+                logger.error("assistant_worker_schema_incompatible")
+                self._write_state(
+                    ok=False,
+                    draining=self._draining,
+                    reason="schema_incompatible",
+                )
+                return
             ok = WorkerRegistry(db).heartbeat(self.worker_id)
             self._last_reg_heartbeat = now
             if ok:
@@ -518,9 +564,11 @@ class AssistantWorker:
         finally:
             db.close()
 
-    def _write_state(self, *, ok: bool, draining: bool) -> None:
+    def _write_state(
+        self, *, ok: bool, draining: bool, reason: str | None = None
+    ) -> None:
         """Persist worker state for Docker healthcheck validation."""
-        payload = {
+        payload: dict[str, Any] = {
             "ok": ok,
             "worker_id": self.worker_id,
             "app_build_revision": self.cfg.identity.app_build_revision,
@@ -531,6 +579,9 @@ class AssistantWorker:
             "draining": draining,
             "written_at": utcnow().isoformat(),
         }
+        if reason is not None:
+            # Stable reason only — never a raw SQL/Alembic error string.
+            payload["reason"] = str(reason)
         path = self.cfg.state_path
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -633,7 +684,9 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGINT, _handle_sigterm)
 
     if args.once:
-        worker._register()
+        registered = worker._register()
+        if registered != 0:
+            return registered
         worker.run_once()
         return 0
     return worker.run_forever()

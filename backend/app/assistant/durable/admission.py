@@ -206,16 +206,23 @@ def _admit_main_agent_candidate(
                 .strip()
                 .lower()
             )
-            required_feature_digest = (
-                plan08_capability_ledger_feature_digest()
-                if ledger_mode == "enforced" or write_mode == "golden"
-                else None
-            )
+            # Task 7: feature digest is required for Main Agent compatibility.
+            # Task 8 will share the readiness evaluator; this path keeps the
+            # WorkerCompatibility constructor as the sole matcher.
+            from app.assistant.durable.worker_registry import WorkerCompatibility
+
+            # ledger_mode / write_mode still influence whether enforced ledger
+            # workers are required later; the compatibility surface always
+            # carries an exact feature digest (never optional).
+            _ = (ledger_mode, write_mode)
+            required_feature_digest = plan08_capability_ledger_feature_digest()
             ok = WorkerRegistry(db).has_compatible_worker(
-                app_build_revision=build,
-                runtime_contract_version=RUNTIME_CONTRACT_VERSION,
-                required_checkpoint_codec_version=1,
-                required_capability_feature_digest=required_feature_digest,
+                WorkerCompatibility(
+                    app_build_revision=build,
+                    runtime_contract_version=RUNTIME_CONTRACT_VERSION,
+                    required_checkpoint_codec_version=1,
+                    required_capability_feature_digest=required_feature_digest,
+                ),
                 registration_ttl=ttl,
             )
             if not ok:
