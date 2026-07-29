@@ -1,7 +1,8 @@
-"""Guarded local CLI for capability reconciliation (Plan 08 Task 7).
+"""Guarded local CLI for capability reconciliation inspection.
 
-Not mounted as HTTP. Operators run this against an explicit database session
-with a server-configured actor plus reason and evidence. Never prints secrets
+Not mounted as HTTP. Read-only ``inspect`` remains available. Mutation commands
+(``decide``, ``issue-success``, ``issue-failure-acceptance``) refuse env-asserted
+identity and require an authenticated HTTP Operator session. Never prints secrets
 or raw provider payloads.
 """
 
@@ -11,7 +12,7 @@ import argparse
 import json
 from collections.abc import Callable
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from sqlalchemy.orm import Session
 
@@ -73,14 +74,21 @@ def main(
 
         session_factory = SessionLocal
 
+    if args.cmd in {"decide", "issue-success", "issue-failure-acceptance"}:
+        # Mutations require an authenticated HTTP Operator session (Plan 4).
+        # Env-asserted operator IDs are never authorization.
+        import sys
+
+        print(
+            "authenticated HTTP Operator session is required",
+            file=sys.stderr,
+        )
+        return 2
+
     db = session_factory()
     try:
         from app.assistant.capability_calls.reconciliation import (
-            AuthorizedReconciliationActor,
             CapabilityReconciliationService,
-            HmacReconciliationEvidenceVerifier,
-            ReconciliationEvidenceIssuer,
-            ReconciliationDecisionRequest,
         )
 
         if settings is None:
@@ -88,33 +96,7 @@ def main(
 
             settings = get_settings()
 
-        operator_authorizer = None
-        evidence_verifier = None
-        if args.cmd in {"decide", "issue-success", "issue-failure-acceptance"}:
-            enabled = bool(
-                settings.assistant_capability_reconciliation_enabled
-            )
-            operator_id = settings.assistant_capability_reconciliation_operator_id
-            evidence_secret = (
-                settings.assistant_capability_reconciliation_evidence_secret
-            )
-            if not enabled or operator_id is None:
-                raise ValueError("capability reconciliation CLI is disabled")
-
-            def authorize(_request):
-                return AuthorizedReconciliationActor(
-                    actor_admin_id=operator_id,
-                    authorization_method="configured_cli_operator",
-                )
-
-            operator_authorizer = authorize
-            evidence_verifier = HmacReconciliationEvidenceVerifier(evidence_secret)
-
-        service = CapabilityReconciliationService(
-            db,
-            operator_authorizer=operator_authorizer,
-            evidence_verifier=evidence_verifier,
-        )
+        service = CapabilityReconciliationService(db)
         call_id = UUID(args.call_id)
         if args.cmd == "inspect":
             call = service.get_call(call_id)
@@ -135,69 +117,8 @@ def main(
             )
             return 0
 
-        if args.cmd in {"issue-success", "issue-failure-acceptance"}:
-            assert evidence_verifier is not None
-            issuer = ReconciliationEvidenceIssuer(
-                db,
-                signer=evidence_verifier,
-                operator_authorizer=operator_authorizer,
-            )
-            if args.cmd == "issue-success":
-                artifact = issuer.issue_success_attestation(
-                    call_id=call_id,
-                    result_artifact_id=UUID(args.result_artifact_id),
-                )
-            else:
-                artifact = issuer.issue_failure_acceptance(
-                    call_id=call_id,
-                    reason=args.reason,
-                )
-            db.commit()
-            _emit(
-                {
-                    "ok": True,
-                    "callId": str(call_id),
-                    "evidenceArtifactId": str(artifact.id),
-                    "evidenceDigest": str(artifact.content_sha256),
-                    "evidenceType": str(
-                        (artifact.metadata_json or {}).get("evidenceType")
-                    ),
-                }
-            )
-            return 0
-
-        resolution_request_id = (
-            UUID(args.resolution_request_id)
-            if args.resolution_request_id
-            else uuid4()
-        )
-        result = service.apply(
-            ReconciliationDecisionRequest(
-                call_id=call_id,
-                expected_call_revision=args.expected_call_revision,
-                expected_run_revision=args.expected_run_revision,
-                decision=args.decision,
-                reason=args.reason,
-                evidence_artifact_ids=tuple(
-                    UUID(value) for value in args.evidence_artifact_id
-                ),
-                resolution_request_id=resolution_request_id,
-            )
-        )
-        db.commit()
-        _emit(
-            {
-                "ok": True,
-                "callId": str(result.call_id),
-                "decision": result.decision,
-                "status": result.resulting_call_status,
-                "callRevision": result.resulting_call_revision,
-                "runRevision": result.resulting_run_revision,
-                "reconciliationId": str(result.reconciliation_id),
-                "created": result.created,
-            }
-        )
-        return 0
+        _emit({"ok": False, "error": "unsupported_command", "detail": str(args.cmd)})
+        return 2
     except (ValueError, TypeError) as exc:
         db.rollback()
         _emit({"ok": False, "error": "invalid_arguments", "detail": str(exc)})

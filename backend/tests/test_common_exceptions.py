@@ -97,3 +97,58 @@ class ExceptionHandlersTests(unittest.TestCase):
         self.assertEqual(payload["code"], 42200)
         self.assertIsInstance(payload["data"], list)
         self.assertIn("value is invalid", str(payload["data"]))
+
+    def test_request_validation_error_handler_strips_input(self) -> None:
+        """Pydantic v2 includes submitted values under ``input`` — never echo them."""
+        from pydantic import Field
+
+        class _SecretBody(BaseModel):
+            password: str = Field(min_length=12)
+            token: str = Field(min_length=8)
+
+        app = FastAPI()
+        register_exception_handlers(app)
+
+        @app.post("/change-secret")
+        def change_secret(body: _SecretBody):  # noqa: B008, ANN001
+            return {"ok": True}
+
+        client = TestClient(app)
+        secret_password = "short-pw!!"
+        secret_token = "tok!!"
+        resp = client.post(
+            "/change-secret",
+            json={"password": secret_password, "token": secret_token},
+        )
+        self.assertEqual(resp.status_code, 422)
+        dumped = resp.text
+        self.assertNotIn(secret_password, dumped)
+        self.assertNotIn(secret_token, dumped)
+        payload = resp.json()
+        self.assertEqual(payload["code"], 42200)
+        self.assertIsInstance(payload["data"], list)
+        for error in payload["data"]:
+            self.assertIsInstance(error, dict)
+            self.assertNotIn("input", error)
+            self.assertIn("loc", error)
+            self.assertIn("msg", error)
+            self.assertIn("type", error)
+
+    def test_sanitize_validation_errors_helper_redacts_input(self) -> None:
+        from app.common.exceptions import sanitize_validation_errors
+
+        raw = [
+            {
+                "type": "string_too_short",
+                "loc": ("body", "newPassword"),
+                "msg": "String should have at least 12 characters",
+                "input": "leaked-secret-value",
+                "ctx": {"min_length": 12},
+            }
+        ]
+        cleaned = sanitize_validation_errors(raw)
+        self.assertEqual(len(cleaned), 1)
+        self.assertNotIn("input", cleaned[0])
+        self.assertNotIn("leaked-secret-value", str(cleaned))
+        self.assertEqual(cleaned[0]["loc"], ["body", "newPassword"])
+        self.assertEqual(cleaned[0]["ctx"], {"min_length": 12})

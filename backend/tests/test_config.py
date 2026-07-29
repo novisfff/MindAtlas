@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import uuid
 from contextlib import contextmanager
 
 import pytest
@@ -55,22 +54,26 @@ def test_main_agent_defaults_are_production_safe() -> None:
     assert s.assistant_capability_reconciliation_evidence_secret == ""
 
 
-def test_reconciliation_cli_requires_configured_operator_when_enabled() -> None:
+def test_reconciliation_requires_evidence_secret_when_enabled() -> None:
+    """Enabling reconciliation requires evidence secret ≥32 bytes; operator_id is not auth."""
     with pytest.raises(ValidationError) as exc_info:
         _settings(ASSISTANT_CAPABILITY_RECONCILIATION_ENABLED=True)
-    assert "reconciliation_operator_id" in str(exc_info.value).lower()
+    text = str(exc_info.value).lower()
+    assert "evidence_secret" in text
+    assert "reconciliation_operator_id" not in text
 
-    operator_id = uuid.uuid4()
+    # Evidence secret alone is sufficient; operator_id is never required for enablement.
     settings = _settings(
         ASSISTANT_CAPABILITY_RECONCILIATION_ENABLED=True,
-        ASSISTANT_CAPABILITY_RECONCILIATION_OPERATOR_ID=str(operator_id),
         ASSISTANT_CAPABILITY_RECONCILIATION_EVIDENCE_SECRET="e" * 32,
     )
     assert settings.assistant_capability_reconciliation_enabled is True
-    assert settings.assistant_capability_reconciliation_operator_id == operator_id
+    assert settings.assistant_capability_reconciliation_operator_id is None
+    assert settings.assistant_capability_reconciliation_evidence_secret == "e" * 32
 
 
-def test_golden_write_requires_usable_reconciliation_operator_path() -> None:
+def test_golden_write_requires_usable_reconciliation_path() -> None:
+    """Golden write requires reconciliation enabled + evidence secret; not operator_id."""
     common = {
         "ASSISTANT_MAIN_AGENT_WRITE_MODE": "golden",
         "ASSISTANT_CAPABILITY_LEDGER_MODE": "enforced",
@@ -79,15 +82,14 @@ def test_golden_write_requires_usable_reconciliation_operator_path() -> None:
     with pytest.raises(ValidationError, match="reconciliation"):
         _settings(**common)
 
-    operator_id = uuid.uuid4()
     settings = _settings(
         **common,
         ASSISTANT_CAPABILITY_RECONCILIATION_ENABLED=True,
-        ASSISTANT_CAPABILITY_RECONCILIATION_OPERATOR_ID=str(operator_id),
         ASSISTANT_CAPABILITY_RECONCILIATION_EVIDENCE_SECRET="e" * 32,
     )
     assert settings.assistant_main_agent_write_mode == "golden"
     assert settings.assistant_capability_reconciliation_enabled is True
+    assert settings.assistant_capability_reconciliation_operator_id is None
 
 
 @pytest.mark.parametrize("mode", ["off", "shadow", "read_only", "legacy", ""])

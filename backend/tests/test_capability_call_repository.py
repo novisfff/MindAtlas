@@ -599,7 +599,10 @@ class CapabilityCallMigrationMetaTests(unittest.TestCase):
         heads = script.get_heads()
         self.assertEqual(len(heads), 1, heads)
         head = heads[0]
-        self.assertEqual(head, "3bd7bc4257c9")
+        # Plan 1 tip is the sole script head; Plan 10 B2 tip remains its parent.
+        self.assertEqual(head, "9f3c1a7e2b40")
+        plan1 = script.get_revision(head)
+        self.assertEqual(plan1.down_revision, "3bd7bc4257c9")
 
         plan09_eval = script.get_revision("027869a00a47")
         self.assertEqual(plan09_eval.down_revision, "403414a62e55")

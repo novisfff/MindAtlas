@@ -42,6 +42,14 @@ export function useInitializationDefaultsQuery(locale: Locale) {
 
 export function useInitializeSystemMutation() {
   return useMutation({
-    mutationFn: (payload: InitializeSystemRequest) => initializeSystem(payload),
+    mutationFn: ({
+      payload,
+      setupToken,
+    }: {
+      payload: InitializeSystemRequest
+      setupToken: string
+    }) => initializeSystem(payload, setupToken),
+    // Do not retain setup-token / operator-password variables in the RQ cache after settle.
+    gcTime: 0,
   })
 }

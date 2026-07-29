@@ -237,8 +237,67 @@ docker compose build --build-arg NPM_REGISTRY=https://registry.npmmirror.com
 ## 生产环境建议
 
 1. **修改默认密码**: 启动后建议尽快通过 `.env` 覆盖数据库、MinIO 和 Neo4j 的默认密码
-2. **配置 HTTPS**: 在 Nginx 前添加反向代理或使用 Let's Encrypt
-3. **定期备份**: 备份 `postgres_data` 和 `minio_data` 卷
+2. **配置 HTTPS**: 在应用前终止 TLS（反向代理 / 负载均衡 / Let's Encrypt）。生产/预发的 `MINDATLAS_CANONICAL_ORIGIN` 必须是 `https://...`
+3. **定期备份**: 备份 `postgres_data` 和 `minio_data` 卷，以及会话 HMAC 密钥环
 4. **监控日志**: 配置日志收集和监控告警
-5. **覆盖默认密钥**: 生产环境建议通过 `.env` 覆盖 `AI_PROVIDER_FERNET_KEY`
+5. **覆盖默认密钥**: 生产环境建议通过 `.env` / 密钥库覆盖 `AI_PROVIDER_FERNET_KEY` 与全部 Operator 控制面密钥
 6. **资源限制**: 在 docker-compose.yml 中添加 `deploy.resources` 限制
+
+## Single-operator control plane (Plan 1)
+
+Production and staging deploys must inject the four operator-auth variables (no
+compose defaults for secrets). Generate values only in an operator-controlled
+terminal and store them in a secret store or a non-committed deploy `.env`:
+
+```bash
+python3 -c 'import secrets; print(secrets.token_urlsafe(48))'
+python3 -c 'import base64,secrets; print(base64.b64encode(secrets.token_bytes(32)).decode())'
+```
+
+| Variable | Role |
+|----------|------|
+| `MINDATLAS_CANONICAL_ORIGIN` | Exact browser Origin (`https://host[:port]`). Production/staging require HTTPS. |
+| `MINDATLAS_INITIAL_SETUP_TOKEN` | One-time Setup Token (≥32 UTF-8 bytes). Unusable after initialization commits. Never put it in a URL, query, JSON body, cookie, CLI flag, log, or committed fixture. |
+| `MINDATLAS_SESSION_HMAC_ACTIVE_KEY_ID` | Active key id present in the key-ring JSON. |
+| `MINDATLAS_SESSION_HMAC_KEYS` | JSON object of 1–2 Base64 keys (each decodes to ≥32 bytes). Active + at most one previous. |
+| `CORS_ORIGINS` | Must include the exact `MINDATLAS_CANONICAL_ORIGIN`. No wildcards when credentials are enabled. |
+
+### HTTPS termination and Origin/CORS agreement
+
+1. Terminate TLS in front of the app (reverse proxy / load balancer).
+2. Set `MINDATLAS_CANONICAL_ORIGIN` to the exact public HTTPS origin the browser uses.
+3. Set `CORS_ORIGINS` to a comma-separated list that contains that same origin string. Credentialed CORS is explicit and non-wildcard.
+4. Login and setup accept JSON only and enforce the configured canonical Origin plus Fetch Metadata before checking any secret.
+
+### Session HMAC key-ring backup, rotation, and revocation
+
+1. **Backup** the current `MINDATLAS_SESSION_HMAC_KEYS` / active key id before any rotation.
+2. **Rotate** by introducing a new active key while retaining the previous key (`active` + at most one `previous`). Existing sessions signed with the previous key are re-MACed onto the active key on a successful authenticated request that also supplies CSRF.
+3. **Revoke before removal**: sessions that still depend on the previous key must be durably revoked **before** the previous key is removed from the ring. Removing a previous key without revocation leaves those sessions unverifiable; the maintenance CLI below revokes them with a safe audit event (`session_key_revoked` / `hmac_key_removed`).
+
+   From the API container (or a host with the same `DATABASE_URL` + key-ring env as production):
+
+   ```bash
+   # Human-readable summary (safe counts only — no cookies, digests of secrets, or key material).
+   python -m scripts.revoke_unverifiable_operator_sessions
+
+   # Or as a script path from backend/:
+   python scripts/revoke_unverifiable_operator_sessions.py --json
+   ```
+
+   Typical rotation sequence:
+
+   1. Deploy with `active=new` + `previous=old` still in `MINDATLAS_SESSION_HMAC_KEYS`.
+   2. Let traffic re-MAC old sessions onto `new` (authenticated + CSRF requests).
+   3. Run the revoke CLI **while `old` is still in the ring**. The CLI retires every active session still bound to the non-active (previous) key id, plus any session whose key id is already absent from the ring, and writes `session_key_revoked` / `hmac_key_removed` audit rows. Sessions on the active key are left intact.
+   4. Only then remove `old` from the ring and redeploy with `active=new` alone.
+
+4. Never commit real key material. Never log raw session/CSRF values.
+
+### Initialization recovery
+
+If Setup-authorized initialization commits the singleton operator but initial-session cookie issuance fails, the browser is **fail-closed to `/login`**. Recover by signing in with the operator password through the normal login exchange (JSON + canonical Origin). Do not re-use the Setup Token; it is unusable after the initialization transaction commits.
+
+### Compose injection
+
+`deploy/docker-compose.yml` passes the four operator-auth variables and `CORS_ORIGINS` into the `api` service with empty defaults so local quick-start does not invent secrets. Production must supply real values via a secret store or deploy `.env` (see `deploy/.env.example` commented placeholders). Local development may keep them blank through `docker-compose.override.yml`.

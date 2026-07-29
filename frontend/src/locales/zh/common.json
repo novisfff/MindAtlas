@@ -148,7 +148,9 @@
       "step2": "请先查看系统简介后继续",
       "step3": "请先完成 AI 服务和大模型配置",
       "step4": "请至少保留一个记录类型，并为每个记录类型填写名称",
-      "step5": "请先完成前面的配置步骤"
+      "step5": "请先完成前面的配置步骤",
+      "operatorPassword": "完成初始化前请设置至少 12 个字符的 Operator 密码。",
+      "setupToken": "请输入本部署配置的一次性 Setup Token。"
     },
     "steps": {
       "language": {
@@ -341,7 +343,21 @@
       "capabilitiesTitle": "能力配置摘要",
       "capabilitiesDescription": "这些能力可以使用应用配置、沿用环境默认值，或继续保持跳过状态。",
       "noteTitle": "部署能力会自动接管",
-      "noteDescription": "在 Docker Compose 部署下，对象存储、知识图谱、文档解析和后台调度器都会使用内置默认配置。你只需要先完成语言、模型和记录类型。"
+      "noteDescription": "在 Docker Compose 部署下，对象存储、知识图谱、文档解析和后台调度器都会使用内置默认配置。你只需要先完成语言、模型和记录类型。",
+      "operatorAccessTitle": "Operator 访问",
+      "operatorAccessDescription": "创建唯一的 Operator 密码，并确认一次性 Setup Token。这两个值只保留在本次请求的内存中。",
+      "fields": {
+        "setupToken": "Setup Token",
+        "operatorPassword": "Operator 密码"
+      },
+      "placeholders": {
+        "setupToken": "粘贴部署配置的 Setup Token",
+        "operatorPassword": "至少 12 个字符，按原样提交，不做裁剪"
+      },
+      "hints": {
+        "setupToken": "仅通过 Authorization 请求头一次性发送，不会保存在浏览器中。",
+        "operatorPassword": "精确的 Unicode 字符串，不做 trim。这会成为唯一的 Operator 登录密码。"
+      }
     }
   },
   "systemSetup": {
@@ -2438,5 +2454,25 @@
       "indexFailed": "索引失败"
     },
     "retry": "重试"
+  },
+  "operatorAuth": {
+    "login": {
+      "title": "Operator 登录",
+      "description": "输入 Operator 密码以打开此控制平面。",
+      "passwordLabel": "密码",
+      "submit": "登录",
+      "submitting": "正在登录…",
+      "errors": {
+        "invalid": "凭证无效。",
+        "locked": "登录已暂时锁定，请稍后再试。",
+        "unavailable": "认证服务暂时不可用。",
+        "generic": "无法登录，请重试。"
+      }
+    },
+    "gate": {
+      "loadingTitle": "正在检查 Operator 会话",
+      "loadingDescription": "正在确认当前浏览器是否已登录。",
+      "sessionExpired": "会话已过期，请重新登录。"
+    }
   }
 }

@@ -1,18 +1,16 @@
 """Plan 09 Skill package admin HTTP surface (aggregate lifecycle).
 
-Every Plan 09 admin route lives under one parent router that is only mounted
-when an explicit trusted-dev/test guard is set. Staging/production keep this
-router unmounted and absent from OpenAPI until a real principal dependency
-exists. Service methods still reject missing ``OperatorPrincipal``.
+Mounted under the protected browser parent. Endpoints resolve the durable
+password session via ``require_viewer_principal`` / ``require_operator_principal``.
+Caller-supplied identity headers never mint an ``OperatorPrincipal``.
 """
 
 from __future__ import annotations
 
-import os
-from typing import Annotated, Any
+from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Form, Header, UploadFile
+from fastapi import APIRouter, Depends, File, Form, UploadFile
 from pydantic import ConfigDict, Field
 from sqlalchemy.orm import Session
 
@@ -36,31 +34,13 @@ from app.common.exceptions import ApiException
 from app.common.responses import ApiResponse
 from app.common.schemas import CamelModel
 from app.database import get_db
+from app.operator_auth.dependencies import (
+    require_operator_principal,
+    require_viewer_principal,
+)
 
-
-# Explicit trusted-dev/test guard only. Never treat feature flags / Origin /
-# loopback / CORS as authentication.
-TRUSTED_MOUNT_ENV = "ASSISTANT_SKILL_ADMIN_TRUSTED_MOUNT"
-TRUSTED_MOUNT_VALUE = "1"
 
 PLAN09_ADMIN_PREFIX = "/api/assistant-config/skill-admin"
-
-
-def skill_admin_trusted_mount_enabled() -> bool:
-    """Return True only when the explicit trusted-dev/test guard is set."""
-    return os.environ.get(TRUSTED_MOUNT_ENV, "").strip() == TRUSTED_MOUNT_VALUE
-
-
-def should_mount_skill_admin_router(*, app_env: str | None = None) -> bool:
-    """Mount decision for Plan 09 parent router.
-
-    Staging/production never mount without a real principal dependency (absent
-    today). Trusted test/dev may mount only via the explicit env guard.
-    """
-    env = (app_env or os.environ.get("APP_ENV", "development")).strip().lower()
-    if env in {"staging", "production"}:
-        return False
-    return skill_admin_trusted_mount_enabled()
 
 
 # Parent router — all Plan 09 subroutes attach here.
@@ -129,61 +109,12 @@ def _dto(model: Any) -> Any:
     return model
 
 
-def _parse_trusted_principal(
-    *,
-    x_mindatlas_operator_id: str | None,
-    x_mindatlas_operator_role: str | None,
-) -> OperatorPrincipal:
-    """Mint a principal only behind the trusted mount guard.
-
-    This is **not** release authentication. Forged headers outside the mount
-    guard never reach these routes because the router is unmounted.
-    """
-    if not skill_admin_trusted_mount_enabled():
-        raise ApiException(
-            status_code=401,
-            code=40190,
-            message="verified OperatorPrincipal is required",
-        )
-    principal_id = (x_mindatlas_operator_id or "").strip()
-    role = (x_mindatlas_operator_role or "").strip().lower()
-    if not principal_id:
-        raise ApiException(
-            status_code=401,
-            code=40190,
-            message="verified OperatorPrincipal is required",
-        )
-    if role not in {"operator", "viewer"}:
-        raise ApiException(
-            status_code=403,
-            code=40391,
-            message="operator role is required for this transition"
-            if role
-            else "verified OperatorPrincipal is required",
-        )
-    return OperatorPrincipal(principal_id=principal_id, role=role)  # type: ignore[arg-type]
-
-
-def get_trusted_operator_principal(
-    x_mindatlas_operator_id: Annotated[
-        str | None, Header(alias="X-MindAtlas-Operator-Id")
-    ] = None,
-    x_mindatlas_operator_role: Annotated[
-        str | None, Header(alias="X-MindAtlas-Operator-Role")
-    ] = None,
-) -> OperatorPrincipal:
-    return _parse_trusted_principal(
-        x_mindatlas_operator_id=x_mindatlas_operator_id,
-        x_mindatlas_operator_role=x_mindatlas_operator_role,
-    )
-
-
 @skill_admin_parent_router.patch("/skill-packages/{package_id}/metadata")
 def patch_skill_package_metadata(
     package_id: UUID,
     body: MetadataPatchBody,
     db: Session = Depends(get_db),
-    principal: OperatorPrincipal = Depends(get_trusted_operator_principal),
+    principal: OperatorPrincipal = Depends(require_operator_principal),
 ) -> ApiResponse:
     svc = SkillAdminService(db)
     detail = svc.update_metadata(
@@ -204,7 +135,7 @@ def archive_skill_package(
     package_id: UUID,
     body: RevisionBody,
     db: Session = Depends(get_db),
-    principal: OperatorPrincipal = Depends(get_trusted_operator_principal),
+    principal: OperatorPrincipal = Depends(require_operator_principal),
 ) -> ApiResponse:
     svc = SkillAdminService(db)
     detail = svc.archive(
@@ -223,7 +154,7 @@ def unarchive_skill_package(
     package_id: UUID,
     body: RevisionBody,
     db: Session = Depends(get_db),
-    principal: OperatorPrincipal = Depends(get_trusted_operator_principal),
+    principal: OperatorPrincipal = Depends(require_operator_principal),
 ) -> ApiResponse:
     svc = SkillAdminService(db)
     detail = svc.unarchive(
@@ -242,7 +173,7 @@ def enable_skill_package_catalog(
     package_id: UUID,
     body: CatalogEnableBody,
     db: Session = Depends(get_db),
-    principal: OperatorPrincipal = Depends(get_trusted_operator_principal),
+    principal: OperatorPrincipal = Depends(require_operator_principal),
 ) -> ApiResponse:
     svc = SkillAdminService(db)
     detail = svc.enable_catalog(
@@ -264,7 +195,7 @@ def disable_skill_package_catalog(
     package_id: UUID,
     body: RevisionBody,
     db: Session = Depends(get_db),
-    principal: OperatorPrincipal = Depends(get_trusted_operator_principal),
+    principal: OperatorPrincipal = Depends(require_operator_principal),
 ) -> ApiResponse:
     svc = SkillAdminService(db)
     detail = svc.disable_catalog(
@@ -283,7 +214,7 @@ def add_skill_package_alias(
     package_id: UUID,
     body: AddAliasBody,
     db: Session = Depends(get_db),
-    principal: OperatorPrincipal = Depends(get_trusted_operator_principal),
+    principal: OperatorPrincipal = Depends(require_operator_principal),
 ) -> ApiResponse:
     svc = SkillAdminService(db)
     detail = svc.add_alias(
@@ -306,7 +237,7 @@ def disable_skill_package_alias(
     alias_id: UUID,
     body: RevisionBody,
     db: Session = Depends(get_db),
-    principal: OperatorPrincipal = Depends(get_trusted_operator_principal),
+    principal: OperatorPrincipal = Depends(require_operator_principal),
 ) -> ApiResponse:
     svc = SkillAdminService(db)
     detail = svc.disable_alias(
@@ -329,7 +260,7 @@ def diff_skill_package_versions(
     left_version_id: UUID,
     right_version_id: UUID,
     db: Session = Depends(get_db),
-    principal: OperatorPrincipal = Depends(get_trusted_operator_principal),
+    principal: OperatorPrincipal = Depends(require_viewer_principal),
 ) -> ApiResponse:
     _ = principal  # auth required even for reads of admin surface
     result = diff_skill_versions(
@@ -349,7 +280,7 @@ def restore_skill_package_version_as_draft(
     version_id: UUID,
     body: RevisionBody,
     db: Session = Depends(get_db),
-    principal: OperatorPrincipal = Depends(get_trusted_operator_principal),
+    principal: OperatorPrincipal = Depends(require_operator_principal),
 ) -> ApiResponse:
     svc = SkillAdminService(db)
     summary = svc.restore_as_new_draft(
@@ -408,7 +339,7 @@ async def preview_skill_package_import(
     expected_aggregate_revision: int = Form(..., alias="expectedAggregateRevision"),
     fork_canonical_name: str | None = Form(None, alias="forkCanonicalName"),
     db: Session = Depends(get_db),
-    principal: OperatorPrincipal = Depends(get_trusted_operator_principal),
+    principal: OperatorPrincipal = Depends(require_operator_principal),
 ) -> ApiResponse:
     """Dry-run ZIP import preview. Never persists a package/version row.
 
@@ -433,7 +364,7 @@ async def preview_skill_package_import(
 def apply_skill_package_import(
     body: ImportApplyBody,
     db: Session = Depends(get_db),
-    principal: OperatorPrincipal = Depends(get_trusted_operator_principal),
+    principal: OperatorPrincipal = Depends(require_operator_principal),
 ) -> ApiResponse:
     """Consume a preview token into one draft version.
 
@@ -451,15 +382,6 @@ def apply_skill_package_import(
     return ApiResponse.ok(_dto(result))
 
 
-def _require_operator(principal: OperatorPrincipal) -> None:
-    if not principal.is_operator:
-        raise ApiException(
-            status_code=403,
-            code=40391,
-            message="operator role is required for this transition",
-        )
-
-
 def _default_profile(service: MainAgentProfileService):
     try:
         return service.get_default()
@@ -472,7 +394,7 @@ def _default_profile(service: MainAgentProfileService):
 @skill_admin_parent_router.get("/main-agent-profiles/default")
 def get_protected_default_main_agent_profile(
     db: Session = Depends(get_db),
-    principal: OperatorPrincipal = Depends(get_trusted_operator_principal),
+    principal: OperatorPrincipal = Depends(require_viewer_principal),
 ) -> ApiResponse:
     """Protected Profile summary read (principal required)."""
     _ = principal
@@ -484,10 +406,9 @@ def get_protected_default_main_agent_profile(
 def put_protected_default_main_agent_draft(
     body: ProfileDraftSaveBody,
     db: Session = Depends(get_db),
-    principal: OperatorPrincipal = Depends(get_trusted_operator_principal),
+    principal: OperatorPrincipal = Depends(require_operator_principal),
 ) -> ApiResponse:
     """Protected Profile draft mutation — does not touch runtime_enabled."""
-    _require_operator(principal)
     service = MainAgentProfileService(db)
     profile = _default_profile(service)
     try:
@@ -515,7 +436,7 @@ def put_protected_default_main_agent_draft(
 @skill_admin_parent_router.get("/main-agent-profiles/default/versions")
 def list_protected_default_main_agent_versions(
     db: Session = Depends(get_db),
-    principal: OperatorPrincipal = Depends(get_trusted_operator_principal),
+    principal: OperatorPrincipal = Depends(require_viewer_principal),
 ) -> ApiResponse:
     _ = principal
     service = MainAgentProfileService(db)
@@ -532,7 +453,7 @@ def list_protected_default_main_agent_versions(
 def get_default_main_agent_version(
     version_id: UUID,
     db: Session = Depends(get_db),
-    principal: OperatorPrincipal = Depends(get_trusted_operator_principal),
+    principal: OperatorPrincipal = Depends(require_viewer_principal),
 ) -> ApiResponse:
     """Protected Profile version detail (Plan 09 trusted mount only)."""
     _ = principal  # principal required; viewer/operator both may read.
@@ -546,10 +467,9 @@ def get_default_main_agent_version(
 def publish_protected_default_main_agent_profile(
     body: ProfilePublishBody,
     db: Session = Depends(get_db),
-    principal: OperatorPrincipal = Depends(get_trusted_operator_principal),
+    principal: OperatorPrincipal = Depends(require_operator_principal),
 ) -> ApiResponse:
     """Protected Profile publish (content stage; not runtime enable)."""
-    _require_operator(principal)
     service = MainAgentProfileService(db)
     profile = _default_profile(service)
     version = service.publish(
@@ -560,7 +480,7 @@ def publish_protected_default_main_agent_profile(
             request_id=body.request_id,
             expected_aggregate_revision=body.expected_aggregate_revision,
         ),
-        actor_principal=principal.principal_id,
+        actor_principal=principal.audit_actor(),
     )
     return ApiResponse.ok(_dto(version))
 
@@ -569,10 +489,9 @@ def publish_protected_default_main_agent_profile(
 def enable_protected_default_main_agent_runtime(
     body: ProfileRuntimeBody,
     db: Session = Depends(get_db),
-    principal: OperatorPrincipal = Depends(get_trusted_operator_principal),
+    principal: OperatorPrincipal = Depends(require_operator_principal),
 ) -> ApiResponse:
     """Protected Profile live-state enable (promotion gate required)."""
-    _require_operator(principal)
     service = MainAgentProfileService(db)
     profile = _default_profile(service)
     summary = service.set_runtime_enabled(
@@ -582,7 +501,7 @@ def enable_protected_default_main_agent_runtime(
         gate_id=body.gate_id,
         request_id=body.request_id,
         expected_aggregate_revision=body.expected_aggregate_revision,
-        actor_principal=principal.principal_id,
+        actor_principal=principal.audit_actor(),
     )
     return ApiResponse.ok(_dto(summary))
 
@@ -591,10 +510,9 @@ def enable_protected_default_main_agent_runtime(
 def disable_protected_default_main_agent_runtime(
     body: ProfileRuntimeBody,
     db: Session = Depends(get_db),
-    principal: OperatorPrincipal = Depends(get_trusted_operator_principal),
+    principal: OperatorPrincipal = Depends(require_operator_principal),
 ) -> ApiResponse:
     """Protected Profile live-state disable (explicit; not draft demotion)."""
-    _require_operator(principal)
     service = MainAgentProfileService(db)
     profile = _default_profile(service)
     summary = service.set_runtime_enabled(
@@ -604,14 +522,6 @@ def disable_protected_default_main_agent_runtime(
         gate_id=body.gate_id,
         request_id=body.request_id,
         expected_aggregate_revision=body.expected_aggregate_revision,
-        actor_principal=principal.principal_id,
+        actor_principal=principal.audit_actor(),
     )
     return ApiResponse.ok(_dto(summary))
-
-
-def mount_skill_admin_router(app: Any, *, app_env: str | None = None) -> bool:
-    """Conditionally mount Plan 09 parent router. Returns whether mounted."""
-    if not should_mount_skill_admin_router(app_env=app_env):
-        return False
-    app.include_router(skill_admin_parent_router)
-    return True

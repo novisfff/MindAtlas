@@ -381,8 +381,14 @@ describe('MainAgentProfileEditorPage two-gate lifecycle', () => {
 
   it('gate request contains no client-authored closure fields', async () => {
     renderPage()
+    // Qualifying evidence must resolve before the dialog enables Request gate;
+    // under full-suite load the open click can race the evidence fetch.
+    await waitFor(() => {
+      expect(skillEvaluations.listQualifyingEvidence).toHaveBeenCalled()
+    })
     await screen.findByRole('button', { name: 'Open publish gate dialog' })
     fireEvent.click(screen.getByRole('button', { name: 'Open publish gate dialog' }))
+    expect(await screen.findByRole('dialog', { name: 'Request publish gate' })).toBeInTheDocument()
     fireEvent.click(await screen.findByRole('button', { name: 'Request gate' }))
     await waitFor(() => {
       expect(gateRequests.length).toBeGreaterThan(0)
@@ -407,9 +413,13 @@ describe('MainAgentProfileEditorPage two-gate lifecycle', () => {
 
   it('does not reuse the draft publish gate after publish for runtime enable', async () => {
     renderPage()
+    await waitFor(() => {
+      expect(skillEvaluations.listQualifyingEvidence).toHaveBeenCalled()
+    })
     await screen.findByRole('button', { name: 'Open publish gate dialog' })
 
     fireEvent.click(screen.getByRole('button', { name: 'Open publish gate dialog' }))
+    expect(await screen.findByRole('dialog', { name: 'Request publish gate' })).toBeInTheDocument()
     fireEvent.click(await screen.findByRole('button', { name: 'Request gate' }))
     await waitFor(() => {
       expect(lastGateRequest()?.action).toBe('profile_publish')
@@ -454,12 +464,16 @@ describe('MainAgentProfileEditorPage two-gate lifecycle', () => {
     } as never)
 
     renderPage()
+    await waitFor(() => {
+      expect(skillEvaluations.listQualifyingEvidence).toHaveBeenCalled()
+    })
     await screen.findByRole('button', { name: 'Open promotion gate dialog' })
 
     // Without promotion gate, enable stays disabled.
     expect(screen.getByRole('button', { name: 'Enable runtime' })).toBeDisabled()
 
     fireEvent.click(screen.getByRole('button', { name: 'Open promotion gate dialog' }))
+    expect(await screen.findByRole('dialog', { name: 'Request publish gate' })).toBeInTheDocument()
     fireEvent.click(await screen.findByRole('button', { name: 'Request gate' }))
     await waitFor(() => {
       expect(lastGateRequest()?.action).toBe('profile_runtime_enable')
@@ -593,9 +607,13 @@ describe('MainAgentProfileEditorPage two-gate lifecycle', () => {
     })
 
     renderPage()
+    await waitFor(() => {
+      expect(skillEvaluations.listQualifyingEvidence).toHaveBeenCalled()
+    })
     await screen.findByTestId('skill-test-workbench')
     // Request publish gate then publish.
     fireEvent.click(screen.getByRole('button', { name: 'Open publish gate dialog' }))
+    expect(await screen.findByRole('dialog', { name: 'Request publish gate' })).toBeInTheDocument()
     fireEvent.click(await screen.findByRole('button', { name: 'Request gate' }))
     await waitFor(() => {
       expect(skillEvaluations.createPublishGate).toHaveBeenCalled()

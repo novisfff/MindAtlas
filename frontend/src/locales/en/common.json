@@ -149,7 +149,9 @@
       "step2": "Please review the system introduction before continuing.",
       "step3": "Please finish the AI provider and model setup first.",
       "step4": "Keep at least one entry type and give every entry type a name.",
-      "step5": "Please complete the previous steps first."
+      "step5": "Please complete the previous steps first.",
+      "operatorPassword": "Set an operator password with at least 12 characters before finishing setup.",
+      "setupToken": "Enter the one-time setup token configured for this deployment."
     },
     "steps": {
       "language": {
@@ -352,7 +354,21 @@
       "capabilitiesTitle": "Capability summary",
       "capabilitiesDescription": "Each capability can use app config, keep an environment default, or stay skipped for now.",
       "noteTitle": "Deployment services are already wired in",
-      "noteDescription": "In Docker Compose deployments, object storage, the knowledge graph, document parsing, and the background scheduler all start with built-in defaults. Initialization only needs your language, model, and entry types."
+      "noteDescription": "In Docker Compose deployments, object storage, the knowledge graph, document parsing, and the background scheduler all start with built-in defaults. Initialization only needs your language, model, and entry types.",
+      "operatorAccessTitle": "Operator access",
+      "operatorAccessDescription": "Create the single operator password and confirm the one-time setup token. Both values stay in memory only for this request.",
+      "fields": {
+        "setupToken": "Setup token",
+        "operatorPassword": "Operator password"
+      },
+      "placeholders": {
+        "setupToken": "Paste the deployment setup token",
+        "operatorPassword": "At least 12 characters, exact value kept as typed"
+      },
+      "hints": {
+        "setupToken": "Sent only in the Authorization header for this one-time request and never stored in the browser.",
+        "operatorPassword": "Exact Unicode string. No trimming. This becomes the only operator login secret."
+      }
     }
   },
   "systemSetup": {
@@ -2448,5 +2464,25 @@
       "indexFailed": "Index failed"
     },
     "retry": "Retry"
+  },
+  "operatorAuth": {
+    "login": {
+      "title": "Operator login",
+      "description": "Enter the operator password to open this control plane.",
+      "passwordLabel": "Password",
+      "submit": "Login",
+      "submitting": "Signing in…",
+      "errors": {
+        "invalid": "Invalid credentials.",
+        "locked": "Login is temporarily locked. Try again later.",
+        "unavailable": "Authentication is temporarily unavailable.",
+        "generic": "Unable to sign in. Please try again."
+      }
+    },
+    "gate": {
+      "loadingTitle": "Checking operator session",
+      "loadingDescription": "Confirming whether this browser is already signed in.",
+      "sessionExpired": "Your session expired. Please sign in again."
+    }
   }
 }

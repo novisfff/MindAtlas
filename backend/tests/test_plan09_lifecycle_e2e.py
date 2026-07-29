@@ -152,9 +152,9 @@ class Plan09System:
         self.db.close()
 
     def _operator(self):
-        from app.assistant.skills.principal import OperatorPrincipal
+        from tests.operator_session_helpers import make_service_principal
 
-        return OperatorPrincipal(principal_id="op-plan09-e2e", role="operator")
+        return make_service_principal("op-plan09-e2e", role="operator")
 
     def create_package(self) -> Plan09Package:
         from app.assistant.skills.schemas import CreateSkillPackageCommand
@@ -439,16 +439,16 @@ class Plan09LifecycleE2ETests(unittest.TestCase):
     def setUp(self) -> None:
         reset_caches()
         os.environ["ASSISTANT_SKILL_PUBLISH_GATE_MODE"] = "enforce"
-        from app.config import get_settings
+        from tests.operator_session_helpers import restore_operator_settings
 
-        get_settings.cache_clear()
+        restore_operator_settings()
         self.system = Plan09System()
 
     def tearDown(self) -> None:
         os.environ.pop("ASSISTANT_SKILL_PUBLISH_GATE_MODE", None)
-        from app.config import get_settings
+        from tests.operator_session_helpers import restore_operator_settings
 
-        get_settings.cache_clear()
+        restore_operator_settings()
         self.system.close()
 
     # ------------------------------------------------------------------ positive
@@ -632,32 +632,13 @@ class Plan09LifecycleE2ETests(unittest.TestCase):
         session.close()
 
     def test_client_authored_gate_subject_is_422(self) -> None:
-        from fastapi import FastAPI
-        from fastapi.testclient import TestClient
+        from app.assistant.evaluation.router import PLAN09_EVAL_PREFIX, skill_eval_router
+        from tests.operator_session_helpers import build_authenticated_skill_client
 
-        from app.assistant.evaluation.router import PLAN09_EVAL_PREFIX, mount_skill_eval_router
-        from app.assistant.skills.admin_router import TRUSTED_MOUNT_ENV
-        from app.common.exceptions import register_exception_handlers
-        from app.database import get_db
-
-        os.environ[TRUSTED_MOUNT_ENV] = "1"
-        app = FastAPI()
-        register_exception_handlers(app)
-        session = self.system.db
-
-        def _override_db():
-            try:
-                yield session
-            finally:
-                pass
-
-        app.dependency_overrides[get_db] = _override_db
-        mount_skill_eval_router(app, app_env="development")
-        client = TestClient(app)
-        headers = {
-            "X-MindAtlas-Operator-Id": "op-plan09-e2e",
-            "X-MindAtlas-Operator-Role": "operator",
-        }
+        client, headers, _settings = build_authenticated_skill_client(
+            db=self.system.db,
+            include_routers=[skill_eval_router],
+        )
         body = {
             "requestId": str(uuid.uuid4()),
             "action": "skill_publish",
@@ -673,7 +654,6 @@ class Plan09LifecycleE2ETests(unittest.TestCase):
         }
         response = client.post(f"{PLAN09_EVAL_PREFIX}/gates", json=body, headers=headers)
         self.assertIn(response.status_code, {422, 400}, response.text)
-        os.environ.pop(TRUSTED_MOUNT_ENV, None)
 
     def test_real_orchestration_probes_required_for_gate_eligibility(self) -> None:
         """Process-level proof that probe-less real orchestration is not gate-eligible."""
@@ -784,43 +764,30 @@ class Plan09LifecycleE2ETests(unittest.TestCase):
         self.assertTrue(observed2.actual_active_skills == ("skill-b",))
         self.assertTrue(summary2.gate_eligible)
 
-    def test_openapi_unmounted_has_no_plan09_paths(self) -> None:
-        from fastapi import FastAPI
-        from fastapi.testclient import TestClient
-
-        from app.assistant.evaluation.router import mount_skill_eval_router
-        from app.assistant.skills.admin_router import (
-            TRUSTED_MOUNT_ENV,
-            mount_skill_admin_router,
-        )
+    def test_openapi_includes_plan09_paths_when_mounted(self) -> None:
+        """Plan 09 admin/eval always mount under protected browser (Task 7/8)."""
+        from app.assistant.evaluation.router import skill_eval_router
+        from app.assistant.skills.admin_router import skill_admin_parent_router
         from app.assistant.skills.router import skill_package_router
-        from app.common.exceptions import register_exception_handlers
-        from app.database import get_db
         from tests._db import make_session
+        from tests.operator_session_helpers import build_authenticated_skill_client
 
-        os.environ.pop(TRUSTED_MOUNT_ENV, None)
-        app = FastAPI()
-        register_exception_handlers(app)
         session = make_session()
-
-        def _override_db():
-            try:
-                yield session
-            finally:
-                pass
-
-        app.dependency_overrides[get_db] = _override_db
-        app.include_router(skill_package_router)
-        self.assertFalse(mount_skill_admin_router(app, app_env="production"))
-        self.assertFalse(mount_skill_eval_router(app, app_env="production"))
-        client = TestClient(app)
-        paths = client.get("/openapi.json").json().get("paths") or {}
-        for path in paths:
-            self.assertNotIn("/skill-admin", path)
-            self.assertNotIn("/skill-eval", path)
-            self.assertNotIn("/catalog/enable", path)
-        self.assertIn("/api/assistant-config/skill-packages", paths)
-        session.close()
+        try:
+            client, _headers, _settings = build_authenticated_skill_client(
+                db=session,
+                include_routers=[
+                    skill_package_router,
+                    skill_admin_parent_router,
+                    skill_eval_router,
+                ],
+            )
+            paths = client.get("/openapi.json").json().get("paths") or {}
+            self.assertTrue(any("/skill-admin" in p for p in paths))
+            self.assertTrue(any("/skill-eval" in p for p in paths))
+            self.assertIn("/api/assistant-config/skill-packages", paths)
+        finally:
+            session.close()
 
 
 if __name__ == "__main__":

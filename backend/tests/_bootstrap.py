@@ -143,9 +143,30 @@ def reset_caches() -> None:
     bootstrap_backend_imports()
 
     try:
-        from app.config import get_settings
+        # If a prior suite left get_settings pinned (or stripped cache_clear),
+        # reinstall the identity-stable real lru_cache across every app.* holder.
+        # Always go through restore when the pin marker is set so Depends identity
+        # and import-frozen refs reconverge on the original callable.
+        from app import config as config_mod
 
-        get_settings.cache_clear()
+        current = getattr(config_mod, "get_settings", None)
+        pinned = bool(getattr(current, "_mindatlas_settings_pin", False))
+        if current is None or pinned or not hasattr(current, "cache_clear"):
+            from tests.operator_session_helpers import restore_operator_settings
+
+            restore_operator_settings()
+        else:
+            try:
+                from tests.operator_session_helpers import (
+                    _capture_original_get_settings,
+                    _rebind_get_settings_holders,
+                )
+
+                _capture_original_get_settings(current)
+                _rebind_get_settings_holders(current, monkeypatch=None)
+            except Exception:
+                pass
+            current.cache_clear()
     except Exception:
         pass
 

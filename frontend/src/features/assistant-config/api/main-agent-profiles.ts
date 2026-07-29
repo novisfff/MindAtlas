@@ -1,11 +1,11 @@
 /**
  * Main Agent Profile API client.
  * Plan 01 always-mounted routes under /main-agent-profiles.
- * Plan 09 protected lifecycle under /skill-admin/main-agent-profiles (trusted mount).
+ * Plan 09 protected lifecycle under /skill-admin/main-agent-profiles (session auth).
  * No single-target Skill fields — Profile is not an embedded Skill executor.
  */
 import { apiClient } from '@/lib/api/client'
-import { newRequestId, skillAdminOperatorHeaders, SKILL_ADMIN_BASE } from './skill-packages'
+import { newRequestId, SKILL_ADMIN_BASE } from './skill-packages'
 
 export const MAIN_AGENT_PROFILES_BASE = '/api/assistant-config/main-agent-profiles'
 export const MAIN_AGENT_PROFILES_ADMIN_BASE = `${SKILL_ADMIN_BASE}/main-agent-profiles`
@@ -98,7 +98,7 @@ export function listDefaultMainAgentVersions(params?: {
 }): Promise<PageResult<MainAgentProfileVersionSummary>> {
   return apiClient.get<PageResult<MainAgentProfileVersionSummary>>(
     `${MAIN_AGENT_PROFILES_BASE}/default/versions`,
-    { query: { limit: params?.limit ?? 50, offset: params?.offset ?? 0 } },
+    { query: { limit: params?.limit ?? 50, offset: params?.offset ?? 0 } }
   )
 }
 
@@ -138,7 +138,6 @@ export function saveProtectedDefaultMainAgentDraft(body: {
         expectedAggregateRevision: body.expectedAggregateRevision,
         requestId: body.requestId ?? newRequestId('profile-draft'),
       },
-      headers: skillAdminOperatorHeaders(),
     },
   )
 }
@@ -159,7 +158,6 @@ export function publishProtectedDefaultMainAgent(body: {
         gateId: body.gateId ?? null,
         requestId: body.requestId ?? newRequestId('profile-pub'),
       },
-      headers: skillAdminOperatorHeaders(),
     },
   )
 }
@@ -180,7 +178,6 @@ export function enableProtectedDefaultMainAgentRuntime(body: {
         gateId: body.gateId ?? null,
         requestId: body.requestId ?? newRequestId('profile-en'),
       },
-      headers: skillAdminOperatorHeaders(),
     },
   )
 }
@@ -203,16 +200,13 @@ export function disableProtectedDefaultMainAgentRuntime(body: {
         gateId: null,
         requestId: body.requestId ?? newRequestId('profile-dis'),
       },
-      headers: skillAdminOperatorHeaders(),
     },
   )
 }
 
 /** Protected default profile summary (principal required). */
 export function getProtectedDefaultMainAgentProfile(): Promise<MainAgentProfileSummary> {
-  return apiClient.get<MainAgentProfileSummary>(`${MAIN_AGENT_PROFILES_ADMIN_BASE}/default`, {
-    headers: skillAdminOperatorHeaders(),
-  })
+  return apiClient.get<MainAgentProfileSummary>(`${MAIN_AGENT_PROFILES_ADMIN_BASE}/default`)
 }
 
 /** Protected version list. */
@@ -222,17 +216,15 @@ export function listProtectedDefaultMainAgentVersions(): Promise<{
 }> {
   return apiClient.get<{ items: MainAgentProfileVersionSummary[]; total: number }>(
     `${MAIN_AGENT_PROFILES_ADMIN_BASE}/default/versions`,
-    { headers: skillAdminOperatorHeaders() },
   )
 }
 
 /** Protected version detail. */
 export function getProtectedDefaultMainAgentVersion(
-  versionId: string,
+  versionId: string
 ): Promise<MainAgentProfileVersionDetail> {
   return apiClient.get<MainAgentProfileVersionDetail>(
     `${MAIN_AGENT_PROFILES_ADMIN_BASE}/default/versions/${versionId}`,
-    { headers: skillAdminOperatorHeaders() },
   )
 }
 
@@ -243,9 +235,9 @@ export function assertNoSingleTargetFields(snapshot: Record<string, unknown>): s
 }
 
 export function getDefaultMainAgentVersion(
-  versionId: string,
+  versionId: string
 ): Promise<MainAgentProfileVersionDetail> {
   return apiClient.get<MainAgentProfileVersionDetail>(
-    `${MAIN_AGENT_PROFILES_BASE}/default/versions/${versionId}`,
+    `${MAIN_AGENT_PROFILES_BASE}/default/versions/${versionId}`
   )
 }

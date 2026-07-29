@@ -87,6 +87,11 @@ from app.lightrag.models import EntryIndexOutbox  # noqa: E402, F401
 from app.openclaw_integration.models import OpenClawCapabilityItem  # noqa: E402, F401
 from app.report.models import MonthlyReport, WeeklyReport  # noqa: E402, F401
 from app.system_settings.models import AppSetting  # noqa: E402, F401
+from app.operator_auth.models import (  # noqa: E402, F401
+    OperatorAccount,
+    OperatorAuditEvent,
+    OperatorSession,
+)
 
 config = context.config
 

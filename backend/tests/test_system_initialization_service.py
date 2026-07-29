@@ -1,14 +1,64 @@
 from __future__ import annotations
 
+import os
 import unittest
 from unittest.mock import patch
 
 from tests._bootstrap import bootstrap_backend_imports, reset_caches
 from tests._db import make_session
 
+# Encryption for AI credential staging during initialization.
+os.environ.setdefault(
+    "AI_PROVIDER_FERNET_KEY",
+    "07v02gVBdreNrXjLJZkIMdohHtgy6aDFKBHxakHjbrQ=",
+)
 
 bootstrap_backend_imports()
 reset_caches()
+
+from app.config import get_settings  # noqa: E402
+
+get_settings.cache_clear()
+
+# Ensure operator auth tables are registered on Base.metadata for make_session().
+import app.operator_auth.models  # noqa: E402,F401
+
+
+_OPERATOR_PASSWORD = "correct horse battery"
+_CTX = None  # filled lazily after imports
+
+
+def _request_context():
+    from app.operator_auth.contracts import RequestSecurityContext
+
+    return RequestSecurityContext(
+        request_id="init-test-req",
+        request_digest="a" * 64,
+        user_agent_digest="b" * 64,
+        network_digest="c" * 64,
+    )
+
+
+def _valid_setup():
+    from app.operator_auth.contracts import SetupAuthorization
+
+    return SetupAuthorization(validated=True)
+
+
+def _initialization_marker(session):
+    from app.system_settings.initialization_service import SYSTEM_INITIALIZATION_STATE_KEY
+    from app.system_settings.models import AppSetting
+
+    setting = (
+        session.query(AppSetting)
+        .filter(AppSetting.key == SYSTEM_INITIALIZATION_STATE_KEY)
+        .first()
+    )
+    if setting is None or not isinstance(setting.value_json, dict):
+        return None
+    if setting.value_json.get("initialized") is not True:
+        return None
+    return setting
 
 
 class SystemInitializationServiceTests(unittest.TestCase):
@@ -25,6 +75,7 @@ class SystemInitializationServiceTests(unittest.TestCase):
         return InitializeSystemRequest.model_validate(
             {
                 "locale": locale,
+                "operatorPassword": _OPERATOR_PASSWORD,
                 "aiCredential": {
                     "name": "OpenAI",
                     "baseUrl": "https://api.openai.com/v1",
@@ -68,6 +119,7 @@ class SystemInitializationServiceTests(unittest.TestCase):
 
         self.assertFalse(status.initialized)
         self.assertEqual(status.locale, "zh")
+        self.assertFalse(hasattr(status, "legacy_auto_completed"))
         self.assertEqual(defaults.locale, "en")
         self.assertEqual(defaults.entry_types[0].origin, "default")
         self.assertEqual(defaults.entry_types[0].name, "Knowledge")
@@ -155,9 +207,49 @@ class SystemInitializationServiceTests(unittest.TestCase):
         status = service.get_initialization_status()
 
         self.assertFalse(status.initialized)
-        self.assertFalse(status.legacy_auto_completed)
+        self.assertFalse(hasattr(status, "legacy_auto_completed"))
 
-    def test_stale_legacy_auto_completed_state_is_recovered_for_empty_system(self) -> None:
+    def test_existing_data_never_auto_completes_initialization(self) -> None:
+        from app.entry_type.models import EntryType
+        from app.entry.models import Entry, TimeMode
+        from app.system_settings.initialization_service import SystemInitializationService
+
+        entry_type = EntryType(
+            code="NOTE",
+            name="Note",
+            description="preexisting",
+            color="#111111",
+            icon="file",
+            graph_enabled=True,
+            ai_enabled=True,
+            enabled=True,
+        )
+        self.db.add(entry_type)
+        self.db.flush()
+        self.db.add(
+            Entry(
+                title="preexisting development data",
+                content="preexisting development data",
+                type_id=entry_type.id,
+                time_mode=TimeMode.NONE,
+            )
+        )
+        self.db.commit()
+
+        status = SystemInitializationService(self.db).get_initialization_status()
+        self.assertFalse(status.initialized)
+        self.assertFalse(hasattr(status, "legacy_auto_completed"))
+        # Clean product never mutates an old development DB on status reads.
+        self.assertIsNone(_initialization_marker(self.db))
+
+    def test_stale_legacy_auto_completed_marker_is_ignored(self) -> None:
+        """A legacy_auto_completed marker is still an initialized=True payload.
+
+        Clean product does not rewrite or clear it on status reads; re-init is
+        blocked until an operator deliberately resets the marker outside this
+        path. What we guarantee: no auto-complete from bare domain data, and no
+        ``legacy_auto_completed`` response field.
+        """
         from app.system_settings.initialization_service import (
             SYSTEM_INITIALIZATION_STATE_KEY,
             SystemInitializationService,
@@ -179,17 +271,13 @@ class SystemInitializationServiceTests(unittest.TestCase):
 
         service = SystemInitializationService(self.db)
         status = service.get_initialization_status()
-        persisted = (
-            self.db.query(AppSetting)
-            .filter(AppSetting.key == SYSTEM_INITIALIZATION_STATE_KEY)
-            .first()
-        )
 
-        self.assertFalse(status.initialized)
-        self.assertFalse(status.legacy_auto_completed)
-        self.assertIsNone(persisted)
+        # Marker still means initialized under clean-only status (payload-based).
+        # Response shape no longer exposes legacy_auto_completed.
+        self.assertTrue(status.initialized)
+        self.assertFalse(hasattr(status, "legacy_auto_completed"))
 
-    def test_existing_ai_configuration_auto_completes_legacy_state(self) -> None:
+    def test_existing_ai_configuration_never_auto_completes(self) -> None:
         from app.ai_registry.models import AiCredential
         from app.system_settings.initialization_service import (
             SYSTEM_INITIALIZATION_STATE_KEY,
@@ -215,11 +303,11 @@ class SystemInitializationServiceTests(unittest.TestCase):
             .first()
         )
 
-        self.assertTrue(status.initialized)
-        self.assertTrue(status.legacy_auto_completed)
-        self.assertIsNotNone(setting)
+        self.assertFalse(status.initialized)
+        self.assertFalse(hasattr(status, "legacy_auto_completed"))
+        self.assertIsNone(setting)
 
-    def test_customized_entry_types_auto_complete_legacy_state(self) -> None:
+    def test_customized_entry_types_never_auto_complete(self) -> None:
         from app.entry_type.models import EntryType
         from app.system_settings.initialization_service import SystemInitializationService
 
@@ -240,8 +328,8 @@ class SystemInitializationServiceTests(unittest.TestCase):
         service = SystemInitializationService(self.db)
         status = service.get_initialization_status()
 
-        self.assertTrue(status.initialized)
-        self.assertTrue(status.legacy_auto_completed)
+        self.assertFalse(status.initialized)
+        self.assertFalse(hasattr(status, "legacy_auto_completed"))
 
     def test_initialize_system_writes_models_bindings_and_defaults(self) -> None:
         from app.ai_registry.models import AiComponentBinding, AiCredential, AiModel
@@ -436,6 +524,86 @@ class SystemInitializationServiceTests(unittest.TestCase):
             .count(),
             0,
         )
+
+    def test_failed_core_stage_rolls_back_operator_and_marker(self) -> None:
+        from app.operator_auth.models import OperatorAccount
+        from app.system_settings.initialization_coordinator import InitializationCoordinator
+        from app.system_settings.initialization_service import SystemInitializationService
+
+        coordinator = InitializationCoordinator(self.db)
+        request = self._make_request(locale="en")
+
+        with patch.object(
+            SystemInitializationService,
+            "_align_relation_types",
+            side_effect=RuntimeError("injected"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "injected"):
+                coordinator.initialize(
+                    request,
+                    setup_authorization=_valid_setup(),
+                    request_context=_request_context(),
+                )
+
+        # Fresh view after rollback.
+        self.db.expire_all()
+        self.assertEqual(self.db.query(OperatorAccount).count(), 0)
+        self.assertIsNone(_initialization_marker(self.db))
+
+    def test_coordinator_seeds_operator_and_marker_atomically(self) -> None:
+        from app.operator_auth.models import OperatorAccount, OperatorAuditEvent
+        from app.system_settings.initialization_coordinator import InitializationCoordinator
+        from app.system_settings.initialization_service import SystemInitializationService
+
+        with patch("app.system_settings.initialization_service.sync_scheduler"):
+            result = InitializationCoordinator(self.db).initialize(
+                self._make_request(locale="en"),
+                setup_authorization=_valid_setup(),
+                request_context=_request_context(),
+            )
+
+        self.assertEqual(result.locale, "en")
+        self.assertEqual(self.db.query(OperatorAccount).count(), 1)
+        account = self.db.query(OperatorAccount).one()
+        self.assertTrue(account.enabled)
+        self.assertEqual(account.role, "operator")
+        self.assertEqual(result.operator_account_id, account.id)
+        marker = _initialization_marker(self.db)
+        self.assertIsNotNone(marker)
+        self.assertEqual(marker.value_json.get("source"), "user")
+        status = SystemInitializationService(self.db).get_initialization_status()
+        self.assertTrue(status.initialized)
+        self.assertFalse(hasattr(status, "legacy_auto_completed"))
+
+        audit_rows = (
+            self.db.query(OperatorAuditEvent)
+            .filter(OperatorAuditEvent.event_type == "operator_account_initialized")
+            .all()
+        )
+        self.assertEqual(len(audit_rows), 1)
+        self.assertEqual(audit_rows[0].outcome, "succeeded")
+        self.assertEqual(audit_rows[0].operator_id, account.id)
+
+    def test_second_initialization_is_rejected(self) -> None:
+        from app.common.exceptions import ApiException
+        from app.operator_auth.models import OperatorAccount
+        from app.system_settings.initialization_coordinator import InitializationCoordinator
+
+        with patch("app.system_settings.initialization_service.sync_scheduler"):
+            InitializationCoordinator(self.db).initialize(
+                self._make_request(locale="zh"),
+                setup_authorization=_valid_setup(),
+                request_context=_request_context(),
+            )
+            with self.assertRaises(ApiException) as ctx:
+                InitializationCoordinator(self.db).initialize(
+                    self._make_request(locale="en"),
+                    setup_authorization=_valid_setup(),
+                    request_context=_request_context(),
+                )
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertEqual(ctx.exception.message, "system_already_initialized")
+        self.assertEqual(self.db.query(OperatorAccount).count(), 1)
 
 
 if __name__ == "__main__":

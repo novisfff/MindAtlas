@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import os
 import time
-import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -21,6 +20,7 @@ if (os.environ.get("MINDATLAS_FAULTHANDLER") or "").strip().lower() in {"1", "tr
 
 from app.common.exceptions import register_exception_handlers
 from app.common.request_context import (
+    normalize_request_id,
     reset_request_id,
     reset_request_locale,
     set_request_id,
@@ -37,8 +37,8 @@ from app.ai_provider.router import router as ai_provider_router
 from app.ai_registry.router import credential_router, model_router, binding_router
 from app.ai.router import router as ai_router
 from app.assistant.router import router as assistant_router
-from app.assistant.evaluation.router import mount_skill_eval_router
-from app.assistant.skills.admin_router import mount_skill_admin_router
+from app.assistant.evaluation.router import skill_eval_router
+from app.assistant.skills.admin_router import skill_admin_parent_router
 from app.assistant.skills.router import (
     main_agent_profile_router,
     skill_package_router,
@@ -54,7 +54,23 @@ from app.openclaw_integration.router import (
 )
 from app.report.router import router as report_router
 from app.scheduler import setup_scheduler, shutdown_scheduler
-from app.system_settings.router import router as system_settings_router
+from app.operator_auth.router import (
+    login_router,
+    protected_operator_auth_router,
+    session_probe_router,
+)
+from app.operator_auth.route_policy import (
+    credential_exchange_router,
+    machine_router,
+    protected_browser_router,
+    public_router,
+    setup_router,
+)
+from app.system_settings.router import (
+    protected_system_settings_router,
+    public_system_settings_router,
+    setup_system_settings_router,
+)
 from app.system_settings.service import normalize_system_locale
 
 settings = get_settings()
@@ -91,8 +107,15 @@ if cors_origins:
         CORSMiddleware,
         allow_origins=cors_origins,
         allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_methods=["GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"],
+        allow_headers=[
+            "Accept",
+            "Authorization",
+            "Content-Type",
+            "X-MindAtlas-CSRF",
+            "X-MindAtlas-Locale",
+            "X-Request-ID",
+        ],
     )
 
 register_exception_handlers(app, debug=settings.debug)
@@ -101,7 +124,7 @@ register_exception_handlers(app, debug=settings.debug)
 @app.middleware("http")
 async def request_logging_middleware(request, call_next):
     logger = logging.getLogger("app.request")
-    request_id = request.headers.get("x-request-id") or uuid.uuid4().hex
+    request_id = normalize_request_id(request.headers.get("x-request-id"))
     request.state.request_id = request_id
     locale = normalize_system_locale(request.headers.get("x-mindatlas-locale"))
     request.state.locale = locale
@@ -141,34 +164,64 @@ async def request_logging_middleware(request, call_next):
     )
     return response
 
-# Register routers
-app.include_router(entry_type_router)
-app.include_router(tag_router)
-app.include_router(entry_router)
-app.include_router(relation_type_router)
-app.include_router(relation_router)
-app.include_router(attachment_router)
-app.include_router(ai_provider_router)
-app.include_router(credential_router)
-app.include_router(model_router)
-app.include_router(binding_router)
-app.include_router(ai_router)
-app.include_router(assistant_router)
-app.include_router(assistant_config_router)
-app.include_router(skill_package_router)
-app.include_router(main_agent_profile_router)
-# Plan 09 admin/eval surfaces: unmounted in staging/production; trusted-dev/test only.
-mount_skill_admin_router(app, app_env=get_settings().app_env)
-mount_skill_eval_router(app, app_env=get_settings().app_env)
-app.include_router(stats_router)
-app.include_router(graph_router)
-app.include_router(lightrag_router)
-app.include_router(report_router)
-app.include_router(system_settings_router)
-app.include_router(openclaw_integration_settings_router)
-app.include_router(openclaw_integration_runtime_router)
 
+# ---------------------------------------------------------------------------
+# Route policy parents — every application route has exactly one marker.
+# ---------------------------------------------------------------------------
 
-@app.get("/health", response_model=ApiResponse)
+_public = public_router()
+_credential_exchange = credential_exchange_router()
+_setup = setup_router()
+_protected_browser = protected_browser_router()
+_machine = machine_router()
+
+# Public: liveness + safe initialization status/defaults + optional session probe.
+@_public.get("/health", response_model=ApiResponse)
 def health() -> ApiResponse:
     return ApiResponse.ok({"status": "ok"})
+
+
+_public.include_router(public_system_settings_router)
+_public.include_router(session_probe_router)
+
+# Credential exchange: password login only.
+_credential_exchange.include_router(login_router)
+
+# Setup: clean-only initialization under Setup token (handler-enforced).
+_setup.include_router(setup_system_settings_router)
+
+# Protected browser: all operator control-plane data + settings surfaces.
+_protected_browser.include_router(protected_operator_auth_router)
+_protected_browser.include_router(entry_type_router)
+_protected_browser.include_router(tag_router)
+_protected_browser.include_router(entry_router)
+_protected_browser.include_router(relation_type_router)
+_protected_browser.include_router(relation_router)
+_protected_browser.include_router(attachment_router)
+_protected_browser.include_router(ai_provider_router)
+_protected_browser.include_router(credential_router)
+_protected_browser.include_router(model_router)
+_protected_browser.include_router(binding_router)
+_protected_browser.include_router(ai_router)
+_protected_browser.include_router(assistant_router)
+_protected_browser.include_router(assistant_config_router)
+_protected_browser.include_router(skill_package_router)
+_protected_browser.include_router(main_agent_profile_router)
+# Plan 09 admin/eval: always mounted; protected_browser enforces real session.
+_protected_browser.include_router(skill_admin_parent_router)
+_protected_browser.include_router(skill_eval_router)
+_protected_browser.include_router(stats_router)
+_protected_browser.include_router(graph_router)
+_protected_browser.include_router(lightrag_router)
+_protected_browser.include_router(report_router)
+_protected_browser.include_router(protected_system_settings_router)
+_protected_browser.include_router(openclaw_integration_settings_router)
+
+# Authenticated machine: OpenClaw runtime Bearer only.
+_machine.include_router(openclaw_integration_runtime_router)
+
+app.include_router(_public)
+app.include_router(_credential_exchange)
+app.include_router(_setup)
+app.include_router(_protected_browser)
+app.include_router(_machine)

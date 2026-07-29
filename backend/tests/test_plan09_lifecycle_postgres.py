@@ -33,7 +33,7 @@ bootstrap_backend_imports()
 reset_caches()
 
 PLAN09_HEAD = "027869a00a47"
-CURRENT_HEAD = "3bd7bc4257c9"
+CURRENT_HEAD = "9f3c1a7e2b40"
 TASK1_HEAD = "403414a62e55"
 PARENT_REVISION = "d7e8f9a0b1c3"
 

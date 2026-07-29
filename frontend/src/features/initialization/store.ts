@@ -504,7 +504,6 @@ export function getPersistedInitializationStatus(): InitializationStatusResponse
 
   return {
     initialized: snapshot.initialized,
-    legacyAutoCompleted: false,
     locale: snapshot.locale ?? getCurrentLocale(),
   }
 }
