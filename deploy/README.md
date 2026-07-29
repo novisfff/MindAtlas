@@ -289,7 +289,7 @@ python3 -c 'import base64,secrets; print(base64.b64encode(secrets.token_bytes(32
 
    1. Deploy with `active=new` + `previous=old` still in `MINDATLAS_SESSION_HMAC_KEYS`.
    2. Let traffic re-MAC old sessions onto `new` (authenticated + CSRF requests).
-   3. Run the revoke CLI so any remaining sessions still bound to a removed/unknown key id are durably revoked.
+   3. Run the revoke CLI **while `old` is still in the ring**. The CLI retires every active session still bound to the non-active (previous) key id, plus any session whose key id is already absent from the ring, and writes `session_key_revoked` / `hmac_key_removed` audit rows. Sessions on the active key are left intact.
    4. Only then remove `old` from the ring and redeploy with `active=new` alone.
 
 4. Never commit real key material. Never log raw session/CSRF values.

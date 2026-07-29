@@ -296,7 +296,13 @@ def run_fixed_suites(*, env: dict[str, str]) -> dict[str, object]:
 
 
 def collect_route_policy_counts() -> dict[str, int]:
-    """Count application routes by ``__route_policy__`` class (no path strings)."""
+    """Count application routes by ``__route_policy__`` class (no path strings).
+
+    Uses the same FastAPI-version-stable inventory walk as
+    ``tests/test_route_auth_inventory`` (flat ``APIRoute`` lists and FastAPI
+    ≥0.140 ``_IncludedRouter.effective_candidates``). Fails closed when the
+    inventory is empty so evidence cannot claim success with all-zero counts.
+    """
     # Import inside so suite subprocesses own their own app state.
     os.chdir(_BACKEND_ROOT)
     from tests._bootstrap import bootstrap_backend_imports, reset_caches
@@ -305,7 +311,6 @@ def collect_route_policy_counts() -> dict[str, int]:
     reset_caches()
 
     from app.main import app as production_app
-    from fastapi.routing import APIRoute
 
     from app.operator_auth.route_policy import (
         POLICY_AUTHENTICATED_MACHINE,
@@ -314,6 +319,7 @@ def collect_route_policy_counts() -> dict[str, int]:
         POLICY_PUBLIC,
         POLICY_SETUP_INITIALIZATION,
     )
+    from tests.test_route_auth_inventory import application_routes, policy_markers
 
     known = {
         POLICY_PUBLIC,
@@ -323,49 +329,16 @@ def collect_route_policy_counts() -> dict[str, int]:
         POLICY_AUTHENTICATED_MACHINE,
     }
     counts: Counter[str] = Counter()
-    framework_prefixes = ("/docs", "/redoc", "/openapi.json")
+    routes = application_routes(production_app)
+    if not routes:
+        raise RuntimeError(
+            "route inventory empty: production app exposed no application "
+            "routes (FastAPI layout change or mount failure). Refusing to "
+            "emit all-zero routePolicyCounts."
+        )
 
-    def _walk(dependant: Any):
-        stack = [dependant]
-        seen: set[int] = set()
-        while stack:
-            current = stack.pop()
-            if current is None:
-                continue
-            ident = id(current)
-            if ident in seen:
-                continue
-            seen.add(ident)
-            yield current
-            for child in getattr(current, "dependencies", None) or []:
-                stack.append(child)
-
-    def _markers(route: APIRoute) -> set[str]:
-        markers: set[str] = set()
-        for dep in route.dependencies or []:
-            call = getattr(dep, "dependency", None)
-            marker = getattr(call, "__route_policy__", None) if call is not None else None
-            if isinstance(marker, str):
-                markers.add(marker)
-        for node in _walk(route.dependant):
-            call = getattr(node, "call", None)
-            marker = getattr(call, "__route_policy__", None) if call is not None else None
-            if isinstance(marker, str):
-                markers.add(marker)
-        return markers
-
-    for route in production_app.routes:
-        if not isinstance(route, APIRoute):
-            continue
-        path = route.path or ""
-        if path.startswith(framework_prefixes) or path in {
-            "/docs",
-            "/redoc",
-            "/openapi.json",
-            "/docs/oauth2-redirect",
-        }:
-            continue
-        markers = _markers(route)
+    for route in routes:
+        markers = policy_markers(route)
         if len(markers) != 1:
             raise RuntimeError(
                 f"route inventory expected exactly one policy marker, got {sorted(markers)}"
@@ -374,6 +347,13 @@ def collect_route_policy_counts() -> dict[str, int]:
         if marker not in known:
             raise RuntimeError(f"unknown route policy class: {marker!r}")
         counts[marker] += 1
+
+    total = sum(counts.values())
+    if total == 0:
+        raise RuntimeError(
+            "route inventory produced zero policy counts after walking "
+            "application routes; refusing empty evidence"
+        )
 
     # Emit stable keys for every known class (zero when absent).
     return {name: int(counts.get(name, 0)) for name in sorted(known)}
@@ -767,7 +747,9 @@ def rehearse_restart_rotation_revocation() -> dict[str, bool]:
         _close_store(engine, tmp_path)
         engine, tmp_path = None, None
 
-        # --- Removing the previous key revokes dependent sessions ---
+        # --- Documented dual-key revoke: retire previous while still in the ring ---
+        # Matches deploy/README rotation sequence step 3 (active=new + previous=old
+        # still configured; CLI/service retires non-active key sessions).
         engine, tmp_path, factory = _open_store()
         ring_old = make_ring(active="prev")
         db5 = factory()
@@ -781,10 +763,19 @@ def rehearse_restart_rotation_revocation() -> dict[str, bool]:
 
         db6 = factory()
         try:
-            service = make_service(db6, make_ring(active="active"))
+            dual = make_ring(active="active", previous="prev")
+            service = make_service(db6, dual)
             count = service.revoke_unverifiable_sessions(context=maint_ctx)
             still = service.resolve_session(session_value3, ctx)
             revoke_ok = count >= 1 and still is None
+            # Active-key sessions must survive the same maintenance pass.
+            if revoke_ok:
+                issued_active = service.login(_REHEARSAL_SECRET, ctx)
+                count_noop = service.revoke_unverifiable_sessions(context=maint_ctx)
+                still_active = service.resolve_session(
+                    issued_active.session_cookie_value, ctx
+                )
+                revoke_ok = count_noop == 0 and still_active is not None
         finally:
             db6.close()
     finally:
@@ -865,8 +856,19 @@ def main(argv: list[str] | None = None) -> int:
     print(f"    postgresVersion={postgres_version}")
 
     print("==> collecting route policy counts")
-    route_policy_counts = collect_route_policy_counts()
-    print(f"    routePolicyCounts={route_policy_counts}")
+    try:
+        route_policy_counts = collect_route_policy_counts()
+    except RuntimeError as exc:
+        print(f"route inventory failed: {exc}", file=sys.stderr)
+        return 1
+    total_routes = sum(int(v) for v in route_policy_counts.values())
+    if total_routes <= 0:
+        print(
+            "route inventory empty after collection; refusing all-zero evidence",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"    routePolicyCounts={route_policy_counts} total={total_routes}")
 
     print("==> running fixed auth suites")
     suite_info = run_fixed_suites(env=env)

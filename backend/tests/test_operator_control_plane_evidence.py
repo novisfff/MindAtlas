@@ -118,6 +118,28 @@ def test_validate_evidence_detects_tampered_digest() -> None:
         validate_evidence(evidence)
 
 
+def test_collect_route_policy_counts_non_empty_under_current_fastapi() -> None:
+    """Evidence runner must walk FastAPI ≥0.140 effective routes (not all-zero)."""
+    from scripts.verify_operator_control_plane import collect_route_policy_counts
+
+    counts = collect_route_policy_counts()
+    assert isinstance(counts, dict)
+    total = sum(int(v) for v in counts.values())
+    assert total > 0, f"empty route inventory would falsify evidence: {counts}"
+    # Every known class present as a key (zeros allowed only for absent classes).
+    for key in (
+        "public",
+        "credential_exchange",
+        "setup_initialization",
+        "protected_browser",
+        "authenticated_machine",
+    ):
+        assert key in counts
+    # Production app mounts a non-trivial protected_browser surface.
+    assert int(counts["protected_browser"]) >= 1
+    assert int(counts["credential_exchange"]) >= 1
+
+
 def test_safe_payload_fragments_stay_clean() -> None:
     """Guard the fixture itself so suite labels never reintroduce fragments."""
     serialized = json.dumps(_safe_payload()).lower()

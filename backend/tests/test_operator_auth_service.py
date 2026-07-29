@@ -681,6 +681,64 @@ def test_removed_previous_key_revokes_dependent_sessions(
         db.close()
 
 
+def test_documented_dual_key_sequence_revokes_previous_while_still_in_ring(
+    session_factory: sessionmaker,
+) -> None:
+    """deploy/README rotation step 3: dual ring present; CLI/service retires old.
+
+    With active=new + previous=old still configured, sessions bound to old must
+    be durably revoked (not a no-op that waits until old is removed from the
+    ring). Active-key sessions survive the same pass.
+    """
+    from app.operator_auth.models import OperatorAuditEvent, OperatorSession
+    from sqlalchemy import select
+
+    issued_old = issue_with_key(session_factory, key_id="old")
+    db = session_factory()
+    try:
+        dual = make_key_ring(active="new", previous="old")
+        service = make_service(db, dual)
+        # Also mint an active-key session that must survive.
+        issued_new = service.login(_PASSWORD, CTX2)
+        count = service.revoke_unverifiable_sessions(context=MAINTENANCE_CTX)
+        assert count == 1
+        assert service.resolve_session(issued_old.session_cookie_value, CTX) is None
+        assert (
+            service.resolve_session(issued_new.session_cookie_value, CTX2) is not None
+        )
+        row = db.get(OperatorSession, issued_old.principal.session_id)
+        assert row is not None
+        assert row.revoked_at is not None
+        assert row.revoke_reason == "hmac_key_removed"
+        events = list(
+            db.scalars(
+                select(OperatorAuditEvent).where(
+                    OperatorAuditEvent.event_type == "session_key_revoked"
+                )
+            )
+        )
+        assert len(events) >= 1
+        assert any(e.reason_code == "hmac_key_removed" for e in events)
+    finally:
+        db.close()
+
+
+def test_revoke_refuses_to_retire_active_key(
+    session_factory: sessionmaker, key_ring: SessionMacKeyRing
+) -> None:
+    db = session_factory()
+    try:
+        _seed_operator(db)
+        service = make_service(db, key_ring)
+        with pytest.raises(ValueError, match="cannot_retire_active_session_mac_key"):
+            service.revoke_unverifiable_sessions(
+                context=MAINTENANCE_CTX,
+                retire_key_ids=frozenset({key_ring.active_key_id}),
+            )
+    finally:
+        db.close()
+
+
 def test_password_revision_invalidates_all_sessions(
     session_factory: sessionmaker, key_ring: SessionMacKeyRing
 ) -> None:

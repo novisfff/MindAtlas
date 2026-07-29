@@ -1,13 +1,20 @@
 #!/usr/bin/env python3
-"""Maintenance CLI: durably revoke operator sessions whose hmac_key_id left the ring.
+"""Maintenance CLI: durably revoke operator sessions on retired/unknown MAC keys.
 
 Run this **before** removing a previous session-MAC key from
-``MINDATLAS_SESSION_HMAC_KEYS``. Prints only safe counts/JSON — never raw
-cookies, IPs, UAs, digests of secrets, or key material.
+``MINDATLAS_SESSION_HMAC_KEYS``. With the dual-key ring still loaded
+(``active=new`` + ``previous=old``), the service retires every active session
+still bound to the non-active (previous) key id, plus any session whose key id
+is already absent from the ring. After the CLI reports success, remove ``old``
+from the ring and redeploy.
+
+Prints only safe counts/JSON — never raw cookies, IPs, UAs, digests of secrets,
+or key material.
 
 Usage (from backend/):
 
   .venv/bin/python scripts/revoke_unverifiable_operator_sessions.py
+  .venv/bin/python scripts/revoke_unverifiable_operator_sessions.py --json
 
 Exit 0 on success. Exit 2 when the session key ring is unavailable.
 """
@@ -43,10 +50,14 @@ def _maintenance_context() -> Any:
 
 
 def run_revoke(*, settings: Any | None = None, db: Any | None = None) -> dict[str, Any]:
-    """Revoke unverifiable sessions; return allowlist-only summary.
+    """Revoke previous-key and unknown-key sessions; return allowlist-only summary.
 
     ``settings`` / ``db`` are injectable for tests. Production path loads both
     from the process environment and SessionLocal.
+
+    With a dual-key ring the service retires every non-active key id still in
+    the ring (the previous key being removed next) plus any session whose key
+    id is already absent. Active-key sessions are never touched.
 
     Raises ``RuntimeError`` with an ``operator_auth_unavailable`` message when
     the key ring is missing (callers map that to exit 2).
@@ -73,11 +84,19 @@ def run_revoke(*, settings: Any | None = None, db: Any | None = None) -> dict[st
     try:
         service = build_operator_auth_service(db, resolved)
         context = _maintenance_context()
-        count = int(service.revoke_unverifiable_sessions(context=context))
+        # Default retire set = every non-active key currently in the ring.
+        retired_key_ids = sorted(k for k in ring.keys.keys() if k != ring.active_key_id)
+        count = int(
+            service.revoke_unverifiable_sessions(
+                context=context,
+                retire_key_ids=frozenset(retired_key_ids),
+            )
+        )
         known_key_ids = sorted(ring.keys.keys())
         return {
             "revokedCount": count,
             "knownKeyIds": known_key_ids,
+            "retiredKeyIds": retired_key_ids,
             "activeKeyId": ring.active_key_id,
             "requestId": context.request_id,
         }
@@ -89,8 +108,9 @@ def run_revoke(*, settings: Any | None = None, db: Any | None = None) -> dict[st
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Revoke operator sessions whose hmac_key_id is no longer in the "
-            "configured session MAC key ring. Safe counts only."
+            "Revoke operator sessions still bound to a previous session-MAC key "
+            "or to a key id no longer in the ring. Run before removing the "
+            "previous key. Safe counts only."
         )
     )
     parser.add_argument(
@@ -116,6 +136,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"revokedCount={summary['revokedCount']}")
         print(f"activeKeyId={summary['activeKeyId']}")
         print(f"knownKeyIds={','.join(summary['knownKeyIds'])}")
+        print(f"retiredKeyIds={','.join(summary['retiredKeyIds'])}")
         print(f"requestId={summary['requestId']}")
     return 0
 

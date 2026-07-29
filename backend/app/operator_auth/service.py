@@ -681,15 +681,37 @@ class OperatorAuthService:
         self,
         *,
         context: RequestSecurityContext,
+        retire_key_ids: frozenset[str] | set[str] | None = None,
     ) -> int:
-        """Durably revoke active sessions whose hmac_key_id is not in the ring."""
+        """Durably revoke active sessions that cannot (or must not) verify.
+
+        Default maintenance semantics match the production rotation sequence:
+        sessions whose ``hmac_key_id`` is **not** in the configured ring are
+        revoked, **and** sessions still bound to any non-active (previous) key
+        currently in the ring are revoked so the previous key can be removed
+        safely afterward.
+
+        Pass ``retire_key_ids`` to name an explicit retirement set (must not
+        include the active key id). Unknown key ids are always revoked.
+        """
         key_ring = self._require_key_ring()
         known = set(key_ring.keys.keys())
+        active = key_ring.active_key_id
+        if retire_key_ids is None:
+            # Previous key(s) still present in the ring are being retired.
+            retired = frozenset(k for k in known if k != active)
+        else:
+            retired = frozenset(retire_key_ids)
+            if active in retired:
+                raise ValueError("cannot_retire_active_session_mac_key")
+
         now = self.repository.database_now()
         rows = self.repository.list_active_sessions(for_update=True)
         count = 0
         for row in rows:
-            if row.hmac_key_id in known:
+            key_id = row.hmac_key_id
+            # Keep sessions verifiable on the active key; revoke previous/unknown.
+            if key_id in known and key_id not in retired:
                 continue
             self.repository.revoke_session(
                 row, reason="hmac_key_removed", revoked_at=now
