@@ -12,6 +12,8 @@ os.environ.setdefault(
     "AI_PROVIDER_FERNET_KEY",
     "07v02gVBdreNrXjLJZkIMdohHtgy6aDFKBHxakHjbrQ=",
 )
+os.environ.setdefault("APP_ENV", "test")
+os.environ.setdefault("APP_BUILD_REVISION", "test-build-bootstrap-task4")
 
 bootstrap_backend_imports()
 reset_caches()
@@ -526,6 +528,14 @@ class SystemInitializationServiceTests(unittest.TestCase):
         )
 
     def test_failed_core_stage_rolls_back_operator_and_marker(self) -> None:
+        from app.assistant.runtime.models import (
+            AssistantMainAgentRolloutEvent,
+            AssistantMainAgentRolloutRevision,
+        )
+        from app.assistant.skills.models import (
+            AssistantMainAgentProfile,
+            AssistantSkillPackage,
+        )
         from app.operator_auth.models import OperatorAccount
         from app.system_settings.initialization_coordinator import InitializationCoordinator
         from app.system_settings.initialization_service import SystemInitializationService
@@ -549,8 +559,18 @@ class SystemInitializationServiceTests(unittest.TestCase):
         self.db.expire_all()
         self.assertEqual(self.db.query(OperatorAccount).count(), 0)
         self.assertIsNone(_initialization_marker(self.db))
+        self.assertEqual(self.db.query(AssistantSkillPackage).count(), 0)
+        self.assertEqual(self.db.query(AssistantMainAgentProfile).count(), 0)
+        self.assertEqual(self.db.query(AssistantMainAgentRolloutRevision).count(), 0)
+        self.assertEqual(self.db.query(AssistantMainAgentRolloutEvent).count(), 0)
 
     def test_coordinator_seeds_operator_and_marker_atomically(self) -> None:
+        from app.assistant.runtime.contracts import CONTROL_KEY_MAIN_AGENT
+        from app.assistant.runtime.models import AssistantMainAgentRolloutControl
+        from app.assistant.skills.models import (
+            AssistantMainAgentProfile,
+            AssistantSkillPackage,
+        )
         from app.operator_auth.models import OperatorAccount, OperatorAuditEvent
         from app.system_settings.initialization_coordinator import InitializationCoordinator
         from app.system_settings.initialization_service import SystemInitializationService
@@ -575,6 +595,27 @@ class SystemInitializationServiceTests(unittest.TestCase):
         self.assertTrue(status.initialized)
         self.assertFalse(hasattr(status, "legacy_auto_completed"))
 
+        # Bootstrap prepares but does not activate.
+        self.assertIsNotNone(result.prepared_rollout_revision_id)
+        self.assertEqual(result.rollout_control_revision, 0)
+        package = self.db.query(AssistantSkillPackage).filter(
+            AssistantSkillPackage.is_system.is_(True)
+        ).one()
+        self.assertEqual(package.canonical_name, "mindatlas-universal")
+        profile = self.db.query(AssistantMainAgentProfile).one()
+        self.assertEqual(profile.migration_state, "bootstrap")
+        self.assertTrue(profile.runtime_enabled)
+        control = self.db.get(AssistantMainAgentRolloutControl, CONTROL_KEY_MAIN_AGENT)
+        self.assertIsNotNone(control)
+        self.assertIsNone(control.active_rollout_revision_id)
+
+        response = result.to_response()
+        self.assertEqual(response.assistant_bootstrap, "pending_worker")
+        self.assertEqual(
+            response.prepared_rollout_revision_id, result.prepared_rollout_revision_id
+        )
+        self.assertEqual(response.rollout_control_revision, 0)
+
         audit_rows = (
             self.db.query(OperatorAuditEvent)
             .filter(OperatorAuditEvent.event_type == "operator_account_initialized")
@@ -583,6 +624,7 @@ class SystemInitializationServiceTests(unittest.TestCase):
         self.assertEqual(len(audit_rows), 1)
         self.assertEqual(audit_rows[0].outcome, "succeeded")
         self.assertEqual(audit_rows[0].operator_id, account.id)
+        self.assertEqual(audit_rows[0].metadata_json.get("assistantBootstrap"), "prepared")
 
     def test_second_initialization_is_rejected(self) -> None:
         from app.common.exceptions import ApiException

@@ -3693,7 +3693,9 @@ class AssistantConfigService:
         current_signature = self._compute_system_catalog_signature(locale=normalized_locale)
         return str(persisted.get("signature") or "") != current_signature
 
-    def _sync_system_catalog_locked(self, *, locale: str | None = None) -> None:
+    def _sync_system_catalog_locked(
+        self, *, locale: str | None = None, commit: bool = True
+    ) -> None:
         normalized_locale = self._current_locale(locale)
         self.sync_system_tools(commit=False)
         self.sync_system_skills(commit=False)
@@ -3702,6 +3704,9 @@ class AssistantConfigService:
         self._ensure_system_targets_folder()
         signature = self._compute_system_catalog_signature(locale=normalized_locale)
         self._store_system_catalog_signature(locale=normalized_locale, signature=signature)
+        if not commit:
+            self.db.flush()
+            return
         try:
             self.db.commit()
         except IntegrityError as exc:
@@ -3709,9 +3714,9 @@ class AssistantConfigService:
             raise ApiException(status_code=409, code=40969, message="Sync system catalog failed") from exc
         # After tools/workflows/agents/skills are present, mirror into disabled shadows.
 
-    def ensure_system_catalog_synced(self) -> None:
+    def ensure_system_catalog_synced(self, *, commit: bool = True) -> None:
         self._acquire_system_catalog_sync_lock()
-        self._sync_system_catalog_locked()
+        self._sync_system_catalog_locked(commit=commit)
 
     def ensure_system_catalog_warm(self) -> bool:
         normalized_locale = self._current_locale()

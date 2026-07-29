@@ -343,6 +343,7 @@ class NewRolloutEvent:
         request_id: UUID,
         seed_manifest_digest: str,
         operator_id: UUID | None = None,
+        bootstrap_evidence: dict[str, Any] | None = None,
     ) -> "NewRolloutEvent":
         request_digest = sha256_canonical_json(
             {
@@ -353,6 +354,15 @@ class NewRolloutEvent:
                 "reason": "system_bootstrap",
             }
         )
+        result_json: dict[str, Any] = {
+            "rolloutRevisionId": str(rollout.id),
+            "revisionDigest": str(rollout.revision_digest),
+            "controlRevision": int(control_revision),
+        }
+        if bootstrap_evidence is not None:
+            if not isinstance(bootstrap_evidence, dict):
+                raise ValueError("bootstrap_evidence must be an object")
+            result_json["bootstrapEvidence"] = dict(bootstrap_evidence)
         return cls(
             action="prepared",
             from_rollout_revision_id=None,
@@ -366,9 +376,5 @@ class NewRolloutEvent:
             evidence_digest=require_sha256(
                 seed_manifest_digest, field_name="seed_manifest_digest"
             ),
-            result_json={
-                "rolloutRevisionId": str(rollout.id),
-                "revisionDigest": str(rollout.revision_digest),
-                "controlRevision": int(control_revision),
-            },
+            result_json=result_json,
         )
