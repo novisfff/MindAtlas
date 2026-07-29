@@ -75,7 +75,7 @@ PROBE_ID = UUID("00000000-0000-4000-8000-000000000822")
 
 def test_select_runtime_off_never_constructs_main_agent() -> None:
     runtime, reason = select_runtime_for_mode(mode="off", execution_kind="production")
-    assert runtime == "legacy"
+    assert runtime is None
     assert reason == MODE_OFF
     assert should_construct_main_agent(mode="off") is False
     assert should_construct_main_agent(mode="off", execution_kind="evaluation") is False
@@ -83,14 +83,16 @@ def test_select_runtime_off_never_constructs_main_agent() -> None:
 
 def test_select_runtime_shadow_production_vs_evaluation() -> None:
     runtime, reason = select_runtime_for_mode(mode="shadow", execution_kind="production")
-    assert runtime == "legacy"
+    assert runtime is None
     assert reason == MODE_SHADOW_PRODUCTION
     assert should_construct_main_agent(mode="shadow", execution_kind="production") is False
 
+    # Plan 2 Task 9: shadow never selects Legacy; evaluation shadow also refuses
+    # construction via select_runtime_for_mode (execution_kind is observational only).
     runtime, reason = select_runtime_for_mode(mode="shadow", execution_kind="evaluation")
-    assert runtime == "main_agent"
-    assert reason is None
-    assert should_construct_main_agent(mode="shadow", execution_kind="evaluation") is True
+    assert runtime is None
+    assert reason == MODE_SHADOW_PRODUCTION
+    assert should_construct_main_agent(mode="shadow", execution_kind="evaluation") is False
 
 
 def test_select_runtime_read_only_admits_main_agent() -> None:
@@ -116,47 +118,21 @@ def test_validate_profile_controls_and_entrypoint() -> None:
     assert keys == MAIN_AGENT_CONTROL_KEYS
 
 
-def test_fallback_state_machine_safe_vs_disallowed() -> None:
+def test_run_state_tracks_side_effects_without_legacy_fallback() -> None:
+    """MainAgentFallbackState remains process-local tracking; never opens Legacy."""
     state = MainAgentFallbackState()
-    assert state.allows_automatic_fallback(
-        reason_code="model_ineligible",
-        legacy_runtime_allowed=True,
-        before_side_effects_only=True,
-        cancel_requested=False,
-    )
+    assert state.user_output_started is False
     state.mark_user_output()
-    assert (
-        state.allows_automatic_fallback(
-            reason_code="model_ineligible",
-            legacy_runtime_allowed=True,
-            before_side_effects_only=True,
-            cancel_requested=False,
-        )
-        is False
-    )
+    assert state.user_output_started is True
+    assert state.snapshot()["user_output_started"] is True
 
     state2 = MainAgentFallbackState()
     state2.mark_capability_dispatch(side_effect="write_local")
-    assert (
-        state2.allows_automatic_fallback(
-            reason_code="model_ineligible",
-            legacy_runtime_allowed=True,
-            before_side_effects_only=True,
-            cancel_requested=False,
-        )
-        is False
-    )
+    assert state2.capability_dispatches_started == 1
+    assert state2.strongest_started_side_effect == "write_local"
 
-    state3 = MainAgentFallbackState()
-    assert (
-        state3.allows_automatic_fallback(
-            reason_code="authorization_denied",
-            legacy_runtime_allowed=True,
-            before_side_effects_only=True,
-            cancel_requested=False,
-        )
-        is False
-    )
+    # Automatic Legacy fallback API is gone — attribute must not exist.
+    assert not hasattr(state, "allows_automatic_fallback")
 
 
 def test_events_internal_visibility_and_safe_activation() -> None:
@@ -359,8 +335,7 @@ def _admission(*, mode: str = "read_only") -> AdmissionContext:
         effective_policy_digest=compute_main_agent_effective_policy_digest(
             profile_content_digest=DIGEST_A
         ),
-        legacy_runtime_allowed=True,
-        before_side_effects_only=True,
+        probe_diagnostics=None,
     )
 
 
@@ -611,7 +586,7 @@ def test_main_agent_service_shadow_evaluation_discards_writes() -> None:
     assert result.write_title is False
 
 
-def test_main_agent_rejects_noop_lifecycle_and_falls_back() -> None:
+def test_main_agent_rejects_noop_lifecycle_and_fails_closed() -> None:
     events: list[tuple[str, dict]] = []
     adapter = MainAgentEventAdapter(lambda n, p: events.append((n, p)))
     admission = _admission(mode="read_only")
@@ -645,12 +620,13 @@ def test_main_agent_rejects_noop_lifecycle_and_falls_back() -> None:
             execution_kind="production",
         )
     )
-    assert result.status == "fallback"
-    assert result.fallback_to_legacy is True
-    assert any(name == "fallback_selected" for name, _ in events)
+    assert result.status == "failed"
+    assert result.runtime == "main_agent"
+    assert not hasattr(result, "fallback_to_legacy") or getattr(result, "fallback_to_legacy", None) in (None, False)
+    assert result.write_message is False
 
 
-def test_main_agent_service_missing_ports_falls_back_before_request() -> None:
+def test_main_agent_service_missing_ports_fails_closed_before_request() -> None:
     admission = _admission(mode="read_only")
     service = MainAgentService(
         db=None,  # type: ignore[arg-type]
@@ -669,8 +645,10 @@ def test_main_agent_service_missing_ports_falls_back_before_request() -> None:
             execution_kind="production",
         )
     )
-    assert result.fallback_to_legacy is True
+    assert result.status == "failed"
+    assert result.runtime == "main_agent"
     assert result.write_l1 is False
+    assert result.write_message is False
 
 
 def test_stream_run_skips_internal_events_but_advances_cursor() -> None:
@@ -690,6 +668,7 @@ def test_stream_run_skips_internal_events_but_advances_cursor() -> None:
             self.id = RUN_ID
             self.status = "completed"
             self.last_event_seq = 3
+            self.runtime_kind = "main_agent"
 
     events_seq = [
         _Event(1, "run_status", {"status": "running"}),
@@ -741,5 +720,5 @@ def test_off_mode_never_imports_main_agent_service_path_on_construct_check() -> 
     # Admission helper raises if someone forces mode off through admit path.
     # (db-backed admit is covered by mode selection; unit path uses select_runtime)
     runtime, reason = select_runtime_for_mode(mode="off")
-    assert runtime == "legacy"
+    assert runtime is None
     assert reason == MODE_OFF

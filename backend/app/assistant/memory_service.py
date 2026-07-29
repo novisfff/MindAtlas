@@ -134,28 +134,67 @@ class AssistantMemoryService:
     ) -> tuple[UUID, str, str] | None:
         """Resolve lookup name to (package_id, namespace, display_name).
 
-        Deploy B2 requires package identity; unmapped names return None and
-        callers must not create name-only L2 rows.
+        Live path uses package alias / canonical_name only. Unmapped names
+        return None and callers must not create name-only L2 rows. Never
+        imports the archived migration package.
         """
-        try:
-            from app.assistant.migration.l2 import (
-                L2MigrationError,
-                resolve_l2_package_mapping,
-            )
-        except Exception:  # noqa: BLE001
+        from app.assistant.memory_migration_state import read_l2_memory_migration_state
+        from app.assistant.skills.contracts import normalize_skill_lookup_name
+        from app.assistant.skills.models import (
+            AssistantSkillPackage,
+            AssistantSkillPackageAlias,
+        )
+
+        # Gate live L2 package resolution on verified migration state so
+        # operators can block package-backed L2 until cutover evidence exists.
+        state = read_l2_memory_migration_state(self.db)
+        if not state.usable:
+            return None
+
+        raw_name = str(skill_name or "").strip()
+        if not raw_name:
             return None
         try:
-            mapping = resolve_l2_package_mapping(self.db, skill_name)
-        except L2MigrationError:
+            name_norm = normalize_skill_lookup_name(raw_name)
+        except (TypeError, ValueError):
+            name_norm = raw_name.casefold().strip()
+        if not name_norm or name_norm in {"general_chat", "general-chat"}:
             return None
-        except Exception:  # noqa: BLE001
-            return None
-        if mapping is None:
+
+        alias = (
+            self.db.query(AssistantSkillPackageAlias)
+            .filter(AssistantSkillPackageAlias.normalized_alias == name_norm)
+            .one_or_none()
+        )
+        if alias is not None and alias.disabled_at is None:
+            pkg = self.db.get(AssistantSkillPackage, alias.skill_package_id)
+            if pkg is not None:
+                return (
+                    pkg.id,
+                    DEFAULT_L2_MEMORY_NAMESPACE,
+                    str(pkg.canonical_name or raw_name),
+                )
+
+        pkg = (
+            self.db.query(AssistantSkillPackage)
+            .filter(AssistantSkillPackage.canonical_name == name_norm)
+            .one_or_none()
+        )
+        if pkg is None:
+            # Also try hyphenated form of underscored names.
+            hyphen = name_norm.replace("_", "-")
+            if hyphen != name_norm:
+                pkg = (
+                    self.db.query(AssistantSkillPackage)
+                    .filter(AssistantSkillPackage.canonical_name == hyphen)
+                    .one_or_none()
+                )
+        if pkg is None:
             return None
         return (
-            mapping.skill_package_id,
-            mapping.memory_namespace,
-            mapping.skill_name,
+            pkg.id,
+            DEFAULT_L2_MEMORY_NAMESPACE,
+            str(pkg.canonical_name or raw_name),
         )
 
     def _get_l2_row_by_package(

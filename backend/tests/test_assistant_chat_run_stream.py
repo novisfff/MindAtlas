@@ -14,6 +14,7 @@ from tests._db import make_session
 
 
 bootstrap_backend_imports()
+from tests.assistant_runtime_support import seed_main_agent_runtime  # noqa: E402
 reset_caches()
 
 
@@ -100,10 +101,12 @@ class AssistantChatRunStreamTests(unittest.TestCase):
         from app.assistant.service import AssistantService  # noqa: E402
 
         run_svc = AssistantChatRunService(self.db)
+        seeded = seed_main_agent_runtime(self.db, build_revision="build-stream-chat")
         run = run_svc.create_run(
             conversation=self.conv,
             user_message=self.user_msg,
             assistant_message=self.assistant_msg,
+            **seeded.as_create_run_kwargs(),
         )
         run_svc.append_event(run_id=run.id, event_name="message_start", payload={"messageId": str(self.assistant_msg.id), "runId": str(run.id)})
         run_svc.append_event(run_id=run.id, event_name="content_delta", payload={"delta": "A"})
@@ -125,10 +128,12 @@ class AssistantChatRunStreamTests(unittest.TestCase):
         from app.assistant.service import AssistantService  # noqa: E402
 
         run_svc = AssistantChatRunService(self.db)
+        seeded = seed_main_agent_runtime(self.db, build_revision="build-stream-chat")
         run = run_svc.create_run(
             conversation=self.conv,
             user_message=self.user_msg,
             assistant_message=self.assistant_msg,
+            **seeded.as_create_run_kwargs(),
         )
         run_svc.append_event(run_id=run.id, event_name="message_start", payload={"messageId": str(self.assistant_msg.id), "runId": str(run.id)})
         run_svc.append_event(run_id=run.id, event_name="content_delta", payload={"delta": "A"})
@@ -148,10 +153,12 @@ class AssistantChatRunStreamTests(unittest.TestCase):
         from app.assistant.service import AssistantService  # noqa: E402
 
         run_svc = AssistantChatRunService(self.db)
+        seeded = seed_main_agent_runtime(self.db, build_revision="build-stream-chat")
         run = run_svc.create_run(
             conversation=self.conv,
             user_message=self.user_msg,
             assistant_message=self.assistant_msg,
+            **seeded.as_create_run_kwargs(),
         )
         run_svc.update_run_status(run_id=run.id, status="running")
 

@@ -474,14 +474,15 @@ class AssistantService:
                 )
             if run is None:
                 raise ApiException(status_code=404, code=40400, message=f"Run not found: {run_id}")
-            runtime_kind = str(getattr(run, "runtime_kind", None) or "legacy")
+            if run.runtime_kind != "main_agent":
+                from app.assistant.durable.leases import RuntimeInvariantViolation
+
+                raise RuntimeInvariantViolation(
+                    "live schema contains non-main-agent Run"
+                )
         run_key = str(run_id)
         last_seq = max(0, int(after_seq or 0))
         terminal_poll_confirmed = False
-        # Attachment bookkeeping is Legacy-only; Main Agent never consults it.
-        track_attachment = runtime_kind != "main_agent"
-        if track_attachment:
-            self._mark_run_stream_attached(run_key)
         try:
             while True:
                 # Use a fresh read session per poll so updates committed by
@@ -522,9 +523,6 @@ class AssistantService:
             # Disconnect closes only this reader Session — Run continues.
             logger.info("assistant run stream disconnected conversation_id=%s run_id=%s", conversation_id, run_id)
             raise
-        finally:
-            if track_attachment:
-                self._mark_run_stream_detached(run_key)
 
     def _start_background_run(self, *, run_id: UUID, stream_output: bool, locale: str) -> None:
         """Legacy chat daemon entry — removed (Plan 10)."""

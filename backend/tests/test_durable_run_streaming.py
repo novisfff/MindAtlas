@@ -28,6 +28,7 @@ from sqlalchemy.orm import sessionmaker
 from tests._bootstrap import bootstrap_backend_imports, reset_caches
 
 bootstrap_backend_imports()
+from tests.assistant_runtime_support import make_main_agent_run, seed_main_agent_runtime  # noqa: E402
 reset_caches()
 
 DIGEST_A = "a" * 64
@@ -90,25 +91,18 @@ def _decode_sse(raw: bytes) -> tuple[str, dict]:
 
 
 def _make_main_agent_run(db, *, status: str = "queued", **kwargs: Any):
-    from app.assistant.models import AssistantChatRun, Conversation
+    from app.assistant.models import Conversation
 
     conv = Conversation(title=f"stream-{uuid.uuid4().hex[:8]}")
     db.add(conv)
     db.flush()
-    run = AssistantChatRun(
-        conversation_id=conv.id,
+    run = make_main_agent_run(
+        db,
         status=status,
-        runtime_kind="main_agent",
-        runtime_contract_version=1,
-        required_app_build_revision="build-stream-1",
-        state_revision=int(kwargs.pop("state_revision", 0)),
-        last_event_seq=int(kwargs.pop("last_event_seq", 0)),
-        memory_commit_status=kwargs.pop("memory_commit_status", "pending"),
+        build_revision="build-stream-1",
+        conversation=conv,
         **kwargs,
     )
-    db.add(run)
-    db.commit()
-    db.refresh(run)
     return run, conv
 
 
@@ -445,11 +439,11 @@ class DurableRunStreamingTests(unittest.TestCase):
         ).filter_by(conversation_id=conv.id).count()
         self.assertEqual(after, before)
 
-    def test_legacy_stream_preserves_event_names_without_forcing_event_key(self) -> None:
+    def test_main_agent_stream_preserves_event_names_without_forcing_event_key(self) -> None:
         from app.assistant.models import AssistantChatRun, Conversation, Message
         from app.assistant.run_service import AssistantChatRunService
 
-        conv = Conversation(title="legacy-stream")
+        conv = Conversation(title="ma-stream")
         self.db.add(conv)
         self.db.commit()
         self.db.refresh(conv)
@@ -461,12 +455,13 @@ class DurableRunStreamingTests(unittest.TestCase):
         self.db.refresh(user)
         self.db.refresh(assistant)
 
+        seeded = seed_main_agent_runtime(self.db, build_revision="build-stream-1")
         run_svc = AssistantChatRunService(self.db)
         run = run_svc.create_run(
             conversation=conv,
             user_message=user,
             assistant_message=assistant,
-            runtime_kind="legacy",
+            **seeded.as_create_run_kwargs(),
         )
         run_svc.append_event(
             run_id=run.id,
@@ -493,14 +488,13 @@ class DurableRunStreamingTests(unittest.TestCase):
             [n for n, _ in events],
             ["message_start", "content_delta", "message_end"],
         )
-        # Legacy rows have no event_key; payload must not invent one.
         for _, payload in events:
-            self.assertNotIn("eventKey", payload)
+            # Main-Agent stream may surface eventKey for durable replay; seq is required.
             self.assertIn("seq", payload)
 
         refreshed = self.db.get(AssistantChatRun, run.id)
         assert refreshed is not None
-        self.assertEqual(refreshed.runtime_kind, "legacy")
+        self.assertEqual(refreshed.runtime_kind, "main_agent")
 
     # ------------------------------------------------------------------
     # Stop: service wiring + cancellation matrix
@@ -712,34 +706,13 @@ class DurableRunStreamingTests(unittest.TestCase):
         self.db.refresh(run)
         self.assertEqual(run.state_revision, 7)
 
-    def test_legacy_stop_still_marks_cancelling(self) -> None:
-        """Preserve Legacy stop semantics (queued/running -> cancelling)."""
-        from app.assistant.models import Conversation, Message
-        from app.assistant.run_service import AssistantChatRunService
-
-        conv = Conversation(title="legacy-stop")
-        self.db.add(conv)
-        self.db.commit()
-        self.db.refresh(conv)
-        user = Message(conversation_id=conv.id, role="user", content="hi")
-        assistant = Message(conversation_id=conv.id, role="assistant", content="")
-        self.db.add(user)
-        self.db.add(assistant)
-        self.db.commit()
-        self.db.refresh(user)
-        self.db.refresh(assistant)
-
-        run = AssistantChatRunService(self.db).create_run(
-            conversation=conv,
-            user_message=user,
-            assistant_message=assistant,
-            runtime_kind="legacy",
-        )
+    def test_main_agent_queued_stop_is_direct_cancel(self) -> None:
+        """Main-Agent queued stop cancels directly (no Legacy cancelling path)."""
+        run, conv = _make_main_agent_run(self.db, status="queued", state_revision=0)
         payload = self._svc().stop_run(conversation_id=conv.id, run_id=run.id)
-        self.assertEqual(payload["status"], "cancelling")
-        # Second stop still cancelling, single run_status event (Legacy path).
+        self.assertEqual(payload["status"], "cancelled")
         payload2 = self._svc().stop_run(conversation_id=conv.id, run_id=run.id)
-        self.assertEqual(payload2["status"], "cancelling")
+        self.assertEqual(payload2["status"], "cancelled")
 
     # ------------------------------------------------------------------
     # CAS unit outcomes: stop vs results / finalizers

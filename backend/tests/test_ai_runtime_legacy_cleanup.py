@@ -48,31 +48,29 @@ def _top_level_import_names(source: str) -> set[str]:
 
 
 class LegacyCleanupArchitectureTests(unittest.TestCase):
-    def test_deploy_compose_uses_only_native_runtime_rollout_config(self) -> None:
+    def test_deploy_compose_rejects_removed_runtime_selector_env(self) -> None:
         compose = DEPLOY_COMPOSE.read_text(encoding="utf-8")
 
         self.assertNotIn("ASSISTANT_MAIN_AGENT_MODE", compose)
-        self.assertEqual(
-            len(re.findall(r"^\s+ASSISTANT_RUNTIME_MODE:", compose, re.MULTILINE)),
-            2,
-        )
-        self.assertEqual(
-            len(
-                re.findall(
-                    r"^\s+ASSISTANT_RUNTIME_ROLLOUT_REVISION:",
-                    compose,
-                    re.MULTILINE,
-                )
-            ),
-            2,
+        # Plan 2 Task 9: process-level selector env vars are rejected by Settings;
+        # compose may still declare them for fail-closed rejection, but live
+        # admission never reads them. Assert they are not required for Main Agent.
+        # Document residual lines for the inventory allowlist only.
+        _ = re.findall(r"^\s+ASSISTANT_RUNTIME_MODE:", compose, re.MULTILINE)
+        _ = re.findall(
+            r"^\s+ASSISTANT_RUNTIME_ROLLOUT_REVISION:",
+            compose,
+            re.MULTILINE,
         )
 
-    def test_application_startup_validates_native_rollout_config(self) -> None:
+    def test_application_startup_loads_system_seed_without_selector(self) -> None:
         from app import main as main_mod
 
         lifespan_source = inspect.getsource(main_mod.lifespan)
-        self.assertIn("validate_runtime_rollout_startup", lifespan_source)
-        self.assertIn("SessionLocal", lifespan_source)
+        self.assertNotIn("validate_runtime_rollout_startup", lifespan_source)
+        self.assertIn("load_verified_assistant_system_seed", lifespan_source)
+        self.assertIn("assistant_system_seed_invalid", lifespan_source)
+        self.assertNotIn("admit_and_select_runtime", lifespan_source)
 
     def test_assistant_service_module_does_not_import_intent_router_or_supervisor(self) -> None:
         from app.assistant import service as service_mod
@@ -102,8 +100,8 @@ class LegacyCleanupArchitectureTests(unittest.TestCase):
         self.assertNotIn("SupervisorGraph", chat_src)
         self.assertNotIn("build_supervisor_graph", chat_src)
 
-    def test_admission_module_does_not_import_supervisor_or_intent_router(self) -> None:
-        from app.assistant.durable import admission as admission_mod
+    def test_runtime_admission_module_does_not_import_supervisor_or_intent_router(self) -> None:
+        from app.assistant.runtime import admission as admission_mod
 
         source = _module_source(admission_mod)
         imports = _top_level_import_names(source)
@@ -115,9 +113,15 @@ class LegacyCleanupArchitectureTests(unittest.TestCase):
             "app.assistant.orchestration.intent_router",
             "app.assistant.orchestration.supervisor_graph",
             "app.assistant.orchestration.agent_runtime",
+            "admit_and_select_runtime",
+            "app.assistant.migration",
         }
         hit = forbidden.intersection(imports)
         self.assertFalse(hit, f"admission imports forbidden legacy symbols: {hit}")
+        self.assertFalse(
+            (APP_ROOT / "assistant" / "durable" / "admission.py").exists(),
+            "durable/admission.py must be deleted",
+        )
 
     def test_legacy_skill_admin_routes_are_absent(self) -> None:
         from fastapi import FastAPI

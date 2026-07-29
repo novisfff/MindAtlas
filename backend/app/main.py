@@ -84,12 +84,28 @@ logging.basicConfig(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifespan: startup and shutdown events."""
-    from app.assistant.migration.rollout import validate_runtime_rollout_startup
-    from app.database import SessionLocal
+    """Application lifespan: startup and shutdown events.
 
-    with SessionLocal() as db:
-        validate_runtime_rollout_startup(db, settings=settings)
+    Plan 2 Task 9: no runtime selector validation. Invalid system seed logs a
+    bounded reason code and continues serving process liveness; Chat/bootstrap
+    fail closed via readiness. Never print seed/Profile content.
+    """
+    logger = logging.getLogger("app.lifespan")
+    try:
+        from app.assistant.runtime.seed import (
+            SystemSeedInvalid,
+            load_verified_assistant_system_seed,
+        )
+
+        load_verified_assistant_system_seed()
+    except SystemSeedInvalid as exc:
+        logger.error(
+            "assistant_system_seed_invalid reason=%s",
+            getattr(exc, "code", None) or str(exc),
+        )
+    except Exception as exc:  # noqa: BLE001 — startup must not crash on seed
+        reason = getattr(exc, "code", None) or type(exc).__name__
+        logger.error("assistant_system_seed_invalid reason=%s", reason)
     warm_assistant_config_system_catalog()
     setup_scheduler()
     yield

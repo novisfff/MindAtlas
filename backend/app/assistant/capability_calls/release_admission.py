@@ -60,16 +60,18 @@ class GoldenGraphAudit:
 
 def freeze_capability_ledger_mode_for_run(
     *,
-    runtime_kind: str,
+    runtime_kind: str = "main_agent",
     settings: Settings | None = None,
-) -> str | None:
+) -> str:
     """Freeze ledger mode at Main Agent Run creation.
 
-    legacy runtime_kind always null. main_agent uses settings default
-    (legacy_read_only unless cohort enables enforced).
+    Plan 2 Task 9: live schema admits main_agent only. Non-main-agent
+    ``runtime_kind`` raises — never returns a Legacy null mode.
     """
     if runtime_kind != "main_agent":
-        return None
+        raise ValueError(
+            f"live schema admits main_agent only; got runtime_kind={runtime_kind!r}"
+        )
     s = settings or get_settings()
     return str(s.assistant_capability_ledger_mode or "legacy_read_only")
 

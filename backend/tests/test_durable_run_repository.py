@@ -20,32 +20,20 @@ from tests._bootstrap import bootstrap_backend_imports, reset_caches
 bootstrap_backend_imports()
 reset_caches()
 
+from tests.assistant_runtime_support import make_main_agent_run  # noqa: E402
+
 DIGEST_A = "a" * 64
 DIGEST_B = "b" * 64
 DIGEST_C = "c" * 64
 
 
 def _make_main_agent_run(db, *, status: str = "queued", **kwargs: Any):
-    from app.assistant.models import AssistantChatRun, Conversation
-
-    conv = Conversation(title=f"t-{uuid.uuid4().hex[:8]}")
-    db.add(conv)
-    db.flush()
-    run = AssistantChatRun(
-        conversation_id=conv.id,
+    return make_main_agent_run(
+        db,
         status=status,
-        runtime_kind="main_agent",
-        runtime_contract_version=1,
-        required_app_build_revision="build-test-1",
-        state_revision=int(kwargs.pop("state_revision", 0)),
-        last_event_seq=int(kwargs.pop("last_event_seq", 0)),
-        memory_commit_status=kwargs.pop("memory_commit_status", "pending"),
+        build_revision="build-test-1",
         **kwargs,
     )
-    db.add(run)
-    db.commit()
-    db.refresh(run)
-    return run
 
 
 def _lease_for(run, worker_id: str = "worker-1") -> Any:
@@ -910,26 +898,18 @@ class DurableRunRepositoryUnitTests(unittest.TestCase):
         )
         self.assertFalse(lost)
 
-    def test_legacy_run_rejected(self) -> None:
+    def test_non_main_agent_run_rejected(self) -> None:
+        from types import SimpleNamespace
+
         from app.assistant.durable.repository import (
             CODE_NOT_MAIN_AGENT,
             DurableRunConflict,
         )
-        from app.assistant.models import AssistantChatRun, Conversation
 
-        conv = Conversation(title="legacy")
-        self.db.add(conv)
-        self.db.flush()
-        run = AssistantChatRun(
-            conversation_id=conv.id,
-            status="queued",
-            runtime_kind="legacy",
-        )
-        self.db.add(run)
-        self.db.commit()
         repo = self._repo()
+        fake = SimpleNamespace(runtime_kind="legacy", id=None)
         with self.assertRaises(DurableRunConflict) as ctx:
-            repo.request_stop(run_id=run.id, expected_revision=0)
+            repo._require_main_agent(fake)  # type: ignore[arg-type]
         self.assertEqual(ctx.exception.code, CODE_NOT_MAIN_AGENT)
 
     def test_transition_table_covers_section4(self) -> None:

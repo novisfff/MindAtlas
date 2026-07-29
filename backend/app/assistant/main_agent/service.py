@@ -1,10 +1,8 @@
-"""Main Agent runtime admission and Assistant Run composition (Plan 04 Task 8).
+"""Main Agent runtime admission and Assistant Run composition.
 
-Feature modes:
-- off: Legacy only; never construct MainAgentService
-- shadow: production chat stays Legacy; explicit evaluation may run MA without
-  Message/L1/L2/title writes
-- read_only: admit MA after preflight; fallback to Legacy only when §4.3 allows
+Plan 2 Task 9: live admission is Main-Agent-only. No configuration, mode, or
+runtime failure may select Legacy. Provider/worker errors raise into the Run
+state machine on the same durable Run.
 """
 
 from __future__ import annotations
@@ -90,7 +88,7 @@ logger = logging.getLogger(__name__)
 
 MainAgentAdmissionMode = Literal["off", "shadow", "read_only"]
 
-RuntimeKind = Literal["legacy", "main_agent"]
+RuntimeKind = Literal["main_agent"]
 ExecutionKind = Literal["production", "evaluation"]
 AdmissionDecision = Literal["legacy", "main_agent", "fallback_legacy", "fail"]
 
@@ -267,32 +265,6 @@ class MainAgentFallbackState:
                 "user_output_started": self.user_output_started,
             }
 
-    def allows_automatic_fallback(
-        self,
-        *,
-        reason_code: str,
-        legacy_runtime_allowed: bool,
-        before_side_effects_only: bool,
-        cancel_requested: bool,
-    ) -> bool:
-        with self._lock:
-            if cancel_requested:
-                return False
-            if not legacy_runtime_allowed:
-                return False
-            if before_side_effects_only is False:
-                return False
-            if reason_code not in FALLBACK_SAFE_REASONS:
-                return False
-            if self.user_output_started:
-                return False
-            if self.pending_interrupt or self.uncertain_result:
-                return False
-            strongest = self.strongest_started_side_effect
-            if strongest in {"draft", "write_local", "write_external", "unknown"}:
-                return False
-            return True
-
 
 _SIDE_EFFECT_RANK = {
     None: -1,
@@ -338,7 +310,7 @@ class AssistantRuntimeRequest:
 @dataclass(frozen=True)
 class AssistantRuntimeResult:
     runtime: RuntimeKind
-    status: Literal["completed", "failed", "cancelled", "fallback"]
+    status: Literal["completed", "failed", "cancelled"]
     final_text: str
     reason_code: str | None = None
     write_message: bool = True
@@ -347,7 +319,6 @@ class AssistantRuntimeResult:
     write_title: bool = True
     skill_summaries: tuple[dict[str, Any], ...] = ()
     tool_summaries: tuple[dict[str, Any], ...] = ()
-    fallback_to_legacy: bool = False
 
 
 class AssistantRuntimeRunner(Protocol):
@@ -368,8 +339,7 @@ class AdmissionContext:
     model_ref: ModelRef
     eligibility: ModelEligibilityReport
     effective_policy_digest: str
-    legacy_runtime_allowed: bool
-    before_side_effects_only: bool
+    probe_diagnostics: ModelEligibilityReport | None = None
 
 
 @dataclass
@@ -414,21 +384,19 @@ def select_runtime_for_mode(
 ) -> tuple[RuntimeKind | None, str | None]:
     """Return (runtime_to_try, reason) without constructing services.
 
-    - off: legacy only (None means "do not construct MA")
-    - shadow + production: legacy only
-    - shadow + evaluation: main_agent allowed
-    - read_only: main_agent after preflight
+    Plan 2 Task 9: never returns legacy. off / shadow-production refuse construction
+    with a typed reason; only main_agent is constructible.
     """
+    del execution_kind  # reserved for evaluation shadow diagnostics
     normalized = str(mode or "off").strip().lower()
     if normalized == "off":
-        return "legacy", MODE_OFF
+        return None, MODE_OFF
     if normalized == "shadow":
-        if execution_kind == "production":
-            return "legacy", MODE_SHADOW_PRODUCTION
-        return "main_agent", None
+        # Shadow no longer routes to legacy; production shadow is refused.
+        return None, MODE_SHADOW_PRODUCTION
     if normalized == "read_only":
         return "main_agent", None
-    return "legacy", MODE_OFF
+    return None, MODE_OFF
 
 
 def should_construct_main_agent(
@@ -680,8 +648,7 @@ def admit_main_agent(
         model_ref=model_ref,
         eligibility=eligibility,
         effective_policy_digest=policy_digest,
-        legacy_runtime_allowed=bool(snapshot.fallback_policy.legacy_runtime_allowed),
-        before_side_effects_only=bool(snapshot.fallback_policy.before_side_effects_only),
+        probe_diagnostics=eligibility,
     )
 
 
@@ -1356,40 +1323,14 @@ class MainAgentService:
         return runtime, ports
 
     def _admission_failure_result(
-
         self,
         *,
         request: AssistantRuntimeRequest,
         reason_code: str,
         events: MainAgentEventAdapter,
     ) -> AssistantRuntimeResult:
-        # No admission context: use conservative fallback policy from defaults.
-        legacy_allowed = True
-        before_side_effects_only = True
-        fallback = MainAgentFallbackState()
-        if fallback.allows_automatic_fallback(
-            reason_code=reason_code,
-            legacy_runtime_allowed=legacy_allowed,
-            before_side_effects_only=before_side_effects_only,
-            cancel_requested=bool(request.cancel_checker and request.cancel_checker()),
-        ):
-            events.fallback_selected(
-                run_id=request.run_id,
-                source_runtime="main_agent",
-                target_runtime="legacy",
-                reason_code=reason_code,
-            )
-            return AssistantRuntimeResult(
-                runtime="main_agent",
-                status="fallback",
-                final_text="",
-                reason_code=reason_code,
-                write_message=False,
-                write_l1=False,
-                write_l2=False,
-                write_title=False,
-                fallback_to_legacy=True,
-            )
+        # Plan 2 Task 9: admission failure is typed fail-closed. Never select Legacy.
+        del events  # reserved for future structured failure events
         return AssistantRuntimeResult(
             runtime="main_agent",
             status="failed",
@@ -1399,7 +1340,6 @@ class MainAgentService:
             write_l1=False,
             write_l2=False,
             write_title=False,
-            fallback_to_legacy=False,
         )
 
     def _maybe_fallback(
@@ -1411,34 +1351,8 @@ class MainAgentService:
         fallback: MainAgentFallbackState,
         admission: AdmissionContext,
     ) -> AssistantRuntimeResult:
-        cancel_requested = bool(request.cancel_checker and request.cancel_checker())
-        if fallback.allows_automatic_fallback(
-            reason_code=reason_code,
-            legacy_runtime_allowed=admission.legacy_runtime_allowed,
-            before_side_effects_only=admission.before_side_effects_only,
-            cancel_requested=cancel_requested,
-        ):
-            snap = fallback.snapshot()
-            events.fallback_selected(
-                run_id=request.run_id,
-                source_runtime="main_agent",
-                target_runtime="legacy",
-                reason_code=reason_code,
-                provider_requests_started=int(snap["provider_requests_started"]),
-                capability_dispatches_started=int(snap["capability_dispatches_started"]),
-                strongest_side_effect=snap["strongest_started_side_effect"],
-            )
-            return AssistantRuntimeResult(
-                runtime="main_agent",
-                status="fallback",
-                final_text="",
-                reason_code=reason_code,
-                write_message=False,
-                write_l1=False,
-                write_l2=False,
-                write_title=False,
-                fallback_to_legacy=True,
-            )
+        # Plan 2 Task 9: named for historical call sites; never opens a second Run.
+        del request, events, fallback, admission
         return AssistantRuntimeResult(
             runtime="main_agent",
             status="failed",
@@ -1448,62 +1362,8 @@ class MainAgentService:
             write_l1=False,
             write_l2=False,
             write_title=False,
-            fallback_to_legacy=False,
         )
 
-
-class LegacyAssistantRuntimeRunner:
-    """Wraps the existing ``_generate_response`` path."""
-
-    def __init__(
-        self,
-        generate: Callable[..., Iterator[str]],
-        *,
-        conversation_id: UUID,
-        message_id: UUID | None,
-        run_id: UUID,
-        stream_output: bool,
-        locale: str,
-        db: Session,
-        cancel_checker: Callable[[], bool] | None = None,
-        event_callbacks: Mapping[str, Any] | None = None,
-    ) -> None:
-        self._generate = generate
-        self._conversation_id = conversation_id
-        self._message_id = message_id
-        self._run_id = run_id
-        self._stream_output = stream_output
-        self._locale = locale
-        self._db = db
-        self._cancel_checker = cancel_checker
-        self._event_callbacks = dict(event_callbacks or {})
-
-    def run(self, request: AssistantRuntimeRequest) -> AssistantRuntimeResult:
-        del request  # parameters already bound at construction for Legacy path
-        parts: list[str] = []
-        for delta in self._generate(
-            self._conversation_id,
-            message_id=self._message_id,
-            run_id=self._run_id,
-            stream_output=self._stream_output,
-            locale=self._locale,
-            db=self._db,
-            cancel_checker=self._cancel_checker,
-            **self._event_callbacks,
-        ):
-            if delta:
-                parts.append(str(delta))
-        text = "".join(parts)
-        return AssistantRuntimeResult(
-            runtime="legacy",
-            status="completed",
-            final_text=text,
-            reason_code=None,
-            write_message=True,
-            write_l1=True,
-            write_l2=True,
-            write_title=True,
-        )
 
 
 def chunk_text(text: str, *, chunk_size: int = 64) -> Iterator[str]:
@@ -1528,7 +1388,6 @@ __all__ = [
     "ENTRYPOINT_UNSUPPORTED",
     "FALLBACK_DISALLOWED",
     "FALLBACK_SAFE_REASONS",
-    "LegacyAssistantRuntimeRunner",
     "MAIN_AGENT_COMPLETED",
     "MAIN_AGENT_FAILED",
     "MODE_OFF",
