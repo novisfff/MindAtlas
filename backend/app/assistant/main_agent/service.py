@@ -79,8 +79,11 @@ from app.assistant.skills.models import (
     AssistantMainAgentProfileVersion,
 )
 from app.assistant.skills.schemas import (
-    MainAgentProfileSnapshotV1,
+    MainAgentProfileSnapshotV2,
     ModelRequirementsV1,
+    ReadableMainAgentProfileSnapshot,
+    parse_main_agent_profile_snapshot_for_read,
+    require_production_profile_v2,
 )
 from app.config import get_settings
 
@@ -331,7 +334,7 @@ class AdmissionContext:
     execution_kind: ExecutionKind
     profile: AssistantMainAgentProfile
     profile_version: AssistantMainAgentProfileVersion
-    snapshot: MainAgentProfileSnapshotV1
+    snapshot: MainAgentProfileSnapshotV2
     main_agent_ref: ResolvedMainAgentRef
     control_keys: tuple[str, ...]
     frozen_model: FrozenModelIdentity
@@ -418,7 +421,12 @@ def _credential_config_digest(*, base_url: str, runtime_revision: int) -> str:
 
 def load_default_published_profile(
     db: Session,
-) -> tuple[AssistantMainAgentProfile, AssistantMainAgentProfileVersion, MainAgentProfileSnapshotV1]:
+) -> tuple[AssistantMainAgentProfile, AssistantMainAgentProfileVersion, MainAgentProfileSnapshotV2]:
+    """Load the default published Main Agent profile for production admission.
+
+    Plan 2: production admit is V2-exclusive. V1 snapshots remain readable for
+    historical display only and must fail closed here as PROFILE_UNAVAILABLE.
+    """
     profile = (
         db.query(AssistantMainAgentProfile)
         .filter(AssistantMainAgentProfile.is_default.is_(True))
@@ -436,7 +444,8 @@ def load_default_published_profile(
     if str(version.version_source) != "publish":
         raise MainAgentAdmissionError(PROFILE_UNPUBLISHED)
     try:
-        snapshot = MainAgentProfileSnapshotV1.model_validate(version.snapshot or {})
+        parsed = parse_main_agent_profile_snapshot_for_read(version.snapshot or {})
+        snapshot = require_production_profile_v2(parsed)
     except Exception as exc:
         raise MainAgentAdmissionError(PROFILE_UNAVAILABLE) from exc
     recomputed = snapshot.content_digest()
@@ -446,8 +455,14 @@ def load_default_published_profile(
 
 
 def validate_profile_for_assistant_chat(
-    snapshot: MainAgentProfileSnapshotV1,
+    snapshot: ReadableMainAgentProfileSnapshot,
 ) -> tuple[str, ...]:
+    """Validate shared profile fields used by assistant_chat admission.
+
+    Accepts V1 or V2 for unit/historical callers that only exercise shared fields
+    (supported_entrypoints, control_capability_keys). Production admit always
+    supplies V2 via load_default_published_profile.
+    """
     if "assistant_chat" not in set(snapshot.supported_entrypoints):
         raise MainAgentAdmissionError(ENTRYPOINT_UNSUPPORTED)
     keys = tuple(snapshot.control_capability_keys or ())

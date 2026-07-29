@@ -43,6 +43,7 @@ from app.assistant.main_agent.service import (  # noqa: E402
     MainAgentService,
     build_base_manifest_with_controls,
     compute_main_agent_effective_policy_digest,
+    load_default_published_profile,
     select_runtime_for_mode,
     should_construct_main_agent,
     validate_profile_for_assistant_chat,
@@ -58,7 +59,9 @@ from app.assistant.provider_loop.contracts import (  # noqa: E402
 from app.assistant.provider_loop.scheduler import SequentialSiblingExecutor  # noqa: E402
 from app.assistant.skills.schemas import (  # noqa: E402
     MainAgentProfileSnapshotV1,
+    MainAgentProfileSnapshotV2,
     default_main_agent_profile_snapshot,
+    default_main_agent_profile_snapshot_v2,
 )
 
 
@@ -103,19 +106,29 @@ def test_select_runtime_read_only_admits_main_agent() -> None:
 
 
 def test_validate_profile_controls_and_entrypoint() -> None:
+    # Shared-field validation still accepts historical V1 for unit coverage.
     snap = default_main_agent_profile_snapshot()
     with pytest.raises(MainAgentAdmissionError) as exc:
         validate_profile_for_assistant_chat(snap)
     assert exc.value.reason_code in {"control_missing", "entrypoint_unsupported"}
 
-    good = MainAgentProfileSnapshotV1.model_validate(
+    good_v1 = MainAgentProfileSnapshotV1.model_validate(
         {
             **snap.model_dump(by_alias=True, mode="json"),
             "controlCapabilityKeys": list(MAIN_AGENT_CONTROL_KEYS),
         }
     )
-    keys = validate_profile_for_assistant_chat(good)
+    keys = validate_profile_for_assistant_chat(good_v1)
     assert keys == MAIN_AGENT_CONTROL_KEYS
+
+    # Production path is V2; shared fields validate the same way.
+    good_v2 = MainAgentProfileSnapshotV2.model_validate(
+        {
+            **default_main_agent_profile_snapshot_v2().model_dump(by_alias=True, mode="json"),
+            "controlCapabilityKeys": list(MAIN_AGENT_CONTROL_KEYS),
+        }
+    )
+    assert validate_profile_for_assistant_chat(good_v2) == MAIN_AGENT_CONTROL_KEYS
 
 
 def test_run_state_tracks_side_effects_without_legacy_fallback() -> None:
@@ -200,9 +213,9 @@ def _model_ref(provider: ProviderRef) -> ModelRef:
     )
 
 
-def _snapshot_with_controls() -> MainAgentProfileSnapshotV1:
-    base = default_main_agent_profile_snapshot()
-    return MainAgentProfileSnapshotV1.model_validate(
+def _snapshot_with_controls() -> MainAgentProfileSnapshotV2:
+    base = default_main_agent_profile_snapshot_v2()
+    return MainAgentProfileSnapshotV2.model_validate(
         {
             **base.model_dump(by_alias=True, mode="json"),
             "controlCapabilityKeys": list(MAIN_AGENT_CONTROL_KEYS),
@@ -722,3 +735,94 @@ def test_off_mode_never_imports_main_agent_service_path_on_construct_check() -> 
     runtime, reason = select_runtime_for_mode(mode="off")
     assert runtime is None
     assert reason == MODE_OFF
+
+
+def _seed_default_published_profile(
+    db: Any,
+    *,
+    snapshot: MainAgentProfileSnapshotV1 | MainAgentProfileSnapshotV2,
+    runtime_enabled: bool = True,
+) -> tuple[Any, Any]:
+    from app.assistant.skills.models import (
+        AssistantMainAgentProfile,
+        AssistantMainAgentProfileVersion,
+    )
+
+    profile = AssistantMainAgentProfile(
+        profile_key="default",
+        display_name="Main Agent",
+        is_default=True,
+        migration_state="native",
+        runtime_enabled=runtime_enabled,
+    )
+    db.add(profile)
+    db.flush()
+    payload = snapshot.normalized_payload()
+    digest = snapshot.content_digest()
+    # publish versions require a non-null source_draft_version_id (shape constraint).
+    draft = AssistantMainAgentProfileVersion(
+        profile_id=profile.id,
+        sequence_no=1,
+        version_name="draft-v1",
+        version_source="save",
+        origin="bootstrap",
+        snapshot=payload,
+        content_digest=digest,
+    )
+    db.add(draft)
+    db.flush()
+    published = AssistantMainAgentProfileVersion(
+        profile_id=profile.id,
+        sequence_no=2,
+        version_name="published-v1",
+        version_source="publish",
+        origin="bootstrap",
+        source_draft_version_id=draft.id,
+        snapshot=payload,
+        content_digest=digest,
+    )
+    db.add(published)
+    db.flush()
+    profile.published_version_id = published.id
+    profile.draft_version_id = draft.id
+    db.commit()
+    db.refresh(profile)
+    db.refresh(published)
+    return profile, published
+
+
+def test_load_default_published_profile_accepts_v2() -> None:
+    from tests._db import make_session
+
+    db = make_session()
+    try:
+        snap = _snapshot_with_controls()
+        _seed_default_published_profile(db, snapshot=snap)
+        profile, version, loaded = load_default_published_profile(db)
+        assert profile.is_default is True
+        assert version.version_source == "publish"
+        assert isinstance(loaded, MainAgentProfileSnapshotV2)
+        assert loaded.schema_version == 2
+        assert loaded.content_digest() == snap.content_digest()
+        assert "fallbackPolicy" not in loaded.normalized_payload()
+    finally:
+        db.close()
+
+
+def test_load_default_published_profile_rejects_v1() -> None:
+    from tests._db import make_session
+
+    db = make_session()
+    try:
+        v1 = MainAgentProfileSnapshotV1.model_validate(
+            {
+                **default_main_agent_profile_snapshot().model_dump(by_alias=True, mode="json"),
+                "controlCapabilityKeys": list(MAIN_AGENT_CONTROL_KEYS),
+            }
+        )
+        _seed_default_published_profile(db, snapshot=v1)
+        with pytest.raises(MainAgentAdmissionError) as exc:
+            load_default_published_profile(db)
+        assert exc.value.reason_code == PROFILE_UNAVAILABLE
+    finally:
+        db.close()
