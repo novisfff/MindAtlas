@@ -209,6 +209,7 @@ def _admit_main_agent_candidate(
             # Task 7: feature digest is required for Main Agent compatibility.
             # Task 8 will share the readiness evaluator; this path keeps the
             # WorkerCompatibility constructor as the sole matcher.
+            from app.assistant.durable.codec import CURRENT_CHECKPOINT_CODEC_VERSION
             from app.assistant.durable.worker_registry import WorkerCompatibility
 
             # ledger_mode / write_mode still influence whether enforced ledger
@@ -220,7 +221,7 @@ def _admit_main_agent_candidate(
                 WorkerCompatibility(
                     app_build_revision=build,
                     runtime_contract_version=RUNTIME_CONTRACT_VERSION,
-                    required_checkpoint_codec_version=1,
+                    required_checkpoint_codec_version=CURRENT_CHECKPOINT_CODEC_VERSION,
                     required_capability_feature_digest=required_feature_digest,
                 ),
                 registration_ttl=ttl,

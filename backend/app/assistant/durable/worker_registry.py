@@ -21,7 +21,10 @@ from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.assistant.domain.digests import sha256_canonical_json
-from app.assistant.durable.codec import SUPPORTED_CHECKPOINT_SCHEMA_VERSIONS
+from app.assistant.durable.codec import (
+    CURRENT_CHECKPOINT_CODEC_VERSION,
+    SUPPORTED_CHECKPOINT_SCHEMA_VERSIONS,
+)
 from app.assistant.durable.models import AssistantWorkerRegistration
 from app.common.time import utcnow
 from app.config import get_settings
@@ -132,8 +135,9 @@ class WorkerCompatibility:
     """Canonical Run/closure requirements a worker registration must satisfy.
 
     Feature digest is required for production Main Agent Runs — never optional
-    on the construction path. ``matches`` still tolerates a ``None`` digest only
-    for transitional healthcheck callers that have not yet migrated.
+    on the construction path. ``matches`` requires exact build, contract, feature
+    digest equality, and membership of ``required_checkpoint_codec_version`` in
+    the identity's supported codec set.
     """
 
     app_build_revision: str
@@ -359,18 +363,10 @@ class WorkerRegistry:
         )
 
         rows = list(self.db.scalars(stmt).all())
-        required = int(compatibility.required_checkpoint_codec_version)
         matched: list[AssistantWorkerRegistration] = []
         for row in rows:
+            # matches encodes build/contract/feature equality + codec membership.
             if not compatibility.matches(row):
-                continue
-            # Belt-and-suspenders: matches already checks codec membership.
-            supported = row.supported_checkpoint_codec_versions or []
-            try:
-                supported_set = {int(v) for v in supported}
-            except (TypeError, ValueError):
-                continue
-            if required not in supported_set:
                 continue
             matched.append(row)
             if len(matched) >= int(limit):
@@ -383,7 +379,7 @@ class WorkerRegistry:
         worker_id: str,
         app_build_revision: str,
         runtime_contract_version: int = RUNTIME_CONTRACT_VERSION,
-        required_checkpoint_codec_version: int = 1,
+        required_checkpoint_codec_version: int = CURRENT_CHECKPOINT_CODEC_VERSION,
         required_capability_feature_digest: str | None = None,
         registration_ttl: timedelta | None = None,
     ) -> dict[str, Any]:

@@ -621,6 +621,8 @@ def run_healthcheck(*, state_path: Path | None = None) -> int:
         )
         return 1
 
+    from app.assistant.durable.codec import CURRENT_CHECKPOINT_CODEC_VERSION
+
     settings = get_settings()
     ttl = timedelta(seconds=int(settings.assistant_worker_registration_ttl_sec))
     db = SessionLocal()
@@ -631,7 +633,8 @@ def run_healthcheck(*, state_path: Path | None = None) -> int:
             runtime_contract_version=int(
                 state.get("runtime_contract_version") or 1
             ),
-            required_checkpoint_codec_version=1,
+            # Align process health with readiness/admission: current release codec.
+            required_checkpoint_codec_version=CURRENT_CHECKPOINT_CODEC_VERSION,
             registration_ttl=ttl,
         )
     finally:

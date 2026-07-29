@@ -402,3 +402,42 @@ def test_compatible_worker_claims_queued_run(postgres_runtime):
     reloaded = postgres_runtime.reload(run.id)
     assert reloaded.status == "running"
     assert reloaded.lease_owner == worker.worker_id
+
+
+def test_claim_skips_codec_incompatible_earliest_run(postgres_runtime):
+    """Earliest eligible Run with an unsupported codec must not starve a later match.
+
+    SQL prefilter matches build/contract/feature only; codec is rechecked on the
+    locked row. Claim must scan further SKIP LOCKED candidates instead of
+    abandoning the poll after one codec-incompatible lock.
+    """
+    # Worker supports codecs 1 and 2 only — not 3 (current) or 99.
+    worker = postgres_runtime.worker_identity_with()
+    # Rebuild identity with a restricted codec set while keeping other fields.
+    from app.assistant.durable.worker_registry import WorkerIdentity
+
+    worker = WorkerIdentity(
+        worker_id=worker.worker_id,
+        app_build_revision=postgres_runtime.build,
+        runtime_contract_version=1,
+        supported_checkpoint_codec_versions=(1, 2),
+        capability_feature_digest=FEATURE,
+        hostname_label="pg-claim-codec-scan",
+    )
+
+    # Earliest by created_at: requires codec 99 (worker cannot support).
+    bad = postgres_runtime.queued_run(required_checkpoint_codec_version=99)
+    # Later eligible Run: requires codec 2 (worker supports).
+    good = postgres_runtime.queued_run(required_checkpoint_codec_version=2)
+
+    claimed = postgres_runtime.claim(worker)
+    assert claimed is not None, "claim_next must advance past codec-incompatible head"
+    assert str(claimed.run_id) == str(good.id)
+
+    bad_reloaded = postgres_runtime.reload(bad.id)
+    assert bad_reloaded.status == "queued"
+    assert bad_reloaded.lease_owner is None
+
+    good_reloaded = postgres_runtime.reload(good.id)
+    assert good_reloaded.status == "running"
+    assert good_reloaded.lease_owner == worker.worker_id

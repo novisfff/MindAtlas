@@ -24,13 +24,18 @@ DIGEST = "a" * 64
 
 
 def _identity(**kwargs):
+    from app.assistant.durable.codec import SUPPORTED_CHECKPOINT_SCHEMA_VERSIONS
     from app.assistant.durable.worker_registry import WorkerIdentity
 
     defaults = dict(
         worker_id=f"w-{uuid.uuid4().hex[:12]}",
         app_build_revision="build-test-1",
         runtime_contract_version=1,
-        supported_checkpoint_codec_versions=(1,),
+        # Align with production workers: full supported codec set so the
+        # healthcheck default (CURRENT_CHECKPOINT_CODEC_VERSION) matches.
+        supported_checkpoint_codec_versions=tuple(
+            sorted(SUPPORTED_CHECKPOINT_SCHEMA_VERSIONS)
+        ),
         capability_feature_digest=DIGEST,
         hostname_label="test-host",
     )
@@ -39,12 +44,13 @@ def _identity(**kwargs):
 
 
 def _compat(**kwargs):
+    from app.assistant.durable.codec import CURRENT_CHECKPOINT_CODEC_VERSION
     from app.assistant.durable.worker_registry import WorkerCompatibility
 
     defaults = dict(
         app_build_revision="build-test-1",
         runtime_contract_version=1,
-        required_checkpoint_codec_version=1,
+        required_checkpoint_codec_version=CURRENT_CHECKPOINT_CODEC_VERSION,
         required_capability_feature_digest=DIGEST,
     )
     defaults.update(kwargs)

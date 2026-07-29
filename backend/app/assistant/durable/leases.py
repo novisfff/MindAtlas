@@ -103,6 +103,11 @@ def compute_retry_backoff(
 class RunLeaseService:
     """Claim compatible Runs and maintain leases for one worker identity."""
 
+    # Max candidates locked per claim poll. Codec is only rechecked post-lock, so
+    # a single LIMIT 1 abort would starve later compatible Runs behind a
+    # codec-incompatible head. Batch + walk preserves SKIP LOCKED semantics.
+    _CLAIM_CANDIDATE_BATCH = 16
+
     def __init__(
         self,
         db: Session,
@@ -166,16 +171,19 @@ class RunLeaseService:
     def _select_eligible_run(self, *, now: datetime) -> AssistantChatRun | None:
         """Select earliest eligible compatible Main Agent Run with SKIP LOCKED.
 
+        Locks a small ordered batch under ``FOR UPDATE SKIP LOCKED``, then walks
+        candidates and claims the first fully compatible row. A codec-incompatible
+        head must not abandon the poll — later compatible Runs stay claimable.
         Falls back to plain FOR UPDATE when the dialect does not support
         skip_locked (SQLite). Callers must not claim concurrency guarantees
         from SQLite tests.
 
-        Compatibility is rechecked on the locked row via
+        Compatibility is rechecked on each locked row via
         ``WorkerCompatibility.from_run`` — never by rewriting Run requirements
         to match this Worker.
         """
-        # Eligibility prefilter (status/due/build/contract). Full codec + feature
-        # digest matching happens on the locked candidate via from_run.
+        # Eligibility prefilter (status/due/build/contract/feature). Full codec
+        # membership is rechecked on each locked candidate via from_run.
         expired_lease = or_(
             AssistantChatRun.lease_expires_at.is_(None),
             AssistantChatRun.lease_expires_at <= now,
@@ -212,15 +220,17 @@ class RunLeaseService:
         )
 
         # Prefer SKIP LOCKED on PostgreSQL; SQLite falls back gracefully.
+        # Fetch a batch so a codec-incompatible earliest Run does not starve
+        # later compatible candidates in the same poll.
         try:
             stmt = (
                 select(AssistantChatRun)
                 .where(*base_where)
                 .order_by(*order)
-                .limit(1)
+                .limit(self._CLAIM_CANDIDATE_BATCH)
                 .with_for_update(skip_locked=True)
             )
-            run = self.db.scalars(stmt).first()
+            candidates = list(self.db.scalars(stmt).all())
         except Exception:
             # Dialect may not support skip_locked; retry without it.
             self.db.rollback()
@@ -228,20 +238,24 @@ class RunLeaseService:
                 select(AssistantChatRun)
                 .where(*base_where)
                 .order_by(*order)
-                .limit(1)
+                .limit(self._CLAIM_CANDIDATE_BATCH)
                 .with_for_update()
             )
-            run = self.db.scalars(stmt).first()
+            candidates = list(self.db.scalars(stmt).all())
 
-        if run is None:
+        if not candidates:
             self.db.rollback()
             return None
+
         # Recheck full compatibility (codec membership + feature digest + kind)
-        # on the locked row via the canonical from_run path.
-        if not self._is_compatible(run):
-            self.db.rollback()
-            return None
-        return run
+        # on each locked row via the canonical from_run path. Do not claim an
+        # incompatible row; advance to the next candidate instead of aborting.
+        for run in candidates:
+            if self._is_compatible(run):
+                return run
+
+        self.db.rollback()
+        return None
 
     def _is_compatible(self, run: AssistantChatRun) -> bool:
         """True when this worker identity satisfies the Run's frozen requirements.
