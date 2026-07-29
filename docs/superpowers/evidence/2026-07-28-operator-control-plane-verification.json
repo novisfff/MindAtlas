@@ -1,8 +1,8 @@
 {
-  "aggregateDigest": "6e1eecc70e015dcd2e73813539d4f7e86ab2e6b8638074be9b9c5a441a7aa95d",
+  "aggregateDigest": "d5cb1004e397d4ac890a9a795c869c01e3bba26734de930568743d3a98822d50",
   "alembicHead": "9f3c1a7e2b40",
-  "buildRevision": "5219d4ecec1073d923f4f284049f27d7943f071f",
-  "generatedAtUtc": "2026-07-28T16:53:12+00:00",
+  "buildRevision": "66308bed7d6c2fa201cf22fc68d36a0a0544272a",
+  "generatedAtUtc": "2026-07-29T02:07:29+00:00",
   "postgresVersion": "PostgreSQL 15.18",
   "previousKeySessionsRevoked": true,
   "restartSessionPreserved": true,
@@ -21,7 +21,7 @@
     "pythonVersion": "3.12.7",
     "suiteCount": 4,
     "totalFailed": 0,
-    "totalPassed": 108,
+    "totalPassed": 110,
     "totalSkipped": 0
   }
 }
