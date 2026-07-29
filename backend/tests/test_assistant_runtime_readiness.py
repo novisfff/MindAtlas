@@ -393,6 +393,31 @@ def test_structural_reason_is_singular(runtime_state):
     assert snapshot.compatible_worker_ids == ()
 
 
+def test_prepared_inactive_reports_compatible_workers(runtime_state):
+    """Pending first activation still surfaces workers against the prepared revision."""
+    runtime_state.arrange("no_active_rollout")
+    runtime_state._register_worker()
+    snapshot = runtime_state.readiness().evaluate()
+    assert snapshot.ready is False
+    assert snapshot.reason_codes == ("rollout_inactive",)
+    assert snapshot.active_rollout_revision_id is None
+    assert snapshot.compatible_worker_ids
+    assert snapshot.profile_version_id is not None
+    assert snapshot.model_id is not None
+
+
+def test_prepared_inactive_without_worker_reports_both_reasons(runtime_state):
+    """Prepared-but-inactive diagnostics co-report worker_unavailable when empty."""
+    runtime_state.arrange("no_active_rollout")
+    snapshot = runtime_state.readiness().evaluate()
+    assert snapshot.ready is False
+    assert snapshot.reason_codes == ("rollout_inactive", "worker_unavailable")
+    assert snapshot.active_rollout_revision_id is None
+    assert snapshot.compatible_worker_ids == ()
+    assert snapshot.profile_version_id is not None
+    assert snapshot.model_id is not None
+
+
 def test_readiness_performs_no_dml(db):
     from app.assistant.runtime.readiness import AssistantReadinessService
 

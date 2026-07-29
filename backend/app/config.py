@@ -318,6 +318,20 @@ class Settings(BaseSettings):
         default="",
         alias="ASSISTANT_CAPABILITY_RECONCILIATION_EVIDENCE_SECRET",
     )
+
+    @field_validator(
+        "assistant_capability_reconciliation_operator_id",
+        mode="before",
+    )
+    @classmethod
+    def _empty_uuid_as_none(cls, value: object) -> object:
+        # Compose injects ASSISTANT_CAPABILITY_RECONCILIATION_OPERATOR_ID="" when
+        # unset; treat blank as absent so Settings stays constructible.
+        if value is None:
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
     # Plan 09 evaluation: failed/unused gate evidence retention grace after expiry.
     assistant_skill_gate_evidence_grace_days: int = Field(
         default=30,
@@ -361,6 +375,12 @@ class Settings(BaseSettings):
     )
     session_hmac_keys: SecretStr | None = Field(
         default=None, alias="MINDATLAS_SESSION_HMAC_KEYS"
+    )
+    # Test-only Compose smoke provider hostname (exact DNS label).
+    # Honored only when APP_ENV=test inside validate_url_ssrf; never for IP literals.
+    mindatlas_test_provider_host: str = Field(
+        default="",
+        alias="MINDATLAS_TEST_PROVIDER_HOST",
     )
 
     # Uploads

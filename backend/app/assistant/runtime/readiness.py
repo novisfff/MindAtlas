@@ -256,30 +256,51 @@ class AssistantReadinessService:
             return self._blocked("profile_unpublished")
         if not self.model_probe.has_active_assistant_binding(self.db):
             return self._blocked("model_unbound")
+        # Observational path may evaluate the latest prepared revision when no
+        # active pointer exists so activation UX / smoke can wait on
+        # compatibleWorkerIds before the first activate. Admission still requires
+        # an active pointer (ready stays false via rollout_inactive).
+        inactive_without_active = False
         if candidate is None:
             if control is None or control.active_rollout_revision_id is None:
                 if ignore_rollout_inactive:
+                    # Activation candidate path always supplies ``candidate``.
                     return self._blocked("rollout_inactive")
-                return self._blocked("rollout_inactive")
-            try:
-                closure = self.closure_builder.build(
-                    rollout_revision_id=control.active_rollout_revision_id,
-                    lock=lock,
-                )
-            except RuntimeClosureDrift:
-                return self._blocked(
-                    "runtime_closure_drift",
-                    active_rollout_revision_id=control.active_rollout_revision_id,
-                )
-            except Exception:
-                return self._blocked(
-                    "runtime_closure_drift",
-                    active_rollout_revision_id=control.active_rollout_revision_id,
-                )
+                prepared = self._latest_prepared_revision()
+                if prepared is None:
+                    return self._blocked("rollout_inactive")
+                try:
+                    closure = self.closure_builder.build(
+                        rollout_revision_id=prepared.id,
+                        lock=lock,
+                    )
+                except RuntimeClosureDrift:
+                    return self._blocked("runtime_closure_drift")
+                except Exception:
+                    return self._blocked("rollout_inactive")
+                inactive_without_active = True
+            else:
+                try:
+                    closure = self.closure_builder.build(
+                        rollout_revision_id=control.active_rollout_revision_id,
+                        lock=lock,
+                    )
+                except RuntimeClosureDrift:
+                    return self._blocked(
+                        "runtime_closure_drift",
+                        active_rollout_revision_id=control.active_rollout_revision_id,
+                    )
+                except Exception:
+                    return self._blocked(
+                        "runtime_closure_drift",
+                        active_rollout_revision_id=control.active_rollout_revision_id,
+                    )
         else:
             closure = candidate
 
         reasons: set[str] = set()
+        if inactive_without_active:
+            reasons.add("rollout_inactive")
         if not ignore_new_runs_disabled:
             if not bool(getattr(self.settings, "assistant_new_runs_enabled", True)):
                 reasons.add("new_runs_disabled")
@@ -294,7 +315,12 @@ class AssistantReadinessService:
         return AssistantReadinessSnapshot(
             ready=not ordered,
             reason_codes=ordered,
-            active_rollout_revision_id=closure.rollout_revision_id,
+            # Never claim a prepared-only revision is active.
+            active_rollout_revision_id=(
+                None
+                if inactive_without_active
+                else closure.rollout_revision_id
+            ),
             profile_version_id=closure.profile_version_id,
             model_id=closure.model_id,
             compatible_worker_ids=tuple(row.worker_id for row in workers),
@@ -322,6 +348,11 @@ class AssistantReadinessService:
                 getattr(self.settings, "app_build_revision", "") or ""
             ),
         )
+
+    def _latest_prepared_revision(self) -> Any | None:
+        """Newest prepared revision, or None. Read-only; never creates control."""
+        revisions = self.repo.list_revisions(limit=1)
+        return revisions[0] if revisions else None
 
     def _compatible_workers(self, closure: AssistantRuntimeClosure) -> list[Any]:
         from app.assistant.durable.worker_registry import WorkerCompatibility
