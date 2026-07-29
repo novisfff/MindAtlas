@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next'
 
 import { usePublicAssistantReadinessQuery } from '../queries'
 import type { AssistantReadinessReason } from '../api/runtime'
-import { isIntegrityStopReason, reasonTranslationKey } from './reasonCopy'
+import { reasonTranslationKey } from './reasonCopy'
 
 function AssistantReadinessSkeleton() {
   const { t } = useTranslation()
@@ -60,7 +60,6 @@ function AssistantUnavailablePanel({
               className="rounded-xl border border-border/70 bg-muted/40 px-3 py-2 text-sm text-foreground"
             >
               {t(reasonTranslationKey(code), { defaultValue: code })}
-              {isIntegrityStopReason(code) ? null : null}
             </li>
           ))}
         </ul>

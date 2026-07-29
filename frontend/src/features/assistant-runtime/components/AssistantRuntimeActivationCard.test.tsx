@@ -6,6 +6,7 @@ import type { ReactNode } from 'react'
 import { AssistantRuntimeActivationCard } from './AssistantRuntimeActivationCard'
 import type { AssistantReadinessDiagnostics } from '../api/runtime'
 import * as runtimeApi from '../api/runtime'
+import { assistantRuntimeKeys } from '../queries'
 
 const PREPARED_ID = 'prepared-revision-aaaa'
 const activateSpy = vi.fn()
@@ -79,27 +80,35 @@ function compatiblePreparedRuntime() {
   }
 }
 
-function renderActivationCard(props: {
-  preparedRolloutRevisionId?: string | null
-  rolloutControlRevision?: number | null
-  diagnostics?: AssistantReadinessDiagnostics | null
-  onActivated?: () => void
-}) {
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-  })
+function renderActivationCard(
+  props: {
+    preparedRolloutRevisionId?: string | null
+    rolloutControlRevision?: number | null
+    diagnostics?: AssistantReadinessDiagnostics | null
+    onActivated?: () => void
+  },
+  options?: { queryClient?: QueryClient },
+) {
+  const queryClient =
+    options?.queryClient ??
+    new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    })
   const Wrapper = ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
   )
-  return render(
-    <AssistantRuntimeActivationCard
-      preparedRolloutRevisionId={props.preparedRolloutRevisionId ?? PREPARED_ID}
-      rolloutControlRevision={props.rolloutControlRevision ?? 0}
-      diagnostics={props.diagnostics ?? diagnostics()}
-      onActivated={props.onActivated}
-    />,
-    { wrapper: Wrapper },
-  )
+  return {
+    queryClient,
+    ...render(
+      <AssistantRuntimeActivationCard
+        preparedRolloutRevisionId={props.preparedRolloutRevisionId ?? PREPARED_ID}
+        rolloutControlRevision={props.rolloutControlRevision ?? 0}
+        diagnostics={props.diagnostics ?? diagnostics()}
+        onActivated={props.onActivated}
+      />,
+      { wrapper: Wrapper },
+    ),
+  }
 }
 
 describe('AssistantRuntimeActivationCard', () => {
@@ -204,5 +213,133 @@ describe('AssistantRuntimeActivationCard', () => {
     expect(onActivated).not.toHaveBeenCalled()
     expect(runtimeApi.listAssistantRollouts).toHaveBeenCalled()
     expect(runtimeApi.getAssistantReadinessDiagnostics).toHaveBeenCalled()
+  })
+
+  it('unfreezes diagnostics after 409 when parent props update with a compatible worker', async () => {
+    const { ApiError } = await import('@/lib/api/client')
+    activateSpy.mockRejectedValueOnce(
+      new ApiError({ message: 'control_conflict', status: 409, code: 40960 }),
+    )
+
+    // 409 refresh returns empty workers — a local-preferred snapshot would freeze later prop updates.
+    vi.mocked(runtimeApi.getAssistantReadinessDiagnostics).mockResolvedValue(
+      diagnostics({
+        ready: false,
+        reasonCodes: ['rollout_inactive', 'worker_unavailable'],
+        compatibleWorkerIds: [],
+      }),
+    )
+    vi.mocked(runtimeApi.listAssistantRollouts).mockResolvedValue({
+      control: {
+        // Deliberately different from prepared id — must not overwrite prepared target.
+        activeRolloutRevisionId: 'some-other-active',
+        controlRevision: 3,
+        newRunsEnabled: true,
+      },
+      revisions: [],
+    })
+
+    const noWorker = diagnostics({
+      ready: false,
+      reasonCodes: ['rollout_inactive', 'worker_unavailable'],
+      compatibleWorkerIds: [],
+    })
+    const withWorker = diagnostics({
+      ready: false,
+      reasonCodes: ['rollout_inactive'],
+      compatibleWorkerIds: ['worker-later'],
+    })
+
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    })
+    const Wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    )
+
+    const { rerender } = render(
+      <AssistantRuntimeActivationCard
+        preparedRolloutRevisionId={PREPARED_ID}
+        rolloutControlRevision={0}
+        diagnostics={withWorker}
+      />,
+      { wrapper: Wrapper },
+    )
+
+    expect(screen.getByRole('button', { name: /activate/i })).toBeEnabled()
+    fireEvent.click(screen.getByRole('button', { name: /activate/i }))
+
+    await waitFor(() => {
+      expect(screen.getByText(/control revision changed/i)).toBeVisible()
+    })
+
+    // Parent poll still has no worker. Local empty snapshot exists from 409 refresh.
+    rerender(
+      <AssistantRuntimeActivationCard
+        preparedRolloutRevisionId={PREPARED_ID}
+        rolloutControlRevision={0}
+        diagnostics={noWorker}
+      />,
+    )
+    expect(screen.getByText(/waiting for a compatible worker/i)).toBeVisible()
+    expect(screen.getByRole('button', { name: /activate/i })).toBeDisabled()
+
+    // Later poll brings a compatible worker — live props must win over frozen local snapshot.
+    rerender(
+      <AssistantRuntimeActivationCard
+        preparedRolloutRevisionId={PREPARED_ID}
+        rolloutControlRevision={0}
+        diagnostics={withWorker}
+      />,
+    )
+
+    expect(screen.queryByText(/waiting for a compatible worker/i)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /activate/i })).toBeEnabled()
+
+    // Retry still targets the prepared revision, not the active id from the 409 control refresh.
+    activateSpy.mockResolvedValueOnce({
+      activeRolloutRevisionId: PREPARED_ID,
+      revisionLabel: 'prepared',
+      revisionDigest: 'a'.repeat(64),
+      controlRevision: 4,
+      newRunsEnabled: true,
+    })
+    fireEvent.click(screen.getByRole('button', { name: /activate/i }))
+    await waitFor(() => expect(activateSpy).toHaveBeenCalledTimes(2))
+    expect(activateSpy).toHaveBeenLastCalledWith(
+      PREPARED_ID,
+      expect.objectContaining({
+        expectedControlRevision: 3,
+      }),
+    )
+  })
+
+  it('invalidates runtime query keys on successful activate', async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    })
+    const invalidateSpy = vi.spyOn(queryClient, 'invalidateQueries')
+
+    renderActivationCard(compatiblePreparedRuntime(), { queryClient })
+    fireEvent.click(screen.getByRole('button', { name: /activate/i }))
+
+    await waitFor(() => {
+      expect(activateSpy).toHaveBeenCalledTimes(1)
+    })
+
+    await waitFor(() => {
+      expect(invalidateSpy).toHaveBeenCalled()
+    })
+
+    const invalidatedKeys = invalidateSpy.mock.calls.map(
+      (call) => (call[0] as { queryKey?: unknown })?.queryKey,
+    )
+    expect(invalidatedKeys).toEqual(
+      expect.arrayContaining([
+        assistantRuntimeKeys.publicReadiness(),
+        assistantRuntimeKeys.diagnostics(),
+        assistantRuntimeKeys.rollouts(),
+      ]),
+    )
   })
 })

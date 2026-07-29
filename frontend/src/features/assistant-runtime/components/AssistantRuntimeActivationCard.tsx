@@ -1,5 +1,6 @@
-import { useMemo, useRef, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { useQueryClient } from '@tanstack/react-query'
 import { AlertCircle, Loader2, ShieldCheck } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
@@ -7,13 +8,13 @@ import { isApiError } from '@/lib/api/client'
 import { cn } from '@/lib/utils'
 
 import {
-  activateAssistantRollout,
   getAssistantReadinessDiagnostics,
   listAssistantRollouts,
   type AssistantReadinessDiagnostics,
   type AssistantReadinessReason,
   type RolloutControlSummary,
 } from '../api/runtime'
+import { assistantRuntimeKeys, useActivateAssistantRolloutMutation } from '../queries'
 import { reasonTranslationKey } from './reasonCopy'
 
 function newActivationRequestId(): string {
@@ -39,20 +40,22 @@ export function AssistantRuntimeActivationCard({
   className,
 }: AssistantRuntimeActivationCardProps) {
   const { t } = useTranslation()
+  const queryClient = useQueryClient()
+  const activateMutation = useActivateAssistantRolloutMutation()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // Local diagnostics only as fallback when parent props are null (e.g. post-409
+  // before the next poll). Prefer live props so polling is never frozen.
   const [localDiagnostics, setLocalDiagnostics] = useState<AssistantReadinessDiagnostics | null>(
     null,
   )
+  // Local control revision from 409/list refresh keeps CAS expected revision current.
   const [localControlRevision, setLocalControlRevision] = useState<number | null>(null)
-  const [localPreparedId, setLocalPreparedId] = useState<string | null>(null)
-  // requestId is created per click and reused only for automatic network retry of that click.
-  const activeRequestIdRef = useRef<string | null>(null)
 
-  const effectiveDiagnostics = localDiagnostics ?? diagnostics
-  const effectiveControlRevision =
-    localControlRevision ?? rolloutControlRevision ?? 0
-  const effectivePreparedId = localPreparedId ?? preparedRolloutRevisionId
+  const effectiveDiagnostics = diagnostics ?? localDiagnostics
+  const effectiveControlRevision = localControlRevision ?? rolloutControlRevision ?? 0
+  // Always prefer the prepared id from props — never replace it with the active revision.
+  const effectivePreparedId = preparedRolloutRevisionId
 
   const compatibleWorkers = effectiveDiagnostics?.compatibleWorkerIds ?? []
   const hasCompatibleWorker = compatibleWorkers.length > 0
@@ -79,6 +82,12 @@ export function AssistantRuntimeActivationCard({
     hasCompatibleWorker,
   ])
 
+  function invalidateRuntimeQueries() {
+    void queryClient.invalidateQueries({ queryKey: assistantRuntimeKeys.publicReadiness() })
+    void queryClient.invalidateQueries({ queryKey: assistantRuntimeKeys.diagnostics() })
+    void queryClient.invalidateQueries({ queryKey: assistantRuntimeKeys.rollouts() })
+  }
+
   async function refreshControlAndDiagnostics() {
     const [nextDiagnostics, rollouts] = await Promise.all([
       getAssistantReadinessDiagnostics(),
@@ -87,11 +96,10 @@ export function AssistantRuntimeActivationCard({
     setLocalDiagnostics(nextDiagnostics)
     const control: RolloutControlSummary | undefined = rollouts.control
     if (control) {
+      // Only refresh control revision for CAS; keep prepared id from props.
       setLocalControlRevision(control.controlRevision)
-      if (control.activeRolloutRevisionId) {
-        setLocalPreparedId(control.activeRolloutRevisionId)
-      }
     }
+    invalidateRuntimeQueries()
     return { nextDiagnostics, control }
   }
 
@@ -100,14 +108,15 @@ export function AssistantRuntimeActivationCard({
     setBusy(true)
     setError(null)
     const requestId = newActivationRequestId()
-    activeRequestIdRef.current = requestId
     try {
-      await activateAssistantRollout(effectivePreparedId, {
-        expectedControlRevision: effectiveControlRevision,
-        requestId,
-        reason: 'activate prepared Main Agent runtime',
+      await activateMutation.mutateAsync({
+        revisionId: effectivePreparedId,
+        body: {
+          expectedControlRevision: effectiveControlRevision,
+          requestId,
+          reason: 'activate prepared Main Agent runtime',
+        },
       })
-      activeRequestIdRef.current = null
       onActivated?.()
     } catch (err) {
       const status = isApiError(err) ? err.status : (err as { status?: number } | null)?.status
@@ -122,7 +131,6 @@ export function AssistantRuntimeActivationCard({
         setError(t('assistantRuntime.activation.error'))
       }
     } finally {
-      activeRequestIdRef.current = null
       setBusy(false)
     }
   }
