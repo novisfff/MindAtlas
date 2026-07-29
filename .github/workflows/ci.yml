@@ -322,6 +322,9 @@ jobs:
       - name: PostgreSQL migration preservation and guard tests
         env:
           MINDATLAS_TEST_POSTGRES_DESTRUCTIVE: "1"
+          # Plan 1 tip refuses destructive downgrade outside disposable non-prod
+          # DBs — same ACK used by the upgrade/downgrade/upgrade gate above.
+          MINDATLAS_TEST_DESTRUCTIVE_DOWNGRADE: "1"
           # Do NOT set PLAN09_EVAL / PLAN08 ledger ACKs here — guarded-downgrade
           # tests must observe blocked paths. Suites set ACKs only around intentional
           # cleanup/downgrade helpers.
@@ -329,11 +332,14 @@ jobs:
           # These suites characterize Plans 01-09. Return the disposable DB to
           # their latest historical revision without leaking Plan 10 ACKs into
           # tests that must exercise their own guarded downgrade paths.
+          # Traversing 9f3c1a7e2b40 → 027869a00a47 needs Plan 10 + Plan 1 tip ACKs
+          # on this disposable CI DB only.
           MINDATLAS_PLAN10_MIGRATION_DOWNGRADE_ACK=1 \
           MINDATLAS_PLAN10_B2_DOWNGRADE_ACK=1 \
           MINDATLAS_PLAN10_B2_SKILL_DROP_DOWNGRADE_ACK=1 \
           MINDATLAS_PLAN10_B2_LEGACY_ID_DROP_DOWNGRADE_ACK=1 \
           MINDATLAS_PLAN10_B2_LEGACY_DIGEST_DROP_DOWNGRADE_ACK=1 \
+          MINDATLAS_TEST_DESTRUCTIVE_DOWNGRADE=1 \
             alembic downgrade 027869a00a47
           python -m pytest tests/test_agent_skill_postgres_migration.py tests/test_provider_model_probe_postgres.py tests/test_main_agent_postgres_migration.py tests/test_capability_call_migration_postgres.py tests/test_agent_skill_admin_postgres_migration.py tests/test_skill_eval_repository_postgres.py tests/test_plan09_lifecycle_postgres.py -q
 

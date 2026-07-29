@@ -38,6 +38,12 @@ _SESSION_KEY_ID = "k1"
 _SESSION_KEY_BYTES = bytes([31]) * 32
 _PRINCIPAL_NS = UUID("00000000-0000-4000-8000-00000000a001")
 
+# Identity of the real ``@lru_cache`` get_settings. FastAPI ``Depends(get_settings)``
+# freezes this callable on each route at import time; restore MUST reinstall the
+# same object (not a freshly wrapped lru_cache) or dependency_overrides keyed by
+# identity miss and login sees empty canonical_origin from a stale cache entry.
+_ORIGINAL_GET_SETTINGS: Any | None = None
+
 
 def encoded_session_hmac_keys(
     active: str = _SESSION_KEY_ID, material: bytes = _SESSION_KEY_BYTES
@@ -58,35 +64,136 @@ def operator_test_settings(**overrides: Any) -> Settings:
     return Settings(**kwargs)
 
 
+def _iter_app_get_settings_holders() -> list[Any]:
+    """Loaded ``app.*`` modules that currently bind a ``get_settings`` callable.
+
+    Many production modules do ``from app.config import get_settings`` at import
+    time, which freezes a function object on the consumer module. Pin/restore
+    must rebind every such holder — not only ``app.config`` and the four
+    operator_auth modules — or later suites keep reading a stale Settings
+    snapshot (build_revision_drift, empty MinIO creds, LightRAG env, …).
+    """
+    import sys
+
+    holders: list[Any] = []
+    for name, mod in list(sys.modules.items()):
+        if mod is None:
+            continue
+        if not (name == "app.config" or name.startswith("app.")):
+            continue
+        try:
+            gs = getattr(mod, "get_settings", None)
+        except Exception:  # noqa: BLE001 — defensive against broken modules
+            continue
+        if callable(gs):
+            holders.append(mod)
+    return holders
+
+
+def _rebind_get_settings_holders(
+    target: Any, *, monkeypatch: Any | None = None
+) -> None:
+    """Point every loaded app.* get_settings holder at ``target``."""
+    for mod in _iter_app_get_settings_holders():
+        if monkeypatch is not None:
+            monkeypatch.setattr(mod, "get_settings", target, raising=False)
+        else:
+            try:
+                setattr(mod, "get_settings", target)
+            except Exception:  # noqa: BLE001 — skip extension/frozen modules
+                continue
+
+
+def _clear_settings_derived_caches() -> None:
+    """Drop runtime snapshots that may have been built under a pinned Settings."""
+    try:
+        from app.system_settings.runtime_config_service import clear_runtime_config_caches
+
+        clear_runtime_config_caches()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from app.common.storage import get_minio_client
+
+        get_minio_client.cache_clear()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from app.lightrag.manager import reset_lightrag_singletons_for_tests
+
+        reset_lightrag_singletons_for_tests()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from app.lightrag.service import reset_lightrag_query_state_for_tests
+
+        reset_lightrag_query_state_for_tests()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _capture_original_get_settings(candidate: Any) -> Any:
+    """Remember the process-wide real lru_cache get_settings (stable identity)."""
+    global _ORIGINAL_GET_SETTINGS
+    if _ORIGINAL_GET_SETTINGS is not None:
+        return _ORIGINAL_GET_SETTINGS
+    if callable(candidate) and hasattr(candidate, "cache_clear"):
+        # Reject our own pin wrappers (they borrow cache_clear from the real fn).
+        if getattr(candidate, "_mindatlas_settings_pin", False):
+            return _ORIGINAL_GET_SETTINGS
+        _ORIGINAL_GET_SETTINGS = candidate
+        return candidate
+    return _ORIGINAL_GET_SETTINGS
+
+
+def _rebuild_original_get_settings() -> Any:
+    """Last-resort rebuild when the original callable was lost to a bare lambda."""
+    global _ORIGINAL_GET_SETTINGS
+    from functools import lru_cache
+
+    from app.config import Settings as _Settings
+
+    @lru_cache(maxsize=1)
+    def _get_settings() -> _Settings:
+        return _Settings()
+
+    _ORIGINAL_GET_SETTINGS = _get_settings
+    return _get_settings
+
+
+def _resolve_real_get_settings() -> Any:
+    """Return the stable real get_settings, rebuilding only if identity was lost."""
+    import app.config as config_mod
+
+    captured = _capture_original_get_settings(config_mod.get_settings)
+    if captured is not None:
+        return captured
+    current = config_mod.get_settings
+    if callable(current) and hasattr(current, "cache_clear"):
+        if not getattr(current, "_mindatlas_settings_pin", False):
+            return _capture_original_get_settings(current) or current
+    return _rebuild_original_get_settings()
+
+
 def pin_operator_settings(settings: Settings, monkeypatch: Any | None = None) -> Settings:
     """Point get_settings at ``settings`` without destroying the lru_cache wrapper.
 
     Replacing ``app.config.get_settings`` with a bare lambda permanently strips
-    ``cache_clear`` from later imports of the symbol. Wrap instead, clear the
-    real cache, and rebind only the dependency modules that close over the name.
+    ``cache_clear`` from later imports of the symbol and breaks FastAPI
+    ``Depends`` identity. Wrap instead, clear the real cache, and rebind every
+    loaded ``app.*`` module that closed over the name (import-time
+    ``from app.config import get_settings`` freezes the ref).
     """
     import app.config as config_mod
-    import app.operator_auth.dependencies as dep_mod
-    import app.operator_auth.router as router_mod
-    import app.operator_auth.route_policy as policy_mod
 
-    real = config_mod.get_settings
-    # Prefer the real cached function; if a prior bare lambda already replaced it,
-    # re-import the pristine lru_cache wrapper from the defining module object.
-    if not hasattr(real, "cache_clear"):
-        # Restore from the original decorated function if still available on the
-        # module's __dict__ under a private alias; otherwise re-apply lru_cache.
-        from functools import lru_cache
-
-        from app.config import Settings as _Settings
-
-        @lru_cache(maxsize=1)
-        def _restored_get_settings() -> _Settings:
-            return _Settings()
-
-        config_mod.get_settings = _restored_get_settings  # type: ignore[assignment]
-        real = _restored_get_settings
-
+    real = _resolve_real_get_settings()
+    # Ensure config module holds the real callable before we pin over it.
+    if config_mod.get_settings is not real and not getattr(
+        config_mod.get_settings, "_mindatlas_settings_pin", False
+    ):
+        # A foreign bare lambda may be installed; put real back first so
+        # Depends identity stays coherent after restore.
+        config_mod.get_settings = real  # type: ignore[assignment]
     real.cache_clear()
 
     def _pinned() -> Settings:
@@ -94,38 +201,34 @@ def pin_operator_settings(settings: Settings, monkeypatch: Any | None = None) ->
 
     # Keep cache_clear available on the module symbol so later suites can reset.
     _pinned.cache_clear = real.cache_clear  # type: ignore[attr-defined]
+    _pinned._mindatlas_settings_pin = True  # type: ignore[attr-defined]
 
     if monkeypatch is not None:
-        monkeypatch.setattr("app.config.get_settings", _pinned)
-        monkeypatch.setattr("app.operator_auth.dependencies.get_settings", _pinned)
-        monkeypatch.setattr("app.operator_auth.router.get_settings", _pinned)
-        monkeypatch.setattr("app.operator_auth.route_policy.get_settings", _pinned)
+        # Rebind every current holder under monkeypatch so fixture teardown undoes
+        # the full surface (not just the four operator_auth modules).
+        _rebind_get_settings_holders(_pinned, monkeypatch=monkeypatch)
     else:
-        config_mod.get_settings = _pinned  # type: ignore[assignment]
-        dep_mod.get_settings = _pinned  # type: ignore[assignment]
-        router_mod.get_settings = _pinned  # type: ignore[assignment]
-        policy_mod.get_settings = _pinned  # type: ignore[assignment]
+        _rebind_get_settings_holders(_pinned, monkeypatch=None)
+    # Drop any runtime snapshots taken before the pin so MinIO/LightRAG re-read.
+    _clear_settings_derived_caches()
     return settings
 
 
 def restore_operator_settings() -> None:
-    """Restore the real lru_cached get_settings after unittest-style pinning."""
-    from functools import lru_cache
+    """Restore the real lru_cached get_settings after unittest-style pinning.
 
+    Reinstalls the **same** original callable FastAPI routes closed over at
+    import time (identity-stable), rebinds every loaded ``app.*`` holder, and
+    clears settings-derived runtime caches so subsequent suites cannot keep a
+    pinned build revision, empty MinIO credentials, or LightRAG singleton.
+    """
     import app.config as config_mod
-    import app.operator_auth.dependencies as dep_mod
-    import app.operator_auth.router as router_mod
-    import app.operator_auth.route_policy as policy_mod
-    from app.config import Settings as _Settings
 
-    @lru_cache(maxsize=1)
-    def _get_settings() -> _Settings:
-        return _Settings()
-
-    config_mod.get_settings = _get_settings  # type: ignore[assignment]
-    dep_mod.get_settings = _get_settings  # type: ignore[assignment]
-    router_mod.get_settings = _get_settings  # type: ignore[assignment]
-    policy_mod.get_settings = _get_settings  # type: ignore[assignment]
+    real = _resolve_real_get_settings()
+    real.cache_clear()
+    config_mod.get_settings = real  # type: ignore[assignment]
+    _rebind_get_settings_holders(real, monkeypatch=None)
+    _clear_settings_derived_caches()
 
 
 def make_service_principal(

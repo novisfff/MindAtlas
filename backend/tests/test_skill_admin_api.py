@@ -27,6 +27,7 @@ from tests.operator_session_helpers import (  # noqa: E402
     build_authenticated_skill_client,
     csrf_headers,
     origin_headers,
+    restore_operator_settings,
 )
 
 
@@ -104,6 +105,7 @@ class SkillAdminOpenApiMountTests(unittest.TestCase):
                 self.assertNotIn("delete", {m.lower() for m in methods.keys()})
             self.assertIn("/api/assistant-config/skill-packages", paths)
         finally:
+            restore_operator_settings()
             session.close()
 
     def test_admin_mutation_requires_session_and_csrf(self) -> None:
@@ -181,6 +183,7 @@ class SkillAdminOpenApiMountTests(unittest.TestCase):
             self.assertIsNotNone(r4.json()["data"]["archivedAt"])
             self.assertFalse(r4.json()["data"]["catalogEnabled"])
         finally:
+            restore_operator_settings()
             session.close()
 
 

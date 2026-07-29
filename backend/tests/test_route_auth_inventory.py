@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterator
+from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
 
@@ -15,6 +16,7 @@ import pytest
 from fastapi.routing import APIRoute
 from sqlalchemy import event, select, text
 from sqlalchemy.orm import Session, sessionmaker
+from starlette.routing import Mount
 
 from tests._bootstrap import bootstrap_backend_imports, reset_caches
 
@@ -38,25 +40,133 @@ _FRAMEWORK_PATH_PREFIXES = (
 )
 
 
-def application_routes(app) -> list[APIRoute]:
-    """Return non-framework HTTP routes registered on ``app``."""
-    routes: list[APIRoute] = []
-    for route in app.routes:
-        if not isinstance(route, APIRoute):
-            continue
-        path = route.path or ""
-        if path.startswith(_FRAMEWORK_PATH_PREFIXES) or path in {
-            "/docs",
-            "/redoc",
-            "/openapi.json",
-            "/docs/oauth2-redirect",
-        }:
-            continue
-        routes.append(route)
-    return routes
+@dataclass(frozen=True)
+class InventoryRoute:
+    """Version-stable route view for policy inventory.
+
+    FastAPI <0.140 flattens included routers into top-level ``APIRoute`` objects.
+    FastAPI ≥0.140 keeps ``_IncludedRouter`` branches and exposes effective routes
+    via ``effective_candidates()``. Parent-router policy dependencies only appear
+    on the effective graph, so inventory must read those fields rather than the
+    raw child ``APIRoute`` alone.
+    """
+
+    path: str
+    methods: set[str]
+    name: str
+    dependencies: list[Any]
+    dependant: Any
 
 
-def route_identity(route: APIRoute) -> str:
+def _is_framework_path(path: str) -> bool:
+    if path.startswith(_FRAMEWORK_PATH_PREFIXES) or path in {
+        "/docs",
+        "/redoc",
+        "/openapi.json",
+        "/docs/oauth2-redirect",
+    }:
+        return True
+    return False
+
+
+def _inventory_from_api_route(route: APIRoute) -> InventoryRoute | None:
+    path = route.path or ""
+    if _is_framework_path(path):
+        return None
+    return InventoryRoute(
+        path=path,
+        methods=set(route.methods or set()),
+        name=route.name or "",
+        dependencies=list(route.dependencies or []),
+        dependant=route.dependant,
+    )
+
+
+def _inventory_from_effective(candidate: Any) -> InventoryRoute | None:
+    """Build an inventory row from FastAPI ≥0.140 ``_EffectiveRouteContext``."""
+    path = str(getattr(candidate, "path", None) or "")
+    if not path or _is_framework_path(path):
+        return None
+    methods = getattr(candidate, "methods", None) or set()
+    name = str(getattr(candidate, "name", None) or "")
+    dependencies = list(getattr(candidate, "dependencies", None) or [])
+    dependant = getattr(candidate, "dependant", None)
+    # Fall back to the original APIRoute when effective fields are sparse.
+    original = getattr(candidate, "original_route", None)
+    if isinstance(original, APIRoute):
+        if not dependencies:
+            dependencies = list(original.dependencies or [])
+        if dependant is None:
+            dependant = original.dependant
+        if not name:
+            name = original.name or ""
+        if not methods:
+            methods = set(original.methods or set())
+    return InventoryRoute(
+        path=path,
+        methods=set(methods),
+        name=name,
+        dependencies=dependencies,
+        dependant=dependant,
+    )
+
+
+def _expand_router_nodes(nodes: list[Any]) -> list[InventoryRoute]:
+    """Walk top-level app routes across FastAPI flat and nested layouts."""
+    out: list[InventoryRoute] = []
+    stack: list[Any] = list(nodes)
+    seen: set[int] = set()
+    while stack:
+        node = stack.pop()
+        if node is None:
+            continue
+        ident = id(node)
+        if ident in seen:
+            continue
+        seen.add(ident)
+
+        if isinstance(node, APIRoute):
+            item = _inventory_from_api_route(node)
+            if item is not None:
+                out.append(item)
+            continue
+
+        if isinstance(node, Mount):
+            # Legacy nested mounts (if any) — descend without path rewrite here;
+            # production mounts application routes via include_router, not Mount.
+            mount_routes = getattr(node, "routes", None) or []
+            stack.extend(list(mount_routes))
+            continue
+
+        # FastAPI ≥0.140: _IncludedRouter exposes effective_candidates().
+        effective = getattr(node, "effective_candidates", None)
+        if callable(effective):
+            for candidate in effective() or []:
+                # Nested included routers appear as further _IncludedRouter nodes.
+                nested_effective = getattr(candidate, "effective_candidates", None)
+                if callable(nested_effective):
+                    stack.append(candidate)
+                    continue
+                item = _inventory_from_effective(candidate)
+                if item is not None:
+                    out.append(item)
+            continue
+
+        # Unknown node types (plain Starlette Route, WebSocketRoute, …) skipped.
+    return out
+
+
+def application_routes(app) -> list[InventoryRoute]:
+    """Return non-framework HTTP routes registered on ``app``.
+
+    Compatible with both pre-0.140 flattened ``APIRoute`` lists and FastAPI
+    0.140+ ``_IncludedRouter`` effective-candidate graphs. Parent policy
+    dependencies are visible on the returned rows in both cases.
+    """
+    return _expand_router_nodes(list(app.routes))
+
+
+def route_identity(route: InventoryRoute) -> str:
     methods = ",".join(sorted(m for m in (route.methods or set()) if m != "HEAD"))
     return f"{methods} {route.path} name={route.name}"
 
@@ -77,11 +187,12 @@ def _walk_dependant(dependant: Any) -> Iterator[Any]:
             stack.append(child)
 
 
-def policy_markers(route: APIRoute) -> set[str]:
+def policy_markers(route: InventoryRoute) -> set[str]:
     """Collect ``__route_policy__`` markers from the route dependency graph."""
     markers: set[str] = set()
     # Router-level dependencies are attached to APIRoute.dependencies and also
-    # merged into route.dependant — walk both for resilience.
+    # merged into route.dependant — walk both for resilience. On FastAPI ≥0.140
+    # these fields come from the effective candidate (parent markers included).
     for dep in route.dependencies or []:
         call = getattr(dep, "dependency", None)
         marker = getattr(call, "__route_policy__", None) if call is not None else None
@@ -139,7 +250,9 @@ def app():
 
 
 def test_every_application_route_has_exact_policy(app) -> None:
-    for route in application_routes(app):
+    routes = application_routes(app)
+    assert routes, "production app must expose application routes for inventory"
+    for route in routes:
         markers = policy_markers(route)
         assert len(markers) == 1, route_identity(route)
         if route.methods & UNSAFE:
@@ -294,11 +407,12 @@ def authority_client(tmp_path, monkeypatch):
         MINDATLAS_SESSION_HMAC_ACTIVE_KEY_ID=key_id,
         MINDATLAS_SESSION_HMAC_KEYS=encoded,
     )
-    get_settings.cache_clear()
-    monkeypatch.setattr("app.config.get_settings", lambda: settings)
-    monkeypatch.setattr("app.operator_auth.dependencies.get_settings", lambda: settings)
-    monkeypatch.setattr("app.operator_auth.router.get_settings", lambda: settings)
-    monkeypatch.setattr("app.operator_auth.route_policy.get_settings", lambda: settings)
+    # Rebind every import-frozen app.* holder under monkeypatch (identity-stable
+    # restore on teardown). Bare four-module setattr left Depends(get_settings)
+    # and skill_resolution holders on stale callables after earlier pins.
+    from tests.operator_session_helpers import pin_operator_settings
+
+    pin_operator_settings(settings, monkeypatch=monkeypatch)
 
     tmp = tempfile.NamedTemporaryFile(
         prefix="mindatlas-route-auth-", suffix=".sqlite", delete=False
