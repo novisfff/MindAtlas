@@ -92,10 +92,15 @@ class LegacyCleanupArchitectureTests(unittest.TestCase):
         }
         hit = forbidden.intersection(imports)
         self.assertFalse(hit, f"assistant.service top-level imports forbidden legacy symbols: {hit}")
-        # chat_stream must fail closed rather than daemon-spawn legacy Supervisor.
+        # chat_stream must fail closed via atomic Main-Agent admission only.
         chat_src = inspect.getsource(service_mod.AssistantService.chat_stream)
-        self.assertIn("Main Agent runtime is required", chat_src)
+        self.assertIn("AssistantChatAdmissionService", chat_src)
+        self.assertIn("Assistant is not ready to accept a new Run.", chat_src)
+        self.assertNotIn("admit_and_select_runtime", chat_src)
         self.assertNotIn("_start_background_run", chat_src)
+        self.assertNotIn("IntentRouter", chat_src)
+        self.assertNotIn("SupervisorGraph", chat_src)
+        self.assertNotIn("build_supervisor_graph", chat_src)
 
     def test_admission_module_does_not_import_supervisor_or_intent_router(self) -> None:
         from app.assistant.durable import admission as admission_mod

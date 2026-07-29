@@ -10,12 +10,9 @@ from app.assistant.runtime.activation import (
     RuntimeActivationRejected,
     RuntimeGateEvidenceMissing,
 )
-from app.assistant.runtime.admission import (
-    ADMISSION_HTTP_REASON,
-    AssistantAdmissionError,
-    AssistantChatAdmissionService,
-    ConcurrentChatAdmission,
-)
+# Admission is not re-exported here: it depends on run_service, and run_service
+# imports runtime.contracts (which loads this package). Callers import from
+# app.assistant.runtime.admission directly.
 from app.assistant.runtime.closure import (
     AssistantRuntimeClosureBuilder,
     BoundAssistantModelIdentity,
@@ -73,13 +70,10 @@ from app.assistant.runtime.seed import (
 )
 
 __all__ = (
-    "ADMISSION_HTTP_REASON",
     "ASSISTANT_ROLLOUT_NAMESPACE",
     "RUNTIME_READINESS_REASON_CODES",
     "ActivatedRolloutResult",
     "ActivateRolloutRequest",
-    "AssistantAdmissionError",
-    "AssistantChatAdmissionService",
     "AssistantMainAgentRolloutControl",
     "AssistantMainAgentRolloutEvent",
     "AssistantMainAgentRolloutRevision",
@@ -92,7 +86,6 @@ __all__ = (
     "AssistantRuntimeSubject",
     "AssistantSystemSeedManifest",
     "BoundAssistantModelIdentity",
-    "ConcurrentChatAdmission",
     "ModelIdentityUnavailable",
     "NewChatAdmission",
     "NewRolloutEvent",

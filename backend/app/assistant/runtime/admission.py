@@ -9,7 +9,7 @@ residue. Post-insert failures stay on that exact Run — never select legacy.
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from sqlalchemy import select
@@ -24,7 +24,6 @@ from app.assistant.durable.worker_registry import (
     WorkerRegistry,
 )
 from app.assistant.models import Conversation, Message
-from app.assistant.run_service import AssistantChatRunService
 from app.assistant.runtime.closure import (
     AssistantRuntimeClosureBuilder,
     RuntimeClosureDrift,
@@ -39,6 +38,9 @@ from app.assistant.skills.models import AssistantMainAgentProfileVersion
 from app.assistant.skills.schemas import MainAgentProfileSnapshotV2
 from app.common.time import utcnow
 from app.config import Settings, get_settings
+
+if TYPE_CHECKING:
+    from app.assistant.run_service import AssistantChatRunService
 
 
 class AssistantAdmissionError(RuntimeError):
@@ -97,7 +99,13 @@ class AssistantChatAdmissionService:
             settings=self.settings,
             closure_builder=self.closure_builder,
         )
-        self.run_service = run_service or AssistantChatRunService(db)
+        if run_service is None:
+            # Lazy import breaks run_service ↔ runtime.admission package cycle.
+            from app.assistant.run_service import AssistantChatRunService as _RunService
+
+            self.run_service = _RunService(db)
+        else:
+            self.run_service = run_service
         self.worker_registry = worker_registry or WorkerRegistry(db)
 
     def admit_and_create(
