@@ -23,6 +23,7 @@ from scripts.smoke_main_agent_bootstrap import (  # noqa: E402
     ALLOWED_EVIDENCE_KEYS,
     SENSITIVE_FRAGMENTS,
     ComposeRunner,
+    collect_database_evidence,
     EvidenceSchemaError,
     SmokeFailure,
     extract_status_fields,
@@ -360,6 +361,90 @@ def test_compose_down_command_includes_volumes() -> None:
     assert "down" in args
     assert "--volumes" in args
     assert "--remove-orphans" in args
+
+
+def test_compose_runner_observes_safe_database_scalars() -> None:
+    """The smoke evidence facts come from the Compose PostgreSQL service."""
+    runner = ComposeRunner(
+        compose_file=Path("/tmp/compose.yml"),
+        overlay_file=Path("/tmp/overlay.yml"),
+        project_name="demo",
+        env={},
+    )
+    with patch("scripts.smoke_main_agent_bootstrap.subprocess.run") as mock_run:
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout="b6e2d4f8a901\n", stderr=""),
+            MagicMock(returncode=0, stdout="1\n", stderr=""),
+        ]
+        assert runner.observed_alembic_head() == "b6e2d4f8a901"
+        assert (
+            runner.observed_conversation_run_count(
+                "11111111-1111-1111-1111-111111111111"
+            )
+            == 1
+        )
+
+    commands = [" ".join(call.args[0]) for call in mock_run.call_args_list]
+    assert all(" exec -T postgres " in f" {command} " for command in commands)
+    assert "SELECT version_num FROM alembic_version" in commands[0]
+    assert "SELECT COUNT(*) FROM assistant_chat_run" in commands[1]
+    assert "11111111-1111-1111-1111-111111111111" in commands[1]
+
+
+def test_compose_runner_rejects_invalid_database_scalar() -> None:
+    runner = ComposeRunner(
+        compose_file=Path("/tmp/compose.yml"),
+        overlay_file=Path("/tmp/overlay.yml"),
+        project_name="demo",
+        env={},
+    )
+    with patch("scripts.smoke_main_agent_bootstrap.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="b6e2d4f8a901\nunexpected-second-row\n",
+            stderr="",
+        )
+        with pytest.raises(SmokeFailure, match="invalid scalar"):
+            runner.observed_alembic_head()
+
+
+def test_collect_database_evidence_requires_expected_observations() -> None:
+    compose = MagicMock()
+    compose.observed_alembic_head.return_value = "b6e2d4f8a901"
+    compose.observed_conversation_run_count.return_value = 1
+
+    assert collect_database_evidence(
+        compose,
+        conversation_id="11111111-1111-1111-1111-111111111111",
+    ) == ("b6e2d4f8a901", 1)
+    compose.observed_alembic_head.assert_called_once_with()
+    compose.observed_conversation_run_count.assert_called_once_with(
+        "11111111-1111-1111-1111-111111111111"
+    )
+
+
+@pytest.mark.parametrize(
+    ("alembic_head", "chat_run_count", "match"),
+    [
+        ("wrong-head", 1, "alembic head"),
+        ("b6e2d4f8a901", 0, "chat run count"),
+        ("b6e2d4f8a901", 2, "chat run count"),
+    ],
+)
+def test_collect_database_evidence_fails_closed_on_invalid_values(
+    alembic_head: str,
+    chat_run_count: int,
+    match: str,
+) -> None:
+    compose = MagicMock()
+    compose.observed_alembic_head.return_value = alembic_head
+    compose.observed_conversation_run_count.return_value = chat_run_count
+
+    with pytest.raises(SmokeFailure, match=match):
+        collect_database_evidence(
+            compose,
+            conversation_id="11111111-1111-1111-1111-111111111111",
+        )
 
 
 def test_terminal_after_active_cleared_never_soft_assumes_completed() -> None:

@@ -11,23 +11,20 @@ import {
   getAssistantReadinessDiagnostics,
   listAssistantRollouts,
   type AssistantReadinessDiagnostics,
+  type AssistantRolloutActivationReadiness,
   type AssistantReadinessReason,
   type RolloutControlSummary,
 } from '../api/runtime'
 import { assistantRuntimeKeys, useActivateAssistantRolloutMutation } from '../queries'
+import { createRuntimeRequestId } from '../requestId'
 import { reasonTranslationKey } from './reasonCopy'
-
-function newActivationRequestId(): string {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID()
-  }
-  return `activate-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
-}
 
 export interface AssistantRuntimeActivationCardProps {
   preparedRolloutRevisionId: string | null
   rolloutControlRevision: number | null
   diagnostics: AssistantReadinessDiagnostics | null
+  /** Candidate diagnostics are authoritative for target-worker compatibility. */
+  candidateReadiness?: AssistantRolloutActivationReadiness | null
   onActivated?: () => void
   className?: string
 }
@@ -36,6 +33,7 @@ export function AssistantRuntimeActivationCard({
   preparedRolloutRevisionId,
   rolloutControlRevision,
   diagnostics,
+  candidateReadiness,
   onActivated,
   className,
 }: AssistantRuntimeActivationCardProps) {
@@ -53,11 +51,15 @@ export function AssistantRuntimeActivationCard({
   const [localControlRevision, setLocalControlRevision] = useState<number | null>(null)
 
   const effectiveDiagnostics = diagnostics ?? localDiagnostics
+  // If a caller supplies candidate diagnostics (including an intentional null
+  // during its fetch), never substitute global active-runtime diagnostics.
+  const effectiveCandidateReadiness =
+    candidateReadiness === undefined ? effectiveDiagnostics : candidateReadiness
   const effectiveControlRevision = localControlRevision ?? rolloutControlRevision ?? 0
   // Always prefer the prepared id from props — never replace it with the active revision.
   const effectivePreparedId = preparedRolloutRevisionId
 
-  const compatibleWorkers = effectiveDiagnostics?.compatibleWorkerIds ?? []
+  const compatibleWorkers = effectiveCandidateReadiness?.compatibleWorkerIds ?? []
   const hasCompatibleWorker = compatibleWorkers.length > 0
   const alreadyActive =
     effectiveDiagnostics?.ready === true &&
@@ -65,7 +67,7 @@ export function AssistantRuntimeActivationCard({
     (effectivePreparedId == null ||
       effectiveDiagnostics.activeRolloutRevisionId === effectivePreparedId)
 
-  const reasonCodes = (effectiveDiagnostics?.reasonCodes ?? []) as AssistantReadinessReason[]
+  const reasonCodes = (effectiveCandidateReadiness?.reasonCodes ?? []) as AssistantReadinessReason[]
 
   const canActivate = useMemo(() => {
     if (busy) return false
@@ -85,6 +87,7 @@ export function AssistantRuntimeActivationCard({
   function invalidateRuntimeQueries() {
     void queryClient.invalidateQueries({ queryKey: assistantRuntimeKeys.publicReadiness() })
     void queryClient.invalidateQueries({ queryKey: assistantRuntimeKeys.diagnostics() })
+    void queryClient.invalidateQueries({ queryKey: assistantRuntimeKeys.activationReadiness() })
     void queryClient.invalidateQueries({ queryKey: assistantRuntimeKeys.rollouts() })
   }
 
@@ -107,7 +110,7 @@ export function AssistantRuntimeActivationCard({
     if (!canActivate || !effectivePreparedId) return
     setBusy(true)
     setError(null)
-    const requestId = newActivationRequestId()
+    const requestId = createRuntimeRequestId()
     try {
       await activateMutation.mutateAsync({
         revisionId: effectivePreparedId,

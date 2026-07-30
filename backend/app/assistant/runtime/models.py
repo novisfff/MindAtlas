@@ -112,6 +112,119 @@ class AssistantMainAgentRolloutRevision(Base):
     )
 
 
+class AssistantRuntimeBootstrapGateUse(Base):
+    """Immutable authorization provenance for the trusted system bootstrap.
+
+    This is intentionally separate from the evaluation publish-gate tables:
+    system bootstrap is build-owned and does not claim to be an evaluated user
+    publication.  It binds the trusted seed's exact Profile, Skill, Model, and
+    runtime closure inputs in the same initialization transaction as the
+    prepared rollout.
+    """
+
+    __tablename__ = "assistant_runtime_bootstrap_gate_use"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    action = Column(String(32), nullable=False, default="system_bootstrap")
+    rollout_revision_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("assistant_main_agent_rollout_revision.id"),
+        nullable=False,
+        unique=True,
+    )
+    rollout_revision_digest = Column(String(64), nullable=False)
+    profile_version_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("assistant_main_agent_profile_version.id"),
+        nullable=False,
+    )
+    profile_content_digest = Column(String(64), nullable=False)
+    skill_package_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("assistant_skill_package.id"),
+        nullable=False,
+    )
+    skill_version_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("assistant_skill_version.id"),
+        nullable=False,
+    )
+    skill_version_digest = Column(String(64), nullable=False)
+    model_id = Column(UUID(as_uuid=True), ForeignKey("ai_model.id"), nullable=False)
+    model_identity_digest = Column(String(64), nullable=False)
+    seed_manifest_digest = Column(String(64), nullable=False)
+    seed_contract_digest = Column(String(64), nullable=False)
+    package_closure_digest = Column(String(64), nullable=False)
+    capability_closure_digest = Column(String(64), nullable=False)
+    build_revision = Column(String(128), nullable=False)
+    runtime_contract_version = Column(Integer, nullable=False)
+    checkpoint_codec_version = Column(Integer, nullable=False)
+    capability_feature_digest = Column(String(64), nullable=False)
+    closure_digest = Column(String(64), nullable=False)
+    bootstrap_request_id = Column(UUID(as_uuid=True), nullable=False, unique=True)
+    operator_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("operator_account.id"),
+        nullable=False,
+    )
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+    __table_args__ = (
+        CheckConstraint(
+            "action = 'system_bootstrap'",
+            name="ck_runtime_bootstrap_gate_use_action",
+        ),
+        CheckConstraint(
+            "runtime_contract_version > 0 AND checkpoint_codec_version > 0",
+            name="ck_runtime_bootstrap_gate_use_positive_contract",
+        ),
+        CheckConstraint(
+            "length(build_revision) >= 1 AND length(build_revision) <= 128",
+            name="ck_runtime_bootstrap_gate_use_build_len",
+        ),
+        _sha256_check(
+            "rollout_revision_digest",
+            name="ck_runtime_bootstrap_gate_use_rollout_revision_digest",
+        ),
+        _sha256_check(
+            "profile_content_digest",
+            name="ck_runtime_bootstrap_gate_use_profile_content_digest",
+        ),
+        _sha256_check(
+            "skill_version_digest",
+            name="ck_runtime_bootstrap_gate_use_skill_version_digest",
+        ),
+        _sha256_check(
+            "model_identity_digest",
+            name="ck_runtime_bootstrap_gate_use_model_identity_digest",
+        ),
+        _sha256_check(
+            "seed_manifest_digest",
+            name="ck_runtime_bootstrap_gate_use_seed_manifest_digest",
+        ),
+        _sha256_check(
+            "seed_contract_digest",
+            name="ck_runtime_bootstrap_gate_use_seed_contract_digest",
+        ),
+        _sha256_check(
+            "package_closure_digest",
+            name="ck_runtime_bootstrap_gate_use_package_closure_digest",
+        ),
+        _sha256_check(
+            "capability_closure_digest",
+            name="ck_runtime_bootstrap_gate_use_capability_closure_digest",
+        ),
+        _sha256_check(
+            "capability_feature_digest",
+            name="ck_runtime_bootstrap_gate_use_capability_feature_digest",
+        ),
+        _sha256_check(
+            "closure_digest",
+            name="ck_runtime_bootstrap_gate_use_closure_digest",
+        ),
+    )
+
+
 class AssistantMainAgentRolloutControl(Base):
     """Singleton durable control pointer for the active Main-Agent rollout."""
 
@@ -218,6 +331,16 @@ def _reject_rollout_event_mutation(
     )
 
 
+def _reject_bootstrap_gate_use_mutation(
+    mapper: Mapper, connection, target  # noqa: ANN001
+) -> None:
+    raise IntegrityError(
+        "assistant runtime bootstrap gate use is immutable",
+        params=None,
+        orig=Exception("assistant runtime bootstrap gate use is immutable"),
+    )
+
+
 # Late import keeps sqlalchemy.exc out of module import cycle noise.
 from sqlalchemy.exc import IntegrityError  # noqa: E402
 
@@ -225,3 +348,5 @@ event.listen(AssistantMainAgentRolloutRevision, "before_update", _reject_rollout
 event.listen(AssistantMainAgentRolloutRevision, "before_delete", _reject_rollout_revision_mutation)
 event.listen(AssistantMainAgentRolloutEvent, "before_update", _reject_rollout_event_mutation)
 event.listen(AssistantMainAgentRolloutEvent, "before_delete", _reject_rollout_event_mutation)
+event.listen(AssistantRuntimeBootstrapGateUse, "before_update", _reject_bootstrap_gate_use_mutation)
+event.listen(AssistantRuntimeBootstrapGateUse, "before_delete", _reject_bootstrap_gate_use_mutation)

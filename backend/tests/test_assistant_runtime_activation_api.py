@@ -342,6 +342,24 @@ def test_list_rollouts_viewer_ok(operator_client):
     assert "prompt" not in blob
 
 
+def test_rollout_activation_readiness_is_viewer_safe(operator_client):
+    client, state = operator_client
+    revision_id = state["revision_id"]
+
+    response = client.get(
+        f"/api/assistant-runtime/rollouts/{revision_id}/activation-readiness"
+    )
+
+    assert response.status_code == 200, response.text
+    data = response.json().get("data") or response.json()
+    assert data["rolloutRevisionId"] == str(revision_id)
+    assert data["compatibleWorkerIds"]
+    assert "activeRolloutRevisionId" not in data
+    blob = response.text.lower()
+    for fragment in ("prompt", "credential", "api_key", "packageclosurejson"):
+        assert fragment not in blob
+
+
 def test_set_new_runs_via_http(operator_client):
     client, state = operator_client
     revision_id = state["revision_id"]

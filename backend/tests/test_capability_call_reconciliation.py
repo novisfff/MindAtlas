@@ -57,14 +57,16 @@ def _seed_external_call(
         create_initial_obligation_ledger_state,
         pure_create_obligation,
     )
-    from app.assistant.models import AssistantChatRun, Conversation
+    from app.assistant.models import Conversation
+    from tests.assistant_runtime_support import make_main_agent_run
     conv = Conversation(title="t")
     db.add(conv)
     db.flush()
-    run = AssistantChatRun(
-        conversation_id=conv.id,
-        status="needs_reconciliation",
-        runtime_kind="main_agent",
+    run = make_main_agent_run(
+        db,
+        conversation=conv,
+        status=status,
+        build_revision="b1",
         runtime_contract_version=1,
         required_app_build_revision="b1",
         capability_ledger_mode="enforced",
@@ -73,9 +75,6 @@ def _seed_external_call(
         lease_generation=1,
         memory_commit_status="pending",
     )
-    db.add(run)
-    db.commit()
-    db.refresh(run)
     manifest = AssistantRunManifestRevision(
         run_id=run.id,
         revision=1,

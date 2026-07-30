@@ -1017,6 +1017,8 @@
       "aiSectionDesc": "Configure models, system tools, the skill library, workflows, agents, and built-in system AI behaviors in one place.",
       "runtimeSection": "Runtime Capabilities",
       "runtimeSectionDesc": "Review deployment-managed services and separately maintain runtime settings such as LightRAG, Docling, and automation.",
+      "assistantRuntime": "Assistant Runtime",
+      "assistantRuntimeDesc": "Resume prepared Main Agent rollout activation and control whether new chats are admitted.",
       "entryTypes": "Entry Types",
       "entryTypesDesc": "Manage content types, icons, and properties",
       "tags": "Tags",
@@ -2509,6 +2511,38 @@
       "loadingDescription": "Confirming the active Main Agent runtime can admit new chats.",
       "unavailableTitle": "Assistant is not ready",
       "unavailableDescription": "New chats are blocked until readiness clears. Existing conversation history may still be visible."
+    },
+    "settings": {
+      "title": "Assistant runtime",
+      "description": "Resume prepared rollout activation and review durable Main Agent runtime control.",
+      "loading": "Loading runtime control…",
+      "loadError": "Could not load runtime control.",
+      "rollout": {
+        "build": "Build {{build}}"
+      },
+      "prepared": {
+        "title": "Prepared rollout",
+        "description": "This server-side rollout remains available after leaving the initialization wizard.",
+        "badge": "Prepared",
+        "empty": "No prepared rollout is available."
+      },
+      "active": {
+        "title": "Active rollout",
+        "description": "The active immutable revision is used for new Main Agent chat runs.",
+        "badge": "Active",
+        "inactiveBadge": "Inactive",
+        "empty": "No rollout is active."
+      },
+      "newRuns": {
+        "title": "New chat runs",
+        "description": "Durably control admission for future Main Agent chats without changing existing runs.",
+        "switchLabel": "Accept new chat runs",
+        "enabled": "New chat runs are enabled.",
+        "disabled": "New chat runs are disabled.",
+        "hint": "This switch only affects future chat runs. Existing durable runs continue unchanged.",
+        "error": "Could not change new chat setting.",
+        "conflict": "Control changed. The latest state was refreshed."
+      }
     },
     "reasons": {
       "system_not_initialized": "The system has not completed initialization.",

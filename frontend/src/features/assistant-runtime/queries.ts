@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   activateAssistantRollout,
   getAssistantReadinessDiagnostics,
+  getAssistantRolloutActivationReadiness,
   getPublicAssistantReadiness,
   listAssistantRollouts,
   prepareAssistantRollout,
@@ -16,12 +17,16 @@ export const assistantRuntimeKeys = {
   all: ['assistant-runtime'] as const,
   publicReadiness: () => [...assistantRuntimeKeys.all, 'public-readiness'] as const,
   diagnostics: () => [...assistantRuntimeKeys.all, 'diagnostics'] as const,
+  activationReadiness: () => [...assistantRuntimeKeys.all, 'activation-readiness'] as const,
+  activationReadinessFor: (revisionId: string) =>
+    [...assistantRuntimeKeys.activationReadiness(), revisionId] as const,
   rollouts: () => [...assistantRuntimeKeys.all, 'rollouts'] as const,
 }
 
 function invalidateRuntimeQueries(queryClient: ReturnType<typeof useQueryClient>) {
   void queryClient.invalidateQueries({ queryKey: assistantRuntimeKeys.publicReadiness() })
   void queryClient.invalidateQueries({ queryKey: assistantRuntimeKeys.diagnostics() })
+  void queryClient.invalidateQueries({ queryKey: assistantRuntimeKeys.activationReadiness() })
   void queryClient.invalidateQueries({ queryKey: assistantRuntimeKeys.rollouts() })
 }
 
@@ -39,6 +44,18 @@ export function useAssistantReadinessDiagnosticsQuery(enabled = true) {
     queryKey: assistantRuntimeKeys.diagnostics(),
     queryFn: getAssistantReadinessDiagnostics,
     enabled,
+    refetchInterval: (query) => (query.state.data?.ready === false ? 2_000 : 15_000),
+  })
+}
+
+export function useAssistantRolloutActivationReadinessQuery(
+  revisionId: string | null,
+  enabled = true,
+) {
+  return useQuery({
+    queryKey: assistantRuntimeKeys.activationReadinessFor(revisionId ?? 'none'),
+    queryFn: () => getAssistantRolloutActivationReadiness(revisionId as string),
+    enabled: Boolean(revisionId) && enabled,
     refetchInterval: (query) => (query.state.data?.ready === false ? 2_000 : 15_000),
   })
 }

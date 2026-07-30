@@ -30,6 +30,19 @@ export interface AssistantReadinessDiagnostics extends PublicAssistantReadiness 
   buildRevision: string
 }
 
+/**
+ * Advisory readiness for a specific immutable revision before activation.
+ * This intentionally has no activeRolloutRevisionId: target compatibility is
+ * not evidence that the control pointer already selected that target.
+ */
+export interface AssistantRolloutActivationReadiness extends PublicAssistantReadiness {
+  rolloutRevisionId: string
+  profileVersionId: string | null
+  modelId: string | null
+  compatibleWorkerIds: string[]
+  buildRevision: string
+}
+
 export interface PreparedRolloutResult {
   rolloutRevisionId: string
   revisionLabel: string
@@ -106,6 +119,12 @@ export async function getPublicAssistantReadiness(): Promise<PublicAssistantRead
 
 export function getAssistantReadinessDiagnostics() {
   return apiClient.get<AssistantReadinessDiagnostics>('/api/assistant-runtime/readiness')
+}
+
+export function getAssistantRolloutActivationReadiness(revisionId: string) {
+  return apiClient.get<AssistantRolloutActivationReadiness>(
+    `/api/assistant-runtime/rollouts/${revisionId}/activation-readiness`,
+  )
 }
 
 export function listAssistantRollouts() {

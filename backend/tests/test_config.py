@@ -40,8 +40,9 @@ def _settings(**overrides):
 
 def test_main_agent_defaults_are_production_safe() -> None:
     s = _settings()
-    assert s.assistant_runtime_mode == "legacy"
-    assert s.assistant_runtime_rollout_revision == ""
+    # Runtime selection is durable rollout state, never an env fallback.
+    assert not hasattr(s, "assistant_runtime_mode")
+    assert not hasattr(s, "assistant_runtime_rollout_revision")
     assert s.assistant_main_agent_catalog_top_k == 8
     assert s.assistant_main_agent_max_active_skills == 4
     assert s.assistant_main_agent_resource_chunk_bytes == 16384

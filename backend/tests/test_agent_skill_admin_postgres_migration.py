@@ -36,7 +36,7 @@ TASK1_HEAD = "403414a62e55"
 # Sole pre-merge Plan 09 head is the evaluation workbench revision (09B).
 # Task 1 lifecycle (09A) remains a reachable intermediate (parent of 09B).
 PLAN09_HEAD = "027869a00a47"
-CURRENT_HEAD = "9f3c1a7e2b40"
+CURRENT_HEAD = "b6e2d4f8a901"
 DOWNGRADE_BLOCKED_TOKEN = (
     "MINDATLAS_PLAN09_DOWNGRADE_BLOCKED_ARCHIVED_OR_CATALOG_EVIDENCE"
 )

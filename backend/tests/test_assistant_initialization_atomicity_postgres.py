@@ -117,6 +117,7 @@ def _ensure_schema(engine) -> None:
 def _truncate_owned(engine) -> None:
     tables = [
         "assistant_main_agent_rollout_event",
+        "assistant_runtime_bootstrap_gate_use",
         "assistant_main_agent_rollout_control",
         "assistant_main_agent_rollout_revision",
         "assistant_skill_capability_dependency",
@@ -161,6 +162,7 @@ EMPTY_COUNTS = {
     "skill_package": 0,
     "profile": 0,
     "rollout_revision": 0,
+    "bootstrap_gate_use": 0,
     "rollout_event": 0,
     "marker": 0,
 }
@@ -170,6 +172,7 @@ def initialization_owned_row_counts(db: Session) -> dict[str, int]:
     from app.assistant.runtime.models import (
         AssistantMainAgentRolloutEvent,
         AssistantMainAgentRolloutRevision,
+        AssistantRuntimeBootstrapGateUse,
     )
     from app.assistant.skills.models import (
         AssistantMainAgentProfile,
@@ -189,6 +192,7 @@ def initialization_owned_row_counts(db: Session) -> dict[str, int]:
         "skill_package": db.query(AssistantSkillPackage).count(),
         "profile": db.query(AssistantMainAgentProfile).count(),
         "rollout_revision": db.query(AssistantMainAgentRolloutRevision).count(),
+        "bootstrap_gate_use": db.query(AssistantRuntimeBootstrapGateUse).count(),
         "rollout_event": db.query(AssistantMainAgentRolloutEvent).count(),
         "marker": marker,
     }
@@ -445,7 +449,10 @@ def test_session_is_issued_only_after_commit():
 
 def test_successful_initialization_prepares_not_activates():
     from app.assistant.runtime.contracts import CONTROL_KEY_MAIN_AGENT
-    from app.assistant.runtime.models import AssistantMainAgentRolloutControl
+    from app.assistant.runtime.models import (
+        AssistantMainAgentRolloutControl,
+        AssistantRuntimeBootstrapGateUse,
+    )
     from app.assistant.skills.models import (
         AssistantMainAgentProfile,
         AssistantSkillPackage,
@@ -475,3 +482,6 @@ def test_successful_initialization_prepares_not_activates():
             assert result.rollout_control_revision == 0
             assert initialization_owned_row_counts(db)["operator"] == 1
             assert initialization_owned_row_counts(db)["marker"] == 1
+            gate_use = db.query(AssistantRuntimeBootstrapGateUse).one()
+            assert gate_use.action == "system_bootstrap"
+            assert gate_use.rollout_revision_id == result.prepared_rollout_revision_id

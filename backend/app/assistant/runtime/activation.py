@@ -42,8 +42,8 @@ from app.assistant.runtime.contracts import (
     rollout_revision_id_for_request,
 )
 from app.assistant.runtime.models import (
-    AssistantMainAgentRolloutEvent,
     AssistantMainAgentRolloutRevision,
+    AssistantRuntimeBootstrapGateUse,
 )
 from app.assistant.runtime.readiness import AssistantReadinessService
 from app.assistant.runtime.repository import AssistantRuntimeRepository
@@ -128,6 +128,12 @@ class AssistantRuntimeActivationService:
             )
         except RuntimeClosureDrift as exc:
             raise RuntimeActivationRejected(exc.reason_code) from exc
+        if self._is_bootstrap_profile_version(profile_version):
+            self._require_bootstrap_gate_use(
+                profile_version=profile_version,
+                closure=subject,
+                package_closure=subject.package_closure,
+            )
         self._require_package_gate_uses(subject)
         revision_id = rollout_revision_id_for_request(request.request_id)
         revision = self.repo.create_prepared_revision(
@@ -325,8 +331,8 @@ class AssistantRuntimeActivationService:
     ) -> None:
         """Normal prepare requires current profile publish gate-use.
 
-        Bootstrap origin profile versions are accepted via seed/bootstrap
-        evidence instead of publish-gate pins (Task 4/5 exception).
+        Bootstrap origin profiles use the dedicated immutable bootstrap gate
+        use, checked after the server-derived subject has been built.
         """
         if self._is_bootstrap_profile_version(profile_version):
             return
@@ -363,18 +369,19 @@ class AssistantRuntimeActivationService:
         target: AssistantMainAgentRolloutRevision,
         closure: AssistantRuntimeClosure,
     ) -> None:
-        """Activation accepts bootstrap seed evidence OR current publish gate-use."""
-        if self._has_bootstrap_prepared_evidence(target):
-            # Seed digest must still match the recomputed closure.
-            if str(target.seed_manifest_digest) != str(closure.seed_manifest_digest):
-                raise RuntimeActivationRejected("system_seed_invalid")
-            return
+        """Require immutable bootstrap or normal publish provenance under locks."""
         profile_version = self.db.get(
             AssistantMainAgentProfileVersion, target.profile_version_id
         )
         if profile_version is None:
             raise RuntimeActivationRejected("profile_unpublished")
         if self._is_bootstrap_profile_version(profile_version):
+            self._require_bootstrap_gate_use(
+                profile_version=profile_version,
+                closure=closure,
+                package_closure=list(target.package_closure_json or []),
+                target=target,
+            )
             return
         if not self._has_gate_use_for_version(
             resulting_version_id=profile_version.id,
@@ -402,27 +409,88 @@ class AssistantRuntimeActivationService:
             ):
                 raise RuntimeGateEvidenceMissing("package_gate_use_missing")
 
-    def _has_bootstrap_prepared_evidence(
-        self, target: AssistantMainAgentRolloutRevision
-    ) -> bool:
-        if str(target.prepared_reason or "") == "system_bootstrap":
-            return True
-        events = (
-            self.db.query(AssistantMainAgentRolloutEvent)
-            .filter(
-                AssistantMainAgentRolloutEvent.to_rollout_revision_id == target.id,
-                AssistantMainAgentRolloutEvent.action == "prepared",
+    def _require_bootstrap_gate_use(
+        self,
+        *,
+        profile_version: AssistantMainAgentProfileVersion,
+        closure: AssistantRuntimeSubject | AssistantRuntimeClosure,
+        package_closure: Any,
+        target: AssistantMainAgentRolloutRevision | None = None,
+    ) -> None:
+        """Validate the server-created ``system_bootstrap`` authorization row.
+
+        A bootstrap profile may be used to prepare a later immutable rollout,
+        so the gate binds the subject-level Profile/Skill/Model/seed closure.
+        For the original bootstrap rollout it additionally binds that exact
+        revision digest and closure digest.  A timeline event or a mutable
+        ``prepared_reason`` is never accepted as authorization evidence.
+        """
+        stmt = (
+            select(AssistantRuntimeBootstrapGateUse)
+            .where(
+                AssistantRuntimeBootstrapGateUse.action == "system_bootstrap",
+                AssistantRuntimeBootstrapGateUse.profile_version_id
+                == profile_version.id,
+                AssistantRuntimeBootstrapGateUse.profile_content_digest
+                == str(closure.profile_content_digest),
+                AssistantRuntimeBootstrapGateUse.model_id == closure.model_id,
+                AssistantRuntimeBootstrapGateUse.model_identity_digest
+                == str(closure.model_identity_digest),
+                AssistantRuntimeBootstrapGateUse.seed_manifest_digest
+                == str(closure.seed_manifest_digest),
+                AssistantRuntimeBootstrapGateUse.package_closure_digest
+                == str(closure.package_closure_digest),
+                AssistantRuntimeBootstrapGateUse.capability_closure_digest
+                == str(closure.capability_closure_digest),
+                AssistantRuntimeBootstrapGateUse.build_revision
+                == str(closure.build_revision),
+                AssistantRuntimeBootstrapGateUse.runtime_contract_version
+                == int(closure.runtime_contract_version),
+                AssistantRuntimeBootstrapGateUse.checkpoint_codec_version
+                == int(closure.checkpoint_codec_version),
+                AssistantRuntimeBootstrapGateUse.capability_feature_digest
+                == str(closure.capability_feature_digest),
             )
-            .all()
+            .with_for_update()
         )
-        for event in events:
-            if str(event.reason or "") == "system_bootstrap":
-                return True
-            result = event.result_json or {}
-            evidence = result.get("bootstrapEvidence") or result.get("bootstrap_evidence")
-            if isinstance(evidence, dict) and evidence.get("origin") == "system_bootstrap":
-                return True
-        return False
+        gate_use = self.db.execute(stmt).scalar_one_or_none()
+        if gate_use is None:
+            raise RuntimeGateEvidenceMissing("bootstrap_gate_use_missing")
+
+        try:
+            from app.assistant.runtime.seed import load_verified_assistant_system_seed
+
+            current_seed = load_verified_assistant_system_seed()
+        except Exception as exc:
+            raise RuntimeGateEvidenceMissing("bootstrap_gate_use_invalid") from exc
+        if str(gate_use.seed_contract_digest) != str(
+            current_seed.manifest.seed_contract_digest
+        ):
+            raise RuntimeGateEvidenceMissing("bootstrap_gate_use_invalid")
+
+        entries = list(package_closure or [])
+        skill_matches = any(
+            str(entry.get("packageId") or entry.get("package_id") or "")
+            == str(gate_use.skill_package_id)
+            and str(entry.get("versionId") or entry.get("version_id") or "")
+            == str(gate_use.skill_version_id)
+            and str(entry.get("versionDigest") or entry.get("version_digest") or "")
+            == str(gate_use.skill_version_digest)
+            for entry in entries
+            if isinstance(entry, dict)
+        )
+        if not skill_matches:
+            raise RuntimeGateEvidenceMissing("bootstrap_gate_use_invalid")
+
+        if target is None or str(target.prepared_reason or "") != "system_bootstrap":
+            return
+        if (
+            gate_use.rollout_revision_id != target.id
+            or str(gate_use.rollout_revision_digest)
+            != str(closure.rollout_revision_digest)
+            or str(gate_use.closure_digest) != str(closure.closure_digest)
+        ):
+            raise RuntimeGateEvidenceMissing("bootstrap_gate_use_invalid")
 
     @staticmethod
     def _is_bootstrap_profile_version(

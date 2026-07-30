@@ -46,15 +46,17 @@ class _FakeInner:
 
 
 def _make_run(db, *, mode: str = "enforced", revision: int = 1):
-    from app.assistant.models import AssistantChatRun, Conversation
+    from app.assistant.models import Conversation
+    from tests.assistant_runtime_support import make_main_agent_run
 
     conv = Conversation(title=f"t-{uuid.uuid4().hex[:8]}")
     db.add(conv)
     db.flush()
-    run = AssistantChatRun(
-        conversation_id=conv.id,
+    return make_main_agent_run(
+        db,
+        conversation=conv,
         status="running",
-        runtime_kind="main_agent",
+        build_revision="build-test-1",
         runtime_contract_version=1,
         required_app_build_revision="build-test-1",
         capability_ledger_mode=mode,
@@ -64,10 +66,6 @@ def _make_run(db, *, mode: str = "enforced", revision: int = 1):
         lease_owner="worker-1",
         lease_generation=1,
     )
-    db.add(run)
-    db.commit()
-    db.refresh(run)
-    return run
 
 
 def _manifest_and_artifact(db, run_id):

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiClient, ApiError, apiClient } from '@/lib/api/client'
 import {
   activateAssistantRollout,
+  getAssistantRolloutActivationReadiness,
   getPublicAssistantReadiness,
   prepareAssistantRollout,
   setAssistantNewRunsEnabled,
@@ -137,6 +138,29 @@ describe('activation credentialed client', () => {
       requestId: '4f99cdf9-1952-4f2f-9558-cd56f89211af',
       reason: 'activate reviewed runtime',
     })
+  })
+
+  it('fetches target-specific activation readiness without treating it as active state', async () => {
+    const revisionId = 'prepared-revision-id'
+    const resultBody = {
+      rolloutRevisionId: revisionId,
+      ready: true,
+      reasonCodes: [],
+      profileVersionId: 'profile-v',
+      modelId: 'model-v',
+      compatibleWorkerIds: ['worker-b'],
+      buildRevision: 'build-b',
+    }
+    const fetcher = vi.fn().mockResolvedValue(ok(resultBody))
+    const client = new ApiClient({ fetcher: fetcher as typeof fetch })
+    vi.spyOn(apiClient, 'get').mockImplementation((path, options) => client.get(path, options))
+
+    await expect(getAssistantRolloutActivationReadiness(revisionId)).resolves.toEqual(resultBody)
+    const init = fetcher.mock.calls[0][1] as RequestInit
+    expect(init.credentials).toBe('same-origin')
+    expect(String(fetcher.mock.calls[0][0])).toContain(
+      `/api/assistant-runtime/rollouts/${revisionId}/activation-readiness`,
+    )
   })
 
   it('sends prepare and new-runs through the credentialed client', async () => {

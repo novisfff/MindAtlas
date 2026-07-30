@@ -28,26 +28,19 @@ DIGEST_B = "b" * 64
 
 
 def _make_main_agent_run(db, *, status: str = "queued", **kwargs: Any):
-    from app.assistant.models import AssistantChatRun, Conversation
+    """Build a complete frozen Main-Agent Run for recovery/lease tests."""
+    from tests.assistant_runtime_support import make_main_agent_run
 
-    conv = Conversation(title=f"t-{uuid.uuid4().hex[:8]}")
-    db.add(conv)
-    db.flush()
-    run = AssistantChatRun(
-        conversation_id=conv.id,
+    build_revision = kwargs.pop("required_app_build_revision", "build-test-1")
+    kwargs.setdefault("runtime_contract_version", 1)
+    kwargs.setdefault("required_checkpoint_codec_version", 1)
+    kwargs.setdefault("required_capability_feature_digest", DIGEST_A)
+    return make_main_agent_run(
+        db,
         status=status,
-        runtime_kind="main_agent",
-        runtime_contract_version=1,
-        required_app_build_revision=kwargs.pop("required_app_build_revision", "build-test-1"),
-        state_revision=int(kwargs.pop("state_revision", 0)),
-        last_event_seq=int(kwargs.pop("last_event_seq", 0)),
-        memory_commit_status=kwargs.pop("memory_commit_status", "pending"),
+        build_revision=build_revision,
         **kwargs,
     )
-    db.add(run)
-    db.commit()
-    db.refresh(run)
-    return run
 
 
 def _seed_revisions(db, run_id):
@@ -690,6 +683,28 @@ class LeaseServiceSqliteUnitTests(unittest.TestCase):
             required_app_build_revision="other-build",
         )
         self.assertIsNone(self._svc().claim_next())
+
+    def test_claim_scans_past_a_full_batch_of_codec_incompatible_runs(self) -> None:
+        """A compatible Run after 16 incompatible heads must not starve."""
+        from app.assistant.durable.leases import RunLeaseService
+
+        for _ in range(RunLeaseService._CLAIM_CANDIDATE_BATCH):
+            _make_main_agent_run(
+                self.db,
+                status="queued",
+                required_checkpoint_codec_version=99,
+            )
+        compatible = _make_main_agent_run(
+            self.db,
+            status="queued",
+            required_checkpoint_codec_version=1,
+        )
+
+        claimed = self._svc().claim_next()
+
+        self.assertIsNotNone(claimed)
+        assert claimed is not None
+        self.assertEqual(claimed.run_id, compatible.id)
 
     def test_backoff_clears_lease_and_defers_claim(self) -> None:
         from app.assistant.durable.repository import DurableRunRepository

@@ -22,6 +22,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import socket
 import subprocess
@@ -34,7 +35,7 @@ from datetime import datetime, timezone
 from http.cookiejar import CookieJar
 from pathlib import Path
 from typing import Any, Callable, Mapping
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 _BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(_BACKEND_ROOT) not in sys.path:
@@ -77,6 +78,8 @@ PROVIDER_BASE_URL = "http://provider-stub:8089/v1"
 CHAT_MESSAGE = "Return the deterministic smoke response."
 TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
 EXPECTED_RUNTIME_KIND = "main_agent"
+_ALEMBIC_REVISION_RE = re.compile(r"[0-9a-f]{12}")
+_NON_NEGATIVE_INTEGER_RE = re.compile(r"(?:0|[1-9][0-9]*)")
 
 # Env vars that name secret *files* (never CLI secret values).
 ENV_SETUP_TOKEN_FILE = "MINDATLAS_SMOKE_SETUP_TOKEN_FILE"
@@ -221,6 +224,26 @@ def resolve_chat_completion_evidence(
             f"observed {sorted(run_ids)}"
         )
     return "completed", EXPECTED_RUNTIME_KIND, len(run_ids)
+
+
+def collect_database_evidence(
+    compose: "ComposeRunner",
+    *,
+    conversation_id: str,
+) -> tuple[str, int]:
+    """Read the two database-backed smoke facts and enforce Plan 2 invariants.
+
+    SSE remains the source for admission, terminal status, and runtime kind. The
+    migration revision and conversation Run count must instead be independent
+    PostgreSQL observations from the disposable Compose project.
+    """
+    alembic_head = compose.observed_alembic_head()
+    chat_run_count = compose.observed_conversation_run_count(conversation_id)
+    if alembic_head != PLAN2_ALEMBIC_HEAD:
+        raise SmokeFailure("database alembic head did not match Plan 2")
+    if chat_run_count != 1:
+        raise SmokeFailure("database chat run count did not equal one")
+    return alembic_head, chat_run_count
 
 
 def _canonical_json_bytes(value: Any) -> bytes:
@@ -670,6 +693,58 @@ class ComposeRunner:
             *args,
         ]
 
+    def _postgres_scalar(
+        self,
+        *,
+        label: str,
+        query: str,
+        value_pattern: re.Pattern[str],
+    ) -> str:
+        """Execute one fixed scalar query inside Compose PostgreSQL safely."""
+        shell_command = (
+            'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" '
+            '-d "$POSTGRES_DB" -At -c '
+            f"{shlex.quote(query)}"
+        )
+        completed = subprocess.run(
+            self._cmd("exec", "-T", "postgres", "sh", "-ec", shell_command),
+            cwd=str(self.compose_file.parent),
+            env=self.env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise SmokeFailure(f"database {label} query failed")
+        values = [line.strip() for line in (completed.stdout or "").splitlines() if line.strip()]
+        if len(values) != 1 or value_pattern.fullmatch(values[0]) is None:
+            raise SmokeFailure(f"database {label} query returned invalid scalar")
+        return values[0]
+
+    def observed_alembic_head(self) -> str:
+        """Return the live Alembic revision from the smoke PostgreSQL service."""
+        return self._postgres_scalar(
+            label="alembic head",
+            query="SELECT version_num FROM alembic_version",
+            value_pattern=_ALEMBIC_REVISION_RE,
+        )
+
+    def observed_conversation_run_count(self, conversation_id: str) -> int:
+        """Return the durable Run count for exactly one validated conversation."""
+        try:
+            canonical_conversation_id = str(UUID(str(conversation_id)))
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise SmokeFailure("database chat run count requires a UUID conversation") from exc
+        value = self._postgres_scalar(
+            label="chat run count",
+            query=(
+                "SELECT COUNT(*) FROM assistant_chat_run "
+                f"WHERE conversation_id = '{canonical_conversation_id}'::uuid"
+            ),
+            value_pattern=_NON_NEGATIVE_INTEGER_RE,
+        )
+        return int(value)
+
     def up(self) -> None:
         completed = subprocess.run(
             self._cmd(
@@ -1079,7 +1154,7 @@ def run_smoke_sequence(
         observed_run_ids.update(observation.run_ids)
         runtime_kinds.update(observation.runtime_kinds)
 
-    chat_terminal, active_runtime_kind, chat_run_count = resolve_chat_completion_evidence(
+    chat_terminal, active_runtime_kind, _sse_run_count = resolve_chat_completion_evidence(
         observed_terminal=terminal_status["value"],
         observed_runtime_kinds=runtime_kinds,
         observed_run_ids=observed_run_ids,
@@ -1093,8 +1168,10 @@ def run_smoke_sequence(
         "readinessTransitions": transitions,
         "compatibleWorkerCount": int(compatible_count["value"]),
         "activeRuntimeKind": active_runtime_kind,
-        "chatRunCount": chat_run_count,
         "chatTerminalStatus": chat_terminal,
+        # Kept out of the evidence artifact: the artifact count is read from
+        # PostgreSQL after this sequence completes.
+        "conversationId": conversation_id,
     }
 
 
@@ -1276,18 +1353,24 @@ def main(argv: list[str] | None = None) -> int:
         wait_until(_health, timeout_sec=300.0, interval_sec=3.0, label="api_health")
 
         sequence = run_smoke_sequence(client, secrets_map=secrets_map)
+        if compose is None:
+            raise SmokeFailure("database evidence requires the Compose project")
+        observed_alembic_head, observed_chat_run_count = collect_database_evidence(
+            compose,
+            conversation_id=str(sequence["conversationId"]),
+        )
 
         payload: dict[str, object] = {
             "schemaVersion": SCHEMA_VERSION,
             "verificationKind": VERIFICATION_KIND,
             "buildRevision": build_revision,
-            "alembicHead": PLAN2_ALEMBIC_HEAD,
+            "alembicHead": observed_alembic_head,
             "seedManifestDigest": seed_manifest_digest(),
             "healthStatus": sequence["healthStatus"],
             "readinessTransitions": sequence["readinessTransitions"],
             "compatibleWorkerCount": sequence["compatibleWorkerCount"],
             "activeRuntimeKind": sequence["activeRuntimeKind"],
-            "chatRunCount": sequence["chatRunCount"],
+            "chatRunCount": observed_chat_run_count,
             "chatTerminalStatus": sequence["chatTerminalStatus"],
             "testSuites": {
                 "suiteCount": suite_info["suiteCount"],

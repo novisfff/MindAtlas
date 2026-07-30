@@ -23,7 +23,6 @@ branch_labels = None
 depends_on = None
 
 _SHA256 = r"^[0-9a-f]{64}$"
-DESTRUCTIVE_DOWNGRADE_ENV = "MINDATLAS_TEST_DESTRUCTIVE_DOWNGRADE"
 
 _ROLLOUT_ACTIONS = (
     "prepared",
@@ -41,6 +40,18 @@ LANGUAGE plpgsql
 AS $$
 BEGIN
   RAISE EXCEPTION 'assistant rollout revision is immutable'
+    USING ERRCODE = 'integrity_constraint_violation';
+END;
+$$;
+"""
+
+_REJECT_BOOTSTRAP_GATE_USE_MUTATION_FN = """
+CREATE OR REPLACE FUNCTION mindatlas_reject_bootstrap_gate_use_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'assistant runtime bootstrap gate use is immutable'
     USING ERRCODE = 'integrity_constraint_violation';
 END;
 $$;
@@ -195,6 +206,132 @@ def upgrade() -> None:
         _sha256_check(
             "revision_digest",
             name="ck_ma_rollout_revision_revision_digest",
+        ),
+    )
+
+    # Trusted bootstrap authorization provenance.  This intentionally does not
+    # reuse evaluation publish gates: the build-owned seed is not an evaluated
+    # user publication, but activation must still verify a durable immutable
+    # server-created gate-use row rather than trusting a rollout event label.
+    op.create_table(
+        "assistant_runtime_bootstrap_gate_use",
+        sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True, nullable=False),
+        sa.Column("action", sa.String(length=32), nullable=False),
+        sa.Column(
+            "rollout_revision_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("assistant_main_agent_rollout_revision.id"),
+            nullable=False,
+        ),
+        sa.Column("rollout_revision_digest", sa.String(length=64), nullable=False),
+        sa.Column(
+            "profile_version_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("assistant_main_agent_profile_version.id"),
+            nullable=False,
+        ),
+        sa.Column("profile_content_digest", sa.String(length=64), nullable=False),
+        sa.Column(
+            "skill_package_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("assistant_skill_package.id"),
+            nullable=False,
+        ),
+        sa.Column(
+            "skill_version_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("assistant_skill_version.id"),
+            nullable=False,
+        ),
+        sa.Column("skill_version_digest", sa.String(length=64), nullable=False),
+        sa.Column(
+            "model_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("ai_model.id"),
+            nullable=False,
+        ),
+        sa.Column("model_identity_digest", sa.String(length=64), nullable=False),
+        sa.Column("seed_manifest_digest", sa.String(length=64), nullable=False),
+        sa.Column("seed_contract_digest", sa.String(length=64), nullable=False),
+        sa.Column("package_closure_digest", sa.String(length=64), nullable=False),
+        sa.Column("capability_closure_digest", sa.String(length=64), nullable=False),
+        sa.Column("build_revision", sa.String(length=128), nullable=False),
+        sa.Column("runtime_contract_version", sa.Integer(), nullable=False),
+        sa.Column("checkpoint_codec_version", sa.Integer(), nullable=False),
+        sa.Column("capability_feature_digest", sa.String(length=64), nullable=False),
+        sa.Column("closure_digest", sa.String(length=64), nullable=False),
+        sa.Column("bootstrap_request_id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column(
+            "operator_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("operator_account.id"),
+            nullable=False,
+        ),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.text("now()"),
+        ),
+        sa.UniqueConstraint(
+            "rollout_revision_id",
+            name="uq_runtime_bootstrap_gate_use_rollout_revision_id",
+        ),
+        sa.UniqueConstraint(
+            "bootstrap_request_id",
+            name="uq_runtime_bootstrap_gate_use_request_id",
+        ),
+        sa.CheckConstraint(
+            "action = 'system_bootstrap'",
+            name="ck_runtime_bootstrap_gate_use_action",
+        ),
+        sa.CheckConstraint(
+            "runtime_contract_version > 0 AND checkpoint_codec_version > 0",
+            name="ck_runtime_bootstrap_gate_use_positive_contract",
+        ),
+        sa.CheckConstraint(
+            "length(build_revision) >= 1 AND length(build_revision) <= 128",
+            name="ck_runtime_bootstrap_gate_use_build_len",
+        ),
+        _sha256_check(
+            "rollout_revision_digest",
+            name="ck_runtime_bootstrap_gate_use_rollout_revision_digest",
+        ),
+        _sha256_check(
+            "profile_content_digest",
+            name="ck_runtime_bootstrap_gate_use_profile_content_digest",
+        ),
+        _sha256_check(
+            "skill_version_digest",
+            name="ck_runtime_bootstrap_gate_use_skill_version_digest",
+        ),
+        _sha256_check(
+            "model_identity_digest",
+            name="ck_runtime_bootstrap_gate_use_model_identity_digest",
+        ),
+        _sha256_check(
+            "seed_manifest_digest",
+            name="ck_runtime_bootstrap_gate_use_seed_manifest_digest",
+        ),
+        _sha256_check(
+            "seed_contract_digest",
+            name="ck_runtime_bootstrap_gate_use_seed_contract_digest",
+        ),
+        _sha256_check(
+            "package_closure_digest",
+            name="ck_runtime_bootstrap_gate_use_package_closure_digest",
+        ),
+        _sha256_check(
+            "capability_closure_digest",
+            name="ck_runtime_bootstrap_gate_use_capability_closure_digest",
+        ),
+        _sha256_check(
+            "capability_feature_digest",
+            name="ck_runtime_bootstrap_gate_use_capability_feature_digest",
+        ),
+        _sha256_check(
+            "closure_digest",
+            name="ck_runtime_bootstrap_gate_use_closure_digest",
         ),
     )
 
@@ -528,6 +665,14 @@ def upgrade() -> None:
         FOR EACH ROW EXECUTE FUNCTION mindatlas_reject_rollout_revision_mutation();
         """
     )
+    op.execute(_REJECT_BOOTSTRAP_GATE_USE_MUTATION_FN)
+    op.execute(
+        """
+        CREATE TRIGGER trg_assistant_runtime_bootstrap_gate_use_immutable
+        BEFORE UPDATE OR DELETE ON assistant_runtime_bootstrap_gate_use
+        FOR EACH ROW EXECUTE FUNCTION mindatlas_reject_bootstrap_gate_use_mutation();
+        """
+    )
 
     op.execute(_RUN_RUNTIME_IDENTITY_FN)
     op.execute(
@@ -542,21 +687,15 @@ def upgrade() -> None:
 def downgrade() -> None:
     bind = op.get_bind()
     app_env = (os.environ.get("APP_ENV") or "").strip().lower()
-    destructive = (os.environ.get(DESTRUCTIVE_DOWNGRADE_ENV) or "").strip() in {
-        "1",
-        "true",
-        "TRUE",
-        "yes",
-        "YES",
-    }
-    if app_env != "test" and not destructive:
+    if app_env != "test":
         raise RuntimeError(
             "schema_incompatible: Plan 2 Main-Agent rollout downgrade is only "
-            "allowed when APP_ENV=test (or MINDATLAS_TEST_DESTRUCTIVE_DOWNGRADE=1)"
+            "allowed when APP_ENV=test"
         )
 
     for table in (
         "assistant_chat_run",
+        "assistant_runtime_bootstrap_gate_use",
         "assistant_main_agent_rollout_event",
         "assistant_main_agent_rollout_control",
         "assistant_main_agent_rollout_revision",
@@ -583,6 +722,11 @@ def downgrade() -> None:
         "ON assistant_main_agent_rollout_revision"
     )
     op.execute("DROP FUNCTION IF EXISTS mindatlas_reject_rollout_revision_mutation()")
+    op.execute(
+        "DROP TRIGGER IF EXISTS trg_assistant_runtime_bootstrap_gate_use_immutable "
+        "ON assistant_runtime_bootstrap_gate_use"
+    )
+    op.execute("DROP FUNCTION IF EXISTS mindatlas_reject_bootstrap_gate_use_mutation()")
 
     op.drop_constraint(
         "ck_assistant_chat_run_capability_ledger_mode",
@@ -694,6 +838,7 @@ def downgrade() -> None:
         ")",
     )
 
+    op.drop_table("assistant_runtime_bootstrap_gate_use")
     op.drop_table("assistant_main_agent_rollout_event")
     op.drop_table("assistant_main_agent_rollout_control")
     op.drop_table("assistant_main_agent_rollout_revision")

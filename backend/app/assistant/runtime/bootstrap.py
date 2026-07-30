@@ -278,6 +278,16 @@ class AssistantSystemBootstrapper:
             skill_version=version,
             request=request,
         )
+        self.runtime_repo.append_bootstrap_gate_use(
+            rollout=rollout,
+            closure=closure,
+            seed=seed,
+            profile_version=profile_version,
+            skill_package=package,
+            skill_version=version,
+            bootstrap_request_id=bootstrap_request_id,
+            operator_id=request.operator_id,
+        )
         # Events are append-only — evidence must be present at insert time.
         self.runtime_repo.append_control_event(
             NewRolloutEvent.prepared_from_bootstrap(
@@ -704,11 +714,11 @@ class AssistantSystemBootstrapper:
         skill_version: AssistantSkillVersion,
         request: StageAssistantBootstrapRequest,
     ) -> dict[str, Any]:
-        """Safe-only bootstrap evidence for the append-only prepared event.
+        """Safe-only timeline evidence mirroring the durable bootstrap gate use.
 
-        Publish-gate tables only admit skill/profile publish|enable actions, so
-        system_bootstrap evidence is recorded on the rollout event (and scalar
-        operator audit metadata from the coordinator). No secrets.
+        Authorization is persisted in ``assistant_runtime_bootstrap_gate_use``;
+        the append-only rollout event remains an audit timeline and deliberately
+        contains only safe scalar metadata. No secrets.
         """
         return {
             "seedManifestDigest": seed.manifest.manifest_digest,

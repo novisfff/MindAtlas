@@ -418,6 +418,73 @@ def test_prepared_inactive_without_worker_reports_both_reasons(runtime_state):
     assert snapshot.model_id is not None
 
 
+def test_activation_candidate_readiness_uses_requested_revision_not_active_pointer(
+    runtime_state, monkeypatch
+):
+    """A candidate's compatible Worker set must not come from the active revision."""
+    from app.assistant.durable.codec import CURRENT_CHECKPOINT_CODEC_VERSION
+    from app.assistant.durable.models import AssistantWorkerRegistration
+    from app.assistant.durable.worker_registry import (
+        RUNTIME_CONTRACT_VERSION,
+        default_capability_feature_digest,
+    )
+    from app.assistant.runtime.closure import AssistantRuntimeClosureBuilder
+    from app.assistant.runtime.contracts import PreparedRolloutRevision
+    from app.assistant.runtime.repository import AssistantRuntimeRepository
+    from app.common.time import utcnow
+    import app.assistant.runtime.closure as closure_module
+
+    runtime_state.arrange("ready")
+    candidate_id = uuid4()
+    candidate_build = "candidate-build"
+    candidate_worker_id = f"worker-candidate-{uuid4().hex[:8]}"
+    runtime_state.db.add(
+        AssistantWorkerRegistration(
+            worker_id=candidate_worker_id,
+            app_build_revision=candidate_build,
+            runtime_contract_version=RUNTIME_CONTRACT_VERSION,
+            supported_checkpoint_codec_versions=[
+                1,
+                2,
+                int(CURRENT_CHECKPOINT_CODEC_VERSION),
+            ],
+            capability_feature_digest=default_capability_feature_digest(),
+            started_at=utcnow(),
+            heartbeat_at=utcnow(),
+            draining_at=None,
+            hostname_label="candidate-test",
+        )
+    )
+    runtime_state.db.flush()
+    subject = AssistantRuntimeClosureBuilder(runtime_state.db).build_subject(
+        profile_version_id=runtime_state.prepared.profile_version_id,
+        model_id=runtime_state.model.id,
+        build_revision=candidate_build,
+    )
+    candidate = AssistantRuntimeRepository(runtime_state.db).create_prepared_revision(
+        PreparedRolloutRevision.from_subject(
+            subject=subject,
+            revision_id=candidate_id,
+            prepared_by_operator_id=runtime_state.operator.id,
+            prepared_reason="candidate readiness regression",
+        )
+    )
+    runtime_state.settings = _settings(app_build_revision=candidate_build)
+    monkeypatch.setattr(closure_module, "get_settings", lambda: runtime_state.settings)
+    service = runtime_state.readiness()
+    active_snapshot = service.evaluate()
+    snapshot = service.evaluate_activation_candidate(
+        rollout_revision_id=candidate_id
+    )
+
+    assert active_snapshot.reason_codes == ("runtime_closure_drift",)
+    assert snapshot.ready is True
+    assert snapshot.reason_codes == ()
+    assert snapshot.compatible_worker_ids == (candidate_worker_id,)
+    assert snapshot.profile_version_id == candidate.profile_version_id
+    assert snapshot.model_id == candidate.model_id
+
+
 def test_readiness_performs_no_dml(db):
     from app.assistant.runtime.readiness import AssistantReadinessService
 

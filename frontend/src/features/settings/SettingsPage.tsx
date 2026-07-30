@@ -1,5 +1,5 @@
 import { useNavigate } from 'react-router-dom'
-import { FileType, Tags, ChevronRight, Bot, Wrench, Network, Sparkles, Settings2, Clock3, PlugZap, Package } from 'lucide-react'
+import { FileType, Tags, ChevronRight, Bot, Wrench, Network, Sparkles, Settings2, Clock3, PlugZap, Package, ShieldCheck } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { uiChrome, uiRadius } from '@/components/ui/styles'
 import {
@@ -112,6 +112,15 @@ export function SettingsPage() {
   })
 
   const runtimeCategories = [
+    {
+      id: 'assistant-runtime',
+      titleKey: 'pages.settings.assistantRuntime',
+      descKey: 'pages.settings.assistantRuntimeDesc',
+      icon: ShieldCheck,
+      path: '/settings/assistant-runtime',
+      color: 'text-slate-800',
+      bgColor: 'bg-slate-900/10'
+    },
     {
       id: 'lightrag',
       titleKey: 'pages.settings.lightRag',

@@ -138,18 +138,11 @@ class AssistantMemoryService:
         return None and callers must not create name-only L2 rows. Never
         imports the archived migration package.
         """
-        from app.assistant.memory_migration_state import read_l2_memory_migration_state
         from app.assistant.skills.contracts import normalize_skill_lookup_name
         from app.assistant.skills.models import (
             AssistantSkillPackage,
             AssistantSkillPackageAlias,
         )
-
-        # Gate live L2 package resolution on verified migration state so
-        # operators can block package-backed L2 until cutover evidence exists.
-        state = read_l2_memory_migration_state(self.db)
-        if not state.usable:
-            return None
 
         raw_name = str(skill_name or "").strip()
         if not raw_name:

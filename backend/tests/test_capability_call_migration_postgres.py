@@ -17,6 +17,7 @@ import os
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Iterator
 
 import pytest
@@ -248,6 +249,46 @@ def _session(engine: Engine) -> Iterator[Session]:
         session.close()
 
 
+def _get_historical_run(self, run_id: uuid.UUID, *, for_update: bool = False):
+    """Read only the Plan-08/09 Run shape required by this historical suite.
+
+    This module deliberately moves the database between the Plan 08 ledger and
+    Plan 09 heads.  Both predate Plan 2's frozen runtime-identity columns, so
+    the current ``AssistantChatRun`` ORM cannot be selected against them.  The
+    capability-call repository needs only these six legacy fields here; current
+    schema repository behavior remains covered by the normal runtime suites.
+    """
+    from app.assistant.capability_calls.repository import (
+        CODE_CALL_NOT_FOUND,
+        CapabilityCallConflict,
+    )
+
+    statement = """
+        SELECT id, status, runtime_kind, state_revision, lease_owner, lease_generation
+        FROM assistant_chat_run
+        WHERE id = :run_id
+    """
+    if for_update:
+        statement += " FOR UPDATE"
+    row = self.db.execute(text(statement), {"run_id": run_id}).mappings().one_or_none()
+    if row is None:
+        raise CapabilityCallConflict(CODE_CALL_NOT_FOUND, f"run {run_id} not found")
+    return SimpleNamespace(**dict(row))
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _use_historical_run_lookup() -> Iterator[None]:
+    """Keep current ORM columns out of Plan-08/09 migration fixtures."""
+    from app.assistant.capability_calls.repository import CapabilityCallRepository
+
+    original = CapabilityCallRepository.get_run
+    CapabilityCallRepository.get_run = _get_historical_run
+    try:
+        yield
+    finally:
+        CapabilityCallRepository.get_run = original
+
+
 def _seed_claimed_attempt(
     session: Session,
     *,
@@ -262,28 +303,46 @@ def _seed_claimed_attempt(
         AssistantRunManifestRevision,
     )
     from app.assistant.durable.repository import LeaseToken
-    from app.assistant.models import AssistantChatRun, Conversation
 
-    conversation = Conversation(title=f"plan08-attempt-pg-{uuid.uuid4().hex[:10]}")
-    session.add(conversation)
-    session.flush()
-    run = AssistantChatRun(
-        conversation_id=conversation.id,
-        status="running",
-        runtime_kind="main_agent",
-        runtime_contract_version=1,
-        required_app_build_revision="plan08-attempt-pg-build",
-        capability_ledger_mode="enforced",
-        state_revision=1,
-        last_event_seq=0,
-        memory_commit_status="pending",
-        lease_owner=WORKER_ID,
-        lease_generation=1,
+    conversation_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    session.execute(
+        text(
+            """
+            INSERT INTO assistant_conversation
+                (id, title, is_archived, created_at, updated_at)
+            VALUES
+                (:id, :title, false, NOW(), NOW())
+            """
+        ),
+        {
+            "id": conversation_id,
+            "title": f"plan08-attempt-pg-{uuid.uuid4().hex[:10]}",
+        },
     )
-    session.add(run)
-    session.flush()
+    session.execute(
+        text(
+            """
+            INSERT INTO assistant_chat_run
+                (id, conversation_id, status, runtime_kind,
+                 runtime_contract_version, required_app_build_revision,
+                 capability_ledger_mode, state_revision, last_event_seq,
+                 checkpoint_seq, lease_owner, lease_generation, recovery_count,
+                 memory_commit_status, created_at, updated_at)
+            VALUES
+                (:id, :conversation_id, 'running', 'main_agent',
+                 1, 'plan08-attempt-pg-build', 'enforced', 1, 0,
+                 0, :worker_id, 1, 0, 'pending', NOW(), NOW())
+            """
+        ),
+        {
+            "id": run_id,
+            "conversation_id": conversation_id,
+            "worker_id": WORKER_ID,
+        },
+    )
     manifest = AssistantRunManifestRevision(
-        run_id=run.id,
+        run_id=run_id,
         revision=1,
         manifest_digest=DIGEST_A,
         schema_version=1,
@@ -291,7 +350,7 @@ def _seed_claimed_attempt(
     )
     payload = uuid.uuid4().bytes
     artifact = AssistantRunArtifact(
-        run_id=run.id,
+        run_id=run_id,
         kind="call_input",
         media_type="application/json",
         storage_kind="inline",
@@ -304,16 +363,16 @@ def _seed_claimed_attempt(
     session.flush()
 
     lease = LeaseToken(
-        run_id=run.id,
+        run_id=run_id,
         worker_id=WORKER_ID,
         lease_generation=1,
     )
     repo = CapabilityCallRepository(session)
     call, _created = repo.create_or_verify_proposed(
-        ProposeCallSpec(
-            call_id=uuid.uuid4(),
-            run_id=run.id,
-            expected_run_revision=1,
+            ProposeCallSpec(
+                call_id=uuid.uuid4(),
+                run_id=run_id,
+                expected_run_revision=1,
             lease=lease,
             manifest_revision_id=manifest.id,
             logical_call_key=f"provider:pg:{uuid.uuid4().hex}",
@@ -352,6 +411,40 @@ def _seed_claimed_attempt(
     )
     session.commit()
     return repo, attempt
+
+
+def _seed_historical_reconciliation_call(session: Session):
+    """Create only the Plan-08 rows needed by the idempotency-conflict proof."""
+    from app.assistant.durable.models import AssistantRunArtifact
+
+    repo, attempt = _seed_claimed_attempt(session, external_effect_boundary=True)
+    call = repo.get_call(attempt.call_id)
+    assert call is not None
+    session.execute(
+        text(
+            "UPDATE assistant_chat_run SET state_revision = 2 WHERE id = :run_id"
+        ),
+        {"run_id": call.run_id},
+    )
+    payload = b'{"contractVersion":1,"serverIssued":true}'
+    evidence = AssistantRunArtifact(
+        run_id=call.run_id,
+        kind="capability_call_evidence",
+        media_type="application/json",
+        storage_kind="inline",
+        byte_size=len(payload),
+        content_sha256=hashlib.sha256(payload).hexdigest(),
+        inline_bytes=payload,
+        metadata_json={"serverIssued": True},
+    )
+    session.add(evidence)
+    session.flush()
+    return (
+        SimpleNamespace(id=call.run_id),
+        call,
+        SimpleNamespace(id=call.input_artifact_id),
+        evidence,
+    )
 
 
 def _error_text(exc: BaseException) -> str:
@@ -643,9 +736,7 @@ def test_referenced_reconciliation_evidence_artifact_is_immutable(operation: str
 
 def test_two_session_cross_call_resolution_request_reuse_is_stable_conflict() -> None:
     from tests.test_capability_call_reconciliation import (
-        _evidence_artifact,
         _evidence_verifier,
-        _seed_external_call,
         _trusted_authorizer,
     )
     from app.assistant.capability_calls.models import (
@@ -660,13 +751,7 @@ def test_two_session_cross_call_resolution_request_reuse_is_stable_conflict() ->
 
     resolution_id = uuid.uuid4()
     with _engine() as engine, _session(engine) as first:
-        run, call, input_artifact = _seed_external_call(first)
-        evidence = _evidence_artifact(
-            first,
-            run_id=run.id,
-            call_id=call.id,
-            evidence_type="capability_call_failure",
-        )
+        run, call, input_artifact, evidence = _seed_historical_reconciliation_call(first)
         other = AssistantCapabilityCall(
             run_id=run.id,
             manifest_revision_id=call.manifest_revision_id,

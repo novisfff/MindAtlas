@@ -444,6 +444,7 @@ def test_fresh_upgrade_has_main_agent_only_shape(postgres_at_plan1_head: Engine)
     with postgres_at_plan1_head.connect() as conn:
         for table in (
             "assistant_main_agent_rollout_revision",
+            "assistant_runtime_bootstrap_gate_use",
             "assistant_main_agent_rollout_control",
             "assistant_main_agent_rollout_event",
         ):

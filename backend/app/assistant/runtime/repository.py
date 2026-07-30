@@ -26,6 +26,7 @@ from app.assistant.runtime.models import (
     AssistantMainAgentRolloutControl,
     AssistantMainAgentRolloutEvent,
     AssistantMainAgentRolloutRevision,
+    AssistantRuntimeBootstrapGateUse,
 )
 from app.common.time import utcnow
 from app.operator_auth.contracts import OperatorPrincipal
@@ -93,6 +94,12 @@ class AssistantRuntimeRepository:
         )
         return self.db.execute(stmt).scalar_one_or_none()
 
+    def get_revision(
+        self, revision_id: UUID
+    ) -> AssistantMainAgentRolloutRevision | None:
+        """Read-only rollout revision lookup for candidate diagnostics."""
+        return self.db.get(AssistantMainAgentRolloutRevision, revision_id)
+
     def create_prepared_revision(
         self, data: PreparedRolloutRevision
     ) -> AssistantMainAgentRolloutRevision:
@@ -128,6 +135,83 @@ class AssistantRuntimeRepository:
             ),
             prepared_by_operator_id=data.prepared_by_operator_id,
             prepared_reason=data.prepared_reason,
+        )
+        self.db.add(row)
+        self.db.flush()
+        return row
+
+    def append_bootstrap_gate_use(
+        self,
+        *,
+        rollout: AssistantMainAgentRolloutRevision,
+        closure: Any,
+        seed: Any,
+        profile_version: Any,
+        skill_package: Any,
+        skill_version: Any,
+        bootstrap_request_id: UUID,
+        operator_id: UUID,
+    ) -> AssistantRuntimeBootstrapGateUse:
+        """Persist immutable trusted-bootstrap authorization provenance.
+
+        Bootstrap is a build-owned seed path, not an evaluation publication.
+        This dedicated row records the exact server-derived Profile, Skill,
+        Model, seed and closure inputs that activation must revalidate.
+        Callers own the outer initialization transaction and therefore this
+        method intentionally flushes but never commits.
+        """
+        row = AssistantRuntimeBootstrapGateUse(
+            action="system_bootstrap",
+            rollout_revision_id=rollout.id,
+            rollout_revision_digest=require_sha256(
+                str(rollout.revision_digest),
+                field_name="rollout_revision_digest",
+            ),
+            profile_version_id=profile_version.id,
+            profile_content_digest=require_sha256(
+                str(profile_version.content_digest),
+                field_name="profile_content_digest",
+            ),
+            skill_package_id=skill_package.id,
+            skill_version_id=skill_version.id,
+            skill_version_digest=require_sha256(
+                str(skill_version.version_digest),
+                field_name="skill_version_digest",
+            ),
+            model_id=closure.model_id,
+            model_identity_digest=require_sha256(
+                str(closure.model_identity_digest),
+                field_name="model_identity_digest",
+            ),
+            seed_manifest_digest=require_sha256(
+                str(seed.manifest.manifest_digest),
+                field_name="seed_manifest_digest",
+            ),
+            seed_contract_digest=require_sha256(
+                str(seed.manifest.seed_contract_digest),
+                field_name="seed_contract_digest",
+            ),
+            package_closure_digest=require_sha256(
+                str(closure.package_closure_digest),
+                field_name="package_closure_digest",
+            ),
+            capability_closure_digest=require_sha256(
+                str(closure.capability_closure_digest),
+                field_name="capability_closure_digest",
+            ),
+            build_revision=str(closure.build_revision),
+            runtime_contract_version=int(closure.runtime_contract_version),
+            checkpoint_codec_version=int(closure.checkpoint_codec_version),
+            capability_feature_digest=require_sha256(
+                str(closure.capability_feature_digest),
+                field_name="capability_feature_digest",
+            ),
+            closure_digest=require_sha256(
+                str(closure.closure_digest),
+                field_name="closure_digest",
+            ),
+            bootstrap_request_id=bootstrap_request_id,
+            operator_id=operator_id,
         )
         self.db.add(row)
         self.db.flush()

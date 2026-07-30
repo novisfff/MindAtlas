@@ -10,6 +10,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
+from sqlalchemy import delete, update
 
 from tests._bootstrap import bootstrap_backend_imports, reset_caches
 from tests._db import make_session
@@ -298,6 +299,64 @@ def test_first_activation_sets_pointer_and_enables_new_runs(harness):
     assert control.active_rollout_revision_id == prepared.rollout_revision_id
     assert control.state_revision == 1
     assert control.new_runs_enabled is True
+
+
+def test_bootstrap_activation_requires_durable_bootstrap_gate_use(harness):
+    from app.assistant.runtime.activation import RuntimeGateEvidenceMissing
+    from app.assistant.runtime.contracts import ActivateRolloutRequest
+    from app.assistant.runtime.models import AssistantRuntimeBootstrapGateUse
+
+    prepared = harness.bootstrap_prepared()
+    harness.db.execute(
+        delete(AssistantRuntimeBootstrapGateUse).where(
+            AssistantRuntimeBootstrapGateUse.rollout_revision_id
+            == prepared.rollout_revision_id
+        )
+    )
+    harness.db.commit()
+
+    with pytest.raises(RuntimeGateEvidenceMissing) as excinfo:
+        harness.service().activate(
+            prepared.rollout_revision_id,
+            ActivateRolloutRequest(
+                expected_control_revision=0,
+                request_id=REQUEST_ID,
+                reason="activation requires persisted bootstrap provenance",
+            ),
+            principal=harness.principal,
+        )
+
+    assert excinfo.value.reason_code == "bootstrap_gate_use_missing"
+
+
+def test_bootstrap_activation_rejects_tampered_bootstrap_gate_use(harness):
+    from app.assistant.runtime.activation import RuntimeGateEvidenceMissing
+    from app.assistant.runtime.contracts import ActivateRolloutRequest
+    from app.assistant.runtime.models import AssistantRuntimeBootstrapGateUse
+
+    prepared = harness.bootstrap_prepared()
+    harness.db.execute(
+        update(AssistantRuntimeBootstrapGateUse)
+        .where(
+            AssistantRuntimeBootstrapGateUse.rollout_revision_id
+            == prepared.rollout_revision_id
+        )
+        .values(closure_digest="0" * 64)
+    )
+    harness.db.commit()
+
+    with pytest.raises(RuntimeGateEvidenceMissing) as excinfo:
+        harness.service().activate(
+            prepared.rollout_revision_id,
+            ActivateRolloutRequest(
+                expected_control_revision=0,
+                request_id=REQUEST_ID,
+                reason="activation rejects tampered bootstrap provenance",
+            ),
+            principal=harness.principal,
+        )
+
+    assert excinfo.value.reason_code == "bootstrap_gate_use_invalid"
 
 
 def test_identical_activation_retry_replays_exact_result(harness):

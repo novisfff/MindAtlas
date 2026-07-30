@@ -36,6 +36,7 @@ from app.assistant.runtime.models import (
 )
 from app.assistant.runtime.readiness import (
     AssistantReadinessService,
+    project_activation_candidate_readiness,
     project_authenticated_readiness,
 )
 from app.assistant.runtime.repository import AssistantRuntimeRepository
@@ -183,6 +184,39 @@ def list_rollouts(
             "control": _control_summary(control),
             "revisions": [_revision_summary(row) for row in revisions],
         }
+    )
+
+
+@router.get(
+    "/rollouts/{revision_id}/activation-readiness",
+    name="assistant_runtime_activation_candidate_readiness",
+)
+def get_rollout_activation_readiness(
+    revision_id: UUID,
+    principal: OperatorPrincipal = Depends(require_viewer_principal),
+    db: Session = Depends(get_db),
+) -> ApiResponse:
+    """Safe, revision-specific activation diagnostics for an operator UI.
+
+    Global readiness deliberately evaluates the active control pointer.  This
+    endpoint is only for deciding whether a separate immutable revision has a
+    compatible worker before an activation attempt; activation revalidates the
+    same candidate under locks.
+    """
+    del principal
+    repo = AssistantRuntimeRepository(db)
+    target = repo.get_revision(revision_id)
+    if target is None:
+        raise _map_activation_error(RolloutNotPrepared())
+    snapshot = AssistantReadinessService(db).evaluate_activation_candidate(
+        rollout_revision_id=target.id
+    )
+    return ApiResponse.ok(
+        project_activation_candidate_readiness(
+            snapshot,
+            rollout_revision_id=target.id,
+            build_revision=str(target.build_revision),
+        )
     )
 
 

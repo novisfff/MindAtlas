@@ -392,3 +392,35 @@ def test_competing_activation_has_one_cas_winner():
             assert control.new_runs_enabled is True
         finally:
             verify.close()
+
+
+def test_bootstrap_gate_use_is_immutable_on_postgres():
+    """The migration trigger protects bootstrap authorization provenance."""
+    from sqlalchemy.exc import DBAPIError, DatabaseError
+
+    with _engine() as engine:
+        _drop_public_schema(engine)
+        _upgrade_to_plan2_head()
+        Session = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+        setup = Session()
+        try:
+            state = _seed_runtime(setup)
+        finally:
+            setup.close()
+
+        with pytest.raises(
+            (DatabaseError, DBAPIError),
+            match="bootstrap gate use is immutable",
+        ):
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "UPDATE assistant_runtime_bootstrap_gate_use "
+                        "SET closure_digest = :digest "
+                        "WHERE rollout_revision_id = :revision_id"
+                    ),
+                    {
+                        "digest": "f" * 64,
+                        "revision_id": state["first_revision_id"],
+                    },
+                )

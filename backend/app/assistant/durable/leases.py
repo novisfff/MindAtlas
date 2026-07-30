@@ -103,9 +103,9 @@ def compute_retry_backoff(
 class RunLeaseService:
     """Claim compatible Runs and maintain leases for one worker identity."""
 
-    # Max candidates locked per claim poll. Codec is only rechecked post-lock, so
-    # a single LIMIT 1 abort would starve later compatible Runs behind a
-    # codec-incompatible head. Batch + walk preserves SKIP LOCKED semantics.
+    # Max compatible candidates locked per claim poll. The SQL predicate below
+    # filters by the worker's supported checkpoint codecs before this limit, so
+    # incompatible codec heads cannot starve a later compatible Run.
     _CLAIM_CANDIDATE_BATCH = 16
 
     def __init__(
@@ -182,8 +182,25 @@ class RunLeaseService:
         ``WorkerCompatibility.from_run`` — never by rewriting Run requirements
         to match this Worker.
         """
-        # Eligibility prefilter (status/due/build/contract/feature). Full codec
-        # membership is rechecked on each locked candidate via from_run.
+        # Eligibility prefilter (status/due/build/contract/feature/codec). Full
+        # compatibility is still rechecked on every locked candidate via
+        # WorkerCompatibility.from_run before claiming it.
+        try:
+            supported_codec_versions = tuple(
+                sorted(
+                    {
+                        int(version)
+                        for version in self.identity.supported_checkpoint_codec_versions
+                    }
+                )
+            )
+        except (TypeError, ValueError):
+            self.db.rollback()
+            return None
+        if not supported_codec_versions:
+            self.db.rollback()
+            return None
+
         expired_lease = or_(
             AssistantChatRun.lease_expires_at.is_(None),
             AssistantChatRun.lease_expires_at <= now,
@@ -210,6 +227,9 @@ class RunLeaseService:
             == int(self.identity.runtime_contract_version),
             AssistantChatRun.required_capability_feature_digest
             == str(self.identity.capability_feature_digest),
+            AssistantChatRun.required_checkpoint_codec_version.in_(
+                supported_codec_versions
+            ),
             status_predicate,
             due_predicate,
         )
@@ -220,8 +240,9 @@ class RunLeaseService:
         )
 
         # Prefer SKIP LOCKED on PostgreSQL; SQLite falls back gracefully.
-        # Fetch a batch so a codec-incompatible earliest Run does not starve
-        # later compatible candidates in the same poll.
+        # The codec membership predicate is deliberately in SQL, before LIMIT:
+        # a long prefix of codec-incompatible rows must never hide a compatible
+        # Run beyond this candidate batch.
         try:
             stmt = (
                 select(AssistantChatRun)

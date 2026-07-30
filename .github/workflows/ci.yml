@@ -206,6 +206,8 @@ jobs:
       MINDATLAS_TEST_POSTGRES_URL: postgresql://mindatlas:mindatlas@localhost:5432/mindatlas_test_plan08_ci
       # Minimal app config required by settings import during alembic env.
       AI_PROVIDER_FERNET_KEY: "07v02gVBdreNrXjLJZkIMdohHtgy6aDFKBHxakHjbrQ="
+      # Plan 2 downgrade is intentionally permitted only in an explicit test env.
+      APP_ENV: test
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -401,14 +403,20 @@ jobs:
             tests/test_health_readiness_api.py \
             tests/test_assistant_runtime_readiness.py -q
 
-      - name: PostgreSQL readiness, activation, and admission suites
+      - name: PostgreSQL readiness, bootstrap, activation, admission, and lease suites
         run: |
           set -euo pipefail
           # Hard-fail when URL missing via MINDATLAS_REQUIRE_POSTGRES=1 (job env).
           python -m pytest \
             tests/test_health_readiness_postgres.py \
+            tests/test_assistant_runtime_migration_postgres.py \
+            tests/test_assistant_initialization_atomicity_postgres.py \
+            tests/test_assistant_runtime_readiness_postgres.py \
             tests/test_assistant_runtime_activation_postgres.py \
-            tests/test_assistant_atomic_admission_postgres.py -q
+            tests/test_assistant_atomic_admission_postgres.py \
+            tests/test_assistant_worker_claim_compatibility_postgres.py \
+            tests/test_durable_worker_lease_postgres.py \
+            tests/test_system_initialization_concurrency_postgres.py -q
 
       - name: Reject skipped release-critical readiness postgres suites
         run: |
@@ -423,8 +431,14 @@ jobs:
           env["MINDATLAS_REQUIRE_POSTGRES"] = "1"
           suites = [
               "tests/test_health_readiness_postgres.py",
+              "tests/test_assistant_runtime_migration_postgres.py",
+              "tests/test_assistant_initialization_atomicity_postgres.py",
+              "tests/test_assistant_runtime_readiness_postgres.py",
               "tests/test_assistant_runtime_activation_postgres.py",
               "tests/test_assistant_atomic_admission_postgres.py",
+              "tests/test_assistant_worker_claim_compatibility_postgres.py",
+              "tests/test_durable_worker_lease_postgres.py",
+              "tests/test_system_initialization_concurrency_postgres.py",
           ]
           proc = subprocess.run(
               [sys.executable, "-m", "pytest", *suites, "-q"],

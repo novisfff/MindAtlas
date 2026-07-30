@@ -323,6 +323,43 @@ def test_stage_bootstrap_prepares_not_activates(db):
     assert prepared.rollout_control_revision == 0
 
 
+def test_stage_bootstrap_persists_exact_system_bootstrap_gate_use(db):
+    from app.assistant.runtime.bootstrap import AssistantSystemBootstrapper
+    from app.assistant.runtime.closure import AssistantRuntimeClosureBuilder
+    from app.assistant.runtime.models import AssistantRuntimeBootstrapGateUse
+
+    bootstrapper = AssistantSystemBootstrapper(db)
+    permit = bootstrapper.lock_and_verify_fresh_preconditions()
+    operator, core = stage_operator_and_core_fixture(db)
+    prepared = bootstrapper.stage_bootstrap(
+        bootstrap_request_fixture(
+            operator_id=operator.id,
+            model_id=core.llm_model_id,
+            fresh_permit=permit,
+        )
+    )
+
+    gate_use = (
+        db.query(AssistantRuntimeBootstrapGateUse)
+        .filter(
+            AssistantRuntimeBootstrapGateUse.rollout_revision_id
+            == prepared.rollout_revision_id
+        )
+        .one()
+    )
+    closure = AssistantRuntimeClosureBuilder(db).build(
+        rollout_revision_id=prepared.rollout_revision_id,
+        lock=True,
+    )
+    assert gate_use.action == "system_bootstrap"
+    assert gate_use.profile_version_id == prepared.profile_version_id
+    assert gate_use.skill_version_id == prepared.skill_version_id
+    assert gate_use.model_id == core.llm_model_id
+    assert gate_use.seed_manifest_digest == prepared.seed_manifest_digest
+    assert gate_use.rollout_revision_digest == prepared.rollout_revision_digest
+    assert gate_use.closure_digest == closure.closure_digest
+
+
 def test_stage_bootstrap_requires_matching_operator_and_permit(db):
     from app.assistant.runtime.bootstrap import (
         AssistantBootstrapRejected,

@@ -41,6 +41,7 @@ from app.assistant.durable.repository import (
 from app.assistant.durable.worker_registry import (
     WorkerIdentity,
     WorkerRegistry,
+    default_capability_feature_digest,
 )
 from app.common.time import utcnow
 from app.config import get_settings
@@ -612,6 +613,13 @@ def run_healthcheck(*, state_path: Path | None = None) -> int:
         )
         return 1
 
+    if state.get("ok") is not True:
+        print(
+            json.dumps({"ok": False, "reason": "state_file_unhealthy"}),
+            flush=True,
+        )
+        return 1
+
     worker_id = str(state.get("worker_id") or "").strip()
     build = str(state.get("app_build_revision") or "").strip()
     if not worker_id or not build:
@@ -635,6 +643,9 @@ def run_healthcheck(*, state_path: Path | None = None) -> int:
             ),
             # Align process health with readiness/admission: current release codec.
             required_checkpoint_codec_version=CURRENT_CHECKPOINT_CODEC_VERSION,
+            # Health must prove this worker matches the release capability
+            # contract, never merely the digest it registered for itself.
+            required_capability_feature_digest=default_capability_feature_digest(),
             registration_ttl=ttl,
         )
     finally:

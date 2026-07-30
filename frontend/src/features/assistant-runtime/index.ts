@@ -1,6 +1,7 @@
 export {
   activateAssistantRollout,
   getAssistantReadinessDiagnostics,
+  getAssistantRolloutActivationReadiness,
   getPublicAssistantReadiness,
   listAssistantRollouts,
   prepareAssistantRollout,
@@ -11,6 +12,7 @@ export type {
   ActivateRolloutBody,
   AssistantReadinessDiagnostics,
   AssistantReadinessReason,
+  AssistantRolloutActivationReadiness,
   AssistantRolloutsList,
   PreparedRolloutResult,
   PrepareRolloutBody,
@@ -23,6 +25,7 @@ export {
   assistantRuntimeKeys,
   useActivateAssistantRolloutMutation,
   useAssistantReadinessDiagnosticsQuery,
+  useAssistantRolloutActivationReadinessQuery,
   useAssistantRolloutsQuery,
   usePrepareAssistantRolloutMutation,
   usePublicAssistantReadinessQuery,

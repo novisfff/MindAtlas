@@ -12,7 +12,13 @@ from __future__ import annotations
 
 import unittest
 import uuid
+from contextlib import redirect_stdout
 from datetime import timedelta
+from io import StringIO
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 from tests._bootstrap import bootstrap_backend_imports, reset_caches
 
@@ -231,10 +237,15 @@ class WorkerRegistryUnitTests(unittest.TestCase):
         )
 
     def test_healthcheck_fresh_compatible(self) -> None:
-        from app.assistant.durable.worker_registry import WorkerRegistry
+        from app.assistant.durable.worker_registry import (
+            WorkerRegistry,
+            default_capability_feature_digest,
+        )
 
         reg = WorkerRegistry(self.db)
-        identity = _identity()
+        identity = _identity(
+            capability_feature_digest=default_capability_feature_digest()
+        )
         reg.register(identity)
         result = reg.healthcheck(
             worker_id=identity.worker_id,
@@ -355,6 +366,73 @@ class WorkerRegistryUnitTests(unittest.TestCase):
             [r.worker_id for r in rows],
             ["worker-a", "worker-m", "worker-z"],
         )
+
+
+class WorkerDockerHealthcheckTests(unittest.TestCase):
+    def setUp(self) -> None:
+        reset_caches()
+        from tests._db import make_session
+
+        self.db = make_session()
+
+    def tearDown(self) -> None:
+        self.db.close()
+
+    def test_healthcheck_rejects_unsuccessful_worker_state_without_db_lookup(self) -> None:
+        from app.assistant.worker import run_healthcheck
+
+        with TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "worker-state.json"
+            state_path.write_text(
+                '{"ok": false, "worker_id": "worker-1", '
+                '"app_build_revision": "build-test-1", '
+                '"reason": "schema_incompatible"}',
+                encoding="utf-8",
+            )
+            session_factory = MagicMock(
+                side_effect=AssertionError("unsuccessful state must not query DB")
+            )
+            with (
+                patch("app.assistant.worker.SessionLocal", session_factory),
+                redirect_stdout(StringIO()),
+            ):
+                exit_code = run_healthcheck(state_path=state_path)
+
+        self.assertEqual(exit_code, 1)
+        session_factory.assert_not_called()
+
+    def test_healthcheck_rejects_registration_with_release_feature_digest_mismatch(self) -> None:
+        from app.assistant.durable.worker_registry import WorkerRegistry
+        from app.assistant.worker import run_healthcheck
+
+        identity = _identity(capability_feature_digest=DIGEST)
+        WorkerRegistry(self.db).register(identity)
+        with TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "worker-state.json"
+            state_path.write_text(
+                (
+                    "{"
+                    '"ok": true, '
+                    f'"worker_id": "{identity.worker_id}", '
+                    f'"app_build_revision": "{identity.app_build_revision}", '
+                    f'"runtime_contract_version": {identity.runtime_contract_version}'
+                    "}"
+                ),
+                encoding="utf-8",
+            )
+            with (
+                patch("app.assistant.worker.SessionLocal", return_value=self.db),
+                patch(
+                    "app.assistant.worker.get_settings",
+                    return_value=SimpleNamespace(
+                        assistant_worker_registration_ttl_sec=60
+                    ),
+                ),
+                redirect_stdout(StringIO()),
+            ):
+                exit_code = run_healthcheck(state_path=state_path)
+
+        self.assertEqual(exit_code, 1)
 
 
 if __name__ == "__main__":

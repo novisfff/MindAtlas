@@ -1,10 +1,13 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
 
 import { AssistantRuntimeActivationCard } from './AssistantRuntimeActivationCard'
-import type { AssistantReadinessDiagnostics } from '../api/runtime'
+import type {
+  AssistantReadinessDiagnostics,
+  AssistantRolloutActivationReadiness,
+} from '../api/runtime'
 import * as runtimeApi from '../api/runtime'
 import { assistantRuntimeKeys } from '../queries'
 
@@ -85,6 +88,7 @@ function renderActivationCard(
     preparedRolloutRevisionId?: string | null
     rolloutControlRevision?: number | null
     diagnostics?: AssistantReadinessDiagnostics | null
+    candidateReadiness?: AssistantRolloutActivationReadiness | null
     onActivated?: () => void
   },
   options?: { queryClient?: QueryClient },
@@ -104,6 +108,7 @@ function renderActivationCard(
         preparedRolloutRevisionId={props.preparedRolloutRevisionId ?? PREPARED_ID}
         rolloutControlRevision={props.rolloutControlRevision ?? 0}
         diagnostics={props.diagnostics ?? diagnostics()}
+        candidateReadiness={props.candidateReadiness}
         onActivated={props.onActivated}
       />,
       { wrapper: Wrapper },
@@ -139,6 +144,10 @@ describe('AssistantRuntimeActivationCard', () => {
     })
   })
 
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
   it('waits for a compatible worker and does not auto-activate', async () => {
     renderActivationCard({
       diagnostics: diagnostics({
@@ -170,6 +179,49 @@ describe('AssistantRuntimeActivationCard', () => {
     const body = activateSpy.mock.calls[0][1] as { requestId: string }
     expect(typeof body.requestId).toBe('string')
     expect(body.requestId.length).toBeGreaterThan(8)
+  })
+
+  it('uses candidate worker diagnostics instead of a different active rollout', () => {
+    const candidateReadiness: AssistantRolloutActivationReadiness = {
+      rolloutRevisionId: PREPARED_ID,
+      ready: true,
+      reasonCodes: [],
+      profileVersionId: 'profile-v',
+      modelId: 'model-1',
+      compatibleWorkerIds: ['candidate-worker'],
+      buildRevision: 'build-candidate',
+    }
+
+    renderActivationCard({
+      diagnostics: diagnostics({
+        ready: false,
+        reasonCodes: ['worker_unavailable'],
+        activeRolloutRevisionId: 'old-active-rollout',
+        compatibleWorkerIds: [],
+        buildRevision: 'build-old',
+      }),
+      candidateReadiness,
+    })
+
+    expect(screen.getByRole('button', { name: /activate/i })).toBeEnabled()
+  })
+
+  it('uses an RFC 4122 UUID request id when crypto.randomUUID is unavailable', async () => {
+    vi.stubGlobal('crypto', {
+      getRandomValues: (bytes: Uint8Array) => {
+        bytes.fill(0)
+        return bytes
+      },
+    })
+    renderActivationCard(compatiblePreparedRuntime())
+
+    fireEvent.click(screen.getByRole('button', { name: /activate/i }))
+
+    await waitFor(() => expect(activateSpy).toHaveBeenCalledTimes(1))
+    const body = activateSpy.mock.calls[0][1] as { requestId: string }
+    expect(body.requestId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    )
   })
 
   it('creates a fresh request id per click', async () => {

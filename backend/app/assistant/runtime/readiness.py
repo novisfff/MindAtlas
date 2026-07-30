@@ -206,6 +206,47 @@ class AssistantReadinessService:
         """Admission/activation path: control already selected FOR UPDATE."""
         return self._evaluate(control=control, lock=True)
 
+    def evaluate_activation_candidate(
+        self,
+        *,
+        rollout_revision_id: UUID,
+    ) -> AssistantReadinessSnapshot:
+        """Observe readiness for one selected rollout's activation candidate.
+
+        This is deliberately distinct from ``evaluate()``: once a rollout is
+        active, the global diagnostic must continue to describe that active
+        runtime, while an operator may need to assess a different immutable
+        revision before switching to it.  The result is advisory only; the
+        mutation path repeats the candidate evaluation under locks.
+        """
+        try:
+            nested = self.db.begin_nested()
+        except Exception:
+            nested = None
+        try:
+            try:
+                candidate = self.closure_builder.build(
+                    rollout_revision_id=rollout_revision_id,
+                    lock=False,
+                )
+            except RuntimeClosureDrift:
+                return self._blocked("runtime_closure_drift")
+            except Exception:
+                return self._blocked("runtime_closure_drift")
+            return self._evaluate(
+                control=self.repo.get_control(),
+                lock=False,
+                candidate=candidate,
+                ignore_rollout_inactive=True,
+                ignore_new_runs_disabled=True,
+            )
+        finally:
+            if nested is not None:
+                try:
+                    nested.rollback()
+                except Exception:
+                    pass
+
     def evaluate_activation_candidate_locked(
         self,
         *,
@@ -396,10 +437,38 @@ def project_authenticated_readiness(
     }
 
 
+def project_activation_candidate_readiness(
+    snapshot: AssistantReadinessSnapshot,
+    *,
+    rollout_revision_id: UUID,
+    build_revision: str,
+) -> dict[str, Any]:
+    """Safe diagnostic projection for one selected activation candidate.
+
+    It intentionally omits ``activeRolloutRevisionId``: the target is not
+    necessarily active, so putting it in that field would make the client
+    confuse candidate compatibility with control-pointer state.
+    """
+    return {
+        "rolloutRevisionId": str(rollout_revision_id),
+        "ready": bool(snapshot.ready),
+        "reasonCodes": list(snapshot.reason_codes),
+        "profileVersionId": (
+            str(snapshot.profile_version_id)
+            if snapshot.profile_version_id is not None
+            else None
+        ),
+        "modelId": str(snapshot.model_id) if snapshot.model_id is not None else None,
+        "compatibleWorkerIds": list(snapshot.compatible_worker_ids),
+        "buildRevision": str(build_revision),
+    }
+
+
 __all__ = (
     "AssistantReadinessService",
     "Plan2AlembicHeadCompatibility",
     "RuntimeSchemaCompatibility",
+    "project_activation_candidate_readiness",
     "project_authenticated_readiness",
     "project_public_readiness",
     "read_single_alembic_version",

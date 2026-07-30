@@ -779,22 +779,24 @@ class _FakeInner:
 
 
 def _seed_run(db, *, mode: str = "enforced", status: str = "running", revision: int = 1):
-    from app.assistant.models import AssistantChatRun, Conversation
+    from app.assistant.models import Conversation
     from app.assistant.durable.models import (
         AssistantRunArtifact,
         AssistantRunManifestRevision,
     )
     from app.assistant.durable.repository import LeaseToken
+    from tests.assistant_runtime_support import make_main_agent_run
     import hashlib
     import os
 
     conv = Conversation(title=f"t-{uuid.uuid4().hex[:6]}")
     db.add(conv)
     db.flush()
-    run = AssistantChatRun(
-        conversation_id=conv.id,
+    run = make_main_agent_run(
+        db,
+        conversation=conv,
         status=status,
-        runtime_kind="main_agent",
+        build_revision="b1",
         runtime_contract_version=1,
         required_app_build_revision="b1",
         capability_ledger_mode=mode,
@@ -803,9 +805,6 @@ def _seed_run(db, *, mode: str = "enforced", status: str = "running", revision: 
         lease_generation=1,
         memory_commit_status="pending",
     )
-    db.add(run)
-    db.commit()
-    db.refresh(run)
     manifest = AssistantRunManifestRevision(
         run_id=run.id,
         revision=1,

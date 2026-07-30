@@ -380,7 +380,7 @@ class WorkerRegistry:
         app_build_revision: str,
         runtime_contract_version: int = RUNTIME_CONTRACT_VERSION,
         required_checkpoint_codec_version: int = CURRENT_CHECKPOINT_CODEC_VERSION,
-        required_capability_feature_digest: str | None = None,
+        required_capability_feature_digest: str = default_capability_feature_digest(),
         registration_ttl: timedelta | None = None,
     ) -> dict[str, Any]:
         """Validate a fresh compatible registration (not mere PID liveness).
@@ -407,17 +407,12 @@ class WorkerRegistry:
                 "heartbeat_at": row.heartbeat_at.isoformat() if row.heartbeat_at else None,
                 "draining_at": row.draining_at.isoformat() if row.draining_at else None,
             }
-        digest = required_capability_feature_digest
-        if digest is None:
-            # Self-check against the worker's own advertised digest when the
-            # caller only validates process/build/codec freshness.
-            digest = str(row.capability_feature_digest or "")
         try:
             compat = WorkerCompatibility(
                 app_build_revision=app_build_revision,
                 runtime_contract_version=runtime_contract_version,
                 required_checkpoint_codec_version=required_checkpoint_codec_version,
-                required_capability_feature_digest=digest,
+                required_capability_feature_digest=required_capability_feature_digest,
             )
         except ValueError:
             return {
