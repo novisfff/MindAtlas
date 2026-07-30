@@ -93,7 +93,6 @@ def _reset_schema(engine: Engine) -> None:
     with engine.begin() as conn:
         conn.execute(text("DROP SCHEMA public CASCADE"))
         conn.execute(text("CREATE SCHEMA public"))
-        conn.execute(text("GRANT ALL ON SCHEMA public TO postgres"))
         conn.execute(text("GRANT ALL ON SCHEMA public TO public"))
 
 

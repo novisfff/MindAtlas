@@ -138,29 +138,17 @@ def _table_exists(conn, table: str) -> bool:
 
 
 def _ensure_head() -> None:
-    """Upgrade disposable DB to sole Plan 09 head (destructive OK).
-
-    Idempotent when already at head. If a previous interrupted cycle left eval
-    tables while alembic_version lagged, stamp to head rather than re-running
-    create_table.
-    """
+    """Create the exact Plan 09 schema from a disposable empty database."""
     destructive = os.environ.get("MINDATLAS_TEST_POSTGRES_DESTRUCTIVE", "").strip()
     if destructive != "1":
         pytest.skip("MINDATLAS_TEST_POSTGRES_DESTRUCTIVE=1 required for upgrade")
     _configure_database_env(_POSTGRES_URL)
     with _engine() as engine:
-        try:
-            current = _current_revision(engine)
-        except Exception:
-            current = None
-        if current == PLAN09_HEAD:
-            return
-        with engine.connect() as conn:
-            head_schema_present = _table_exists(conn, "assistant_skill_publish_gate")
-    if head_schema_present:
-        _run_alembic("stamp", PLAN09_HEAD)
-    else:
-        _run_alembic("upgrade", PLAN09_HEAD)
+        with engine.begin() as conn:
+            conn.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
+            conn.execute(text("CREATE SCHEMA public"))
+            conn.execute(text("GRANT ALL ON SCHEMA public TO public"))
+    _run_alembic("upgrade", PLAN09_HEAD)
     with _engine() as engine:
         assert _current_revision(engine) == PLAN09_HEAD, (
             f"expected {PLAN09_HEAD}, got {_current_revision(engine)}"

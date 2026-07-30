@@ -56,8 +56,8 @@ INVENTORY_ALLOWLIST: frozenset[str] = frozenset(
         "test_assistant_runtime_config.py:27",
         "test_assistant_runtime_migration_postgres.py:420",
         "test_durable_main_agent_runner.py:156",
-        "test_durable_run_migration_postgres.py:508",
-        "test_durable_run_migration_postgres.py:517",
+        "test_durable_run_migration_postgres.py:490",
+        "test_durable_run_migration_postgres.py:499",
         "test_durable_run_repository.py:910",
         "test_main_agent_golden_create_entry.py:92",
     }
@@ -173,6 +173,17 @@ class MainAgentOnlyLiveImportBoundaryTests(unittest.TestCase):
     def test_main_agent_rollout_module_is_removed(self) -> None:
         path = LIVE_APP_ROOT / "assistant" / "main_agent" / "rollout.py"
         self.assertFalse(path.exists(), "main_agent/rollout.py must be deleted")
+
+    def test_main_agent_service_has_no_legacy_fallback_scaffolding(self) -> None:
+        source = (LIVE_APP_ROOT / "assistant" / "main_agent" / "service.py").read_text(
+            "utf-8"
+        )
+        for retired_symbol in (
+            "AdmissionDecision",
+            "MainAgentFallbackState",
+            "_maybe_fallback",
+        ):
+            self.assertNotIn(retired_symbol, source)
 
     def test_selector_inventory_matches_allowlist_only(self) -> None:
         """rg inventory of retired selector strings under tests/ is allowlisted."""

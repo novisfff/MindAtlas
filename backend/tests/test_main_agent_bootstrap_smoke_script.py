@@ -154,6 +154,20 @@ def test_write_evidence_atomic_mode_and_round_trip(tmp_path: Path) -> None:
     assert reloaded["chatTerminalStatus"] == "completed"
 
 
+def test_committed_smoke_evidence_records_python311_verification() -> None:
+    evidence_path = (
+        Path(__file__).resolve().parents[2]
+        / "docs/superpowers/evidence/2026-07-28-main-agent-bootstrap-readiness.json"
+    )
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    validate_evidence(evidence)
+
+    suites = evidence["testSuites"]
+    assert isinstance(suites, dict)
+    assert suites["passed"] is True
+    assert str(suites["pythonVersion"]).startswith("3.11.")
+
+
 def test_safe_payload_fragments_stay_clean() -> None:
     serialized = json.dumps(_safe_payload()).lower()
     for fragment in SENSITIVE_FRAGMENTS:

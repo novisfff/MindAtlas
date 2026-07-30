@@ -233,50 +233,18 @@ def _current_revision(engine: Engine) -> str | None:
 
 
 
+def _drop_public_schema(engine: Engine) -> None:
+    with engine.begin() as conn:
+        conn.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
+        conn.execute(text("CREATE SCHEMA public"))
+        conn.execute(text("GRANT ALL ON SCHEMA public TO public"))
+
+
 def _reset_to_parent(engine: Engine) -> str:
-    """Bring DB to Task1 head (parent of evaluation workbench)."""
+    """Create the exact Task 1 parent schema from a disposable empty database."""
     task3 = _task3_revision()
-    try:
-        current = _current_revision(engine)
-    except Exception:
-        current = None
-    # Head may be residual after workbench (or the workbench itself). Whenever we
-    # are above PARENT_REVISION, prepare guarded Plan 09 downgrade then descend.
-    if current is not None and current != PARENT_REVISION:
-        prior = os.environ.get("MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK")
-        os.environ["MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK"] = "1"
-        try:
-            with engine.begin() as conn:
-                _prepare_plan09_downgrade(conn)
-            try:
-                _run_alembic("downgrade", PARENT_REVISION)
-            except Exception:
-                # Last resort: upgrade to the Plan 09 eval revision, then
-                # prepare and downgrade again.
-                _run_alembic("upgrade", COMPATIBILITY_HEAD)
-                with engine.begin() as conn:
-                    _prepare_plan09_downgrade(conn)
-                _run_alembic("downgrade", PARENT_REVISION)
-        finally:
-            if prior is None:
-                os.environ.pop("MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK", None)
-            else:
-                os.environ["MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK"] = prior
-    elif current != PARENT_REVISION:
-        try:
-            _run_alembic("upgrade", PARENT_REVISION)
-        except Exception:
-            prior = os.environ.get("MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK")
-            os.environ["MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK"] = "1"
-            try:
-                with engine.begin() as conn:
-                    _prepare_plan09_downgrade(conn)
-                _run_alembic("downgrade", PARENT_REVISION)
-            finally:
-                if prior is None:
-                    os.environ.pop("MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK", None)
-                else:
-                    os.environ["MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK"] = prior
+    _drop_public_schema(engine)
+    _run_alembic("upgrade", PARENT_REVISION)
     assert _current_revision(engine) == PARENT_REVISION, (
         f"expected parent {PARENT_REVISION}, got {_current_revision(engine)}"
     )
@@ -646,7 +614,7 @@ def test_immutable_triggers_and_uniqueness() -> None:
 
 def test_owner_kind_check_constraint() -> None:
     with _engine() as engine:
-        task3 = _task3_revision()
+        _reset_to_parent(engine)
         _run_alembic("upgrade", COMPATIBILITY_HEAD)
         with _session(engine) as session:
             with pytest.raises((DBAPIError, IntegrityError)):
@@ -683,7 +651,7 @@ def test_owner_kind_check_constraint() -> None:
 def test_evidence_provenance_constraints() -> None:
     """Task 5: provenance enum, fixture shape, synthetic gate ineligible."""
     with _engine() as engine:
-        task3 = _task3_revision()
+        _reset_to_parent(engine)
         _run_alembic("upgrade", COMPATIBILITY_HEAD)
         with _session(engine) as session:
             # Invalid provenance rejected.

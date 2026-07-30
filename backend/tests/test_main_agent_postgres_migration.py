@@ -232,71 +232,20 @@ def _clear_enabled_flags(conn) -> None:
     conn.execute(text("UPDATE assistant_main_agent_profile SET runtime_enabled = false"))
 
 
+def _drop_public_schema(engine: Engine) -> None:
+    with engine.begin() as conn:
+        conn.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
+        conn.execute(text("CREATE SCHEMA public"))
+        conn.execute(text("GRANT ALL ON SCHEMA public TO public"))
+
+
 def _reset_to_plan03_parent() -> None:
-    """Bring disposable DB to Plan 03 head (parent of Plan 04 flag migration)."""
+    """Create the exact Plan 03 parent schema from a disposable empty database."""
     _configure_database_env(_POSTGRES_URL)
     engine = create_engine(_as_sqlalchemy_url(_POSTGRES_URL), future=True)
     try:
-        try:
-            current = _current_revision(engine)
-        except Exception:
-            current = None
-
-        plan04 = None
-        try:
-            plan04 = _plan04_revision()
-        except AssertionError:
-            plan04 = None
-
-        if current is not None and current != PLAN03_HEAD:
-            # Descendant of Plan 03 (Plan 04/05/06/...): clear enable flags when
-            # present, then downgrade through the chain to Plan 03.
-            if plan04 is not None:
-                with engine.begin() as conn:
-                    _clear_enabled_flags(conn)
-                    if current in {
-                        PLAN06_HEAD,
-                        PLAN07_HEAD,
-                        PLAN08_LEDGER_REVISION,
-                        PLAN08_LIFECYCLE_REVISION,
-                        PLAN08_HEAD,
-                        PLAN09_LIFECYCLE_REVISION,
-                        PLAN09_EVAL_REVISION,
-                        PLAN09_HEAD,
-                    }:
-                        from tests.test_durable_interrupt_repository_postgres import (
-                            _purge_interrupt_and_active,
-                        )
-
-                        _purge_interrupt_and_active(conn)
-            # Plan 06/08/09 downgrade guards: purge durable + Plan 09 evidence.
-            prior_ack = os.environ.get(
-                "MINDATLAS_PLAN08_DOWNGRADE_ACK_PURGE_LEDGER_DATA"
-            )
-            prior_eval_ack = os.environ.get("MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK")
-            os.environ["MINDATLAS_PLAN08_DOWNGRADE_ACK_PURGE_LEDGER_DATA"] = "1"
-            os.environ["MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK"] = "1"
-            try:
-                with engine.begin() as conn:
-                    _prepare_plan09_downgrade(conn)
-                _run_alembic("downgrade", PLAN03_HEAD)
-            finally:
-                if prior_ack is None:
-                    os.environ.pop(
-                        "MINDATLAS_PLAN08_DOWNGRADE_ACK_PURGE_LEDGER_DATA", None
-                    )
-                else:
-                    os.environ[
-                        "MINDATLAS_PLAN08_DOWNGRADE_ACK_PURGE_LEDGER_DATA"
-                    ] = prior_ack
-                if prior_eval_ack is None:
-                    os.environ.pop("MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK", None)
-                else:
-                    os.environ["MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK"] = prior_eval_ack
-        elif current != PLAN03_HEAD:
-            # Mid/unknown state: ensure schema reaches parent via upgrade path.
-            _run_alembic("upgrade", PLAN03_HEAD)
-
+        _drop_public_schema(engine)
+        _run_alembic("upgrade", PLAN03_HEAD)
         assert _current_revision(engine) == PLAN03_HEAD, (
             f"expected Plan 03 parent {PLAN03_HEAD}, got {_current_revision(engine)}"
         )

@@ -1,12 +1,12 @@
 {
   "activeRuntimeKind": "main_agent",
-  "aggregateDigest": "337272a3832cae11fa16d36dcb9ada403d3c28bb3d1fa818cd893e9f61232ccf",
+  "aggregateDigest": "97b5c8ee7a2abf51b67812377677140e68b618684f32a20dfe8f20fc0bee1d09",
   "alembicHead": "b6e2d4f8a901",
-  "buildRevision": "pr60-audit-local",
+  "buildRevision": "ci-main-agent-bootstrap-smoke",
   "chatRunCount": 1,
   "chatTerminalStatus": "completed",
   "compatibleWorkerCount": 1,
-  "generatedAtUtc": "2026-07-30T04:20:22+00:00",
+  "generatedAtUtc": "2026-07-30T06:47:47+00:00",
   "healthStatus": "ok",
   "readinessTransitions": [
     "health_ok",
@@ -26,7 +26,7 @@
   "testSuites": {
     "passed": true,
     "pytestVersion": "9.1.1",
-    "pythonVersion": "3.12.13",
+    "pythonVersion": "3.11.15",
     "suiteCount": 1,
     "totalFailed": 0,
     "totalPassed": 32,

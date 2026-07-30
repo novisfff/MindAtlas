@@ -23,6 +23,7 @@ reset_caches()
 
 
 PLAN05_HEAD = "9ed6f561a381"
+PLAN06_REVISION = "6af373ef040f"
 DOWNGRADE_BLOCKED_TOKEN = "MINDATLAS_PLAN06_DOWNGRADE_BLOCKED_DURABLE_DATA"
 DOWNGRADE_ACK_ENV = "MINDATLAS_PLAN06_DOWNGRADE_ACK_PURGE_DURABLE_DATA"
 ACTIVE_STATUSES = (
@@ -110,22 +111,16 @@ def _err_text(exc: BaseException) -> str:
 
 
 def _plan06_revision() -> str:
-    """Resolve the sole child of Plan 05 head (Plan 06 durable foundation migration)."""
+    """Resolve the durable foundation migration, independent of the current head."""
     from alembic.script import ScriptDirectory
 
     script = ScriptDirectory.from_config(_alembic_config())
-    heads = script.get_heads()
-    assert len(heads) == 1, f"expected sole alembic head, got {heads}"
-    head = heads[0]
-    assert head != PLAN05_HEAD, (
-        f"Plan 06 migration missing: head is still parent {PLAN05_HEAD}"
-    )
-    rev = script.get_revision(head)
+    rev = script.get_revision(PLAN06_REVISION)
     assert rev is not None
     assert rev.down_revision == PLAN05_HEAD, (
         f"Plan 06 revision must revise {PLAN05_HEAD}, got down_revision={rev.down_revision}"
     )
-    return head
+    return PLAN06_REVISION
 
 
 def _table_exists(conn, table: str) -> bool:
@@ -237,33 +232,20 @@ def _purge_durable_data(conn) -> None:
     conn.execute(text("SET LOCAL session_replication_role = 'origin'"))
 
 
+def _drop_public_schema(engine: Engine) -> None:
+    with engine.begin() as conn:
+        conn.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
+        conn.execute(text("CREATE SCHEMA public"))
+        conn.execute(text("GRANT ALL ON SCHEMA public TO public"))
+
+
 def _reset_to_plan05_parent() -> None:
-    """Bring disposable DB to Plan 05 head (parent of Plan 06 durable migration)."""
+    """Create the exact Plan 05 parent schema from a disposable empty database."""
     _configure_database_env(_POSTGRES_URL)
     engine = create_engine(_as_sqlalchemy_url(_POSTGRES_URL), future=True)
     try:
-        try:
-            current = _current_revision(engine)
-        except Exception:
-            current = None
-
-        plan06 = None
-        try:
-            plan06 = _plan06_revision()
-        except AssertionError:
-            plan06 = None
-
-        if plan06 is not None and current == plan06:
-            with engine.begin() as conn:
-                _purge_durable_data(conn)
-            os.environ[DOWNGRADE_ACK_ENV] = "1"
-            try:
-                _run_alembic("downgrade", PLAN05_HEAD)
-            finally:
-                os.environ.pop(DOWNGRADE_ACK_ENV, None)
-        elif current != PLAN05_HEAD:
-            _run_alembic("upgrade", PLAN05_HEAD)
-
+        _drop_public_schema(engine)
+        _run_alembic("upgrade", PLAN05_HEAD)
         assert _current_revision(engine) == PLAN05_HEAD, (
             f"expected Plan 05 parent {PLAN05_HEAD}, got {_current_revision(engine)}"
         )

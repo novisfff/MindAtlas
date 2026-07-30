@@ -4498,10 +4498,17 @@ python3.11 -m venv .venv-plan2
 .venv-plan2/bin/python -m pip install --upgrade pip
 .venv-plan2/bin/python -m pip install -r requirements.txt pytest
 .venv-plan2/bin/python scripts/build_assistant_system_seed.py --check
-DATABASE_URL="$MINDATLAS_TEST_POSTGRES_URL" \
-  .venv-plan2/bin/alembic upgrade b6e2d4f8a901
-MINDATLAS_TEST_POSTGRES_URL="$MINDATLAS_TEST_POSTGRES_URL" \
-  .venv-plan2/bin/python -m pytest -q
+# Disposable Exit Gate only: guarded destructive revisions may traverse an
+# empty database only under the explicit test environment and override.
+# MINDATLAS_TEST_POSTGRES_URL must target a disposable database named
+# mindatlas_test_plan08_<suffix>, as required by the Plan 08 lifecycle suite.
+export APP_ENV=test
+export MINDATLAS_PLAN10_B2_TEST_OVERRIDE=1
+export MINDATLAS_REQUIRE_POSTGRES=1
+export MINDATLAS_TEST_POSTGRES_DESTRUCTIVE=1
+export DATABASE_URL="$MINDATLAS_TEST_POSTGRES_URL"
+.venv-plan2/bin/alembic upgrade b6e2d4f8a901
+.venv-plan2/bin/python -m pytest -q
 .venv-plan2/bin/python scripts/smoke_main_agent_bootstrap.py \
   --compose-file ../deploy/docker-compose.yml \
   --overlay-file ../deploy/compose.main-agent-smoke.yml \

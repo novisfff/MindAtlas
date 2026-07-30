@@ -39,7 +39,6 @@ from app.assistant.main_agent.service import (  # noqa: E402
     AdmissionContext,
     AssistantRuntimeRequest,
     MainAgentAdmissionError,
-    MainAgentFallbackState,
     MainAgentService,
     build_base_manifest_with_controls,
     compute_main_agent_effective_policy_digest,
@@ -129,23 +128,6 @@ def test_validate_profile_controls_and_entrypoint() -> None:
         }
     )
     assert validate_profile_for_assistant_chat(good_v2) == MAIN_AGENT_CONTROL_KEYS
-
-
-def test_run_state_tracks_side_effects_without_legacy_fallback() -> None:
-    """MainAgentFallbackState remains process-local tracking; never opens Legacy."""
-    state = MainAgentFallbackState()
-    assert state.user_output_started is False
-    state.mark_user_output()
-    assert state.user_output_started is True
-    assert state.snapshot()["user_output_started"] is True
-
-    state2 = MainAgentFallbackState()
-    state2.mark_capability_dispatch(side_effect="write_local")
-    assert state2.capability_dispatches_started == 1
-    assert state2.strongest_started_side_effect == "write_local"
-
-    # Automatic Legacy fallback API is gone — attribute must not exist.
-    assert not hasattr(state, "allows_automatic_fallback")
 
 
 def test_events_internal_visibility_and_safe_activation() -> None:

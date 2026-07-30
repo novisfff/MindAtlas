@@ -134,15 +134,15 @@ def _engine() -> Engine:
 
 
 def _reset_to_head() -> None:
-    """Bring disposable DB to Plan 01 head, discarding derived v2 rows if needed."""
+    """Create the Plan 09 historical schema from a disposable empty database."""
     _configure_database_env(_POSTGRES_URL)
-    # Prefer the last revision that still contains the legacy runtime.
-    try:
-        _run_alembic("upgrade", PLAN09_HEAD)
-    except Exception:
-        # If the historical head is blocked somehow, stamp parent then upgrade.
-        _run_alembic("stamp", PRE_PLAN01_HEAD)
-        _run_alembic("upgrade", PLAN09_HEAD)
+    with _engine() as engine:
+        with engine.begin() as conn:
+            conn.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
+            conn.execute(text("CREATE SCHEMA public"))
+            conn.execute(text("GRANT ALL ON SCHEMA public TO public"))
+    # This historical suite stops before Plan 10 removes the legacy tables.
+    _run_alembic("upgrade", PLAN09_HEAD)
 
 
 def _current_revision(engine: Engine) -> str | None:

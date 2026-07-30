@@ -32,4 +32,3 @@ class ApiResponse(BaseModel):
 def ok_json_content(data: Any = None, message: str = "OK") -> dict[str, Any]:
     """JSON-safe success envelope for status-bearing public routes (e.g. /ready)."""
     return ApiResponse.ok(data, message=message).as_json_dict()
-

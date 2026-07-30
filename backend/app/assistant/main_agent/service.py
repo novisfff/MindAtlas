@@ -8,7 +8,6 @@ state machine on the same durable Run.
 from __future__ import annotations
 
 import logging
-import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
@@ -93,9 +92,8 @@ MainAgentAdmissionMode = Literal["off", "shadow", "read_only"]
 
 RuntimeKind = Literal["main_agent"]
 ExecutionKind = Literal["production", "evaluation"]
-AdmissionDecision = Literal["legacy", "main_agent", "fallback_legacy", "fail"]
 
-# Safe admission / fallback reason codes
+# Safe admission reason codes
 MODE_OFF = "mode_off"
 MODE_SHADOW_PRODUCTION = "mode_shadow_production"
 PROFILE_UNAVAILABLE = "profile_unavailable"
@@ -108,32 +106,10 @@ BUDGET_INVALID = "budget_invalid"
 CATALOG_UNAVAILABLE = "catalog_unavailable"
 ADAPTER_UNAVAILABLE_BEFORE_REQUEST = "adapter_unavailable_before_request"
 ADAPTER_FAILURE_AFTER_REQUEST = "adapter_failure_after_request"
-FALLBACK_DISALLOWED = "fallback_disallowed"
-FALLBACK_SAFE = "fallback_safe"
 CANCELLED = "cancelled"
 MAIN_AGENT_COMPLETED = "main_agent_completed"
 MAIN_AGENT_FAILED = "main_agent_failed"
 NOOP_LIFECYCLE_REJECTED = "noop_lifecycle_rejected"
-
-FALLBACK_SAFE_REASONS = frozenset(
-    {
-        PROFILE_UNAVAILABLE,
-        PROFILE_DISABLED,
-        PROFILE_UNPUBLISHED,
-        MODEL_BINDING_MISSING,
-        MODEL_INELIGIBLE,
-        MODEL_TYPE_UNSUPPORTED,
-        PROBE_MISSING,
-        ADAPTER_UNAVAILABLE,
-        ADAPTER_UNAVAILABLE_BEFORE_REQUEST,
-        CATALOG_UNAVAILABLE,
-        BUDGET_INVALID,
-        CONTROL_MISSING,
-        CONTROL_UNSUPPORTED,
-        ENTRYPOINT_UNSUPPORTED,
-        "provider_retry_safe_before_output",
-    }
-)
 
 # Stable policy / budget / completion / recursion codes that may surface as
 # stop_reason or SafeProviderError.semantic_code after Provider request start.
@@ -221,78 +197,6 @@ class MainAgentAdmissionError(ValueError):
         super().__init__(self.reason_code)
 
 
-class MainAgentFallbackState:
-    """Process-local fallback gate (Plan 04 §4.3)."""
-
-    def __init__(self) -> None:
-        self._lock = threading.RLock()
-        self.provider_requests_started = 0
-        self.capability_dispatches_started = 0
-        self.strongest_started_side_effect: str | None = None
-        self.pending_interrupt = False
-        self.uncertain_result = False
-        self.user_output_started = False
-
-    def mark_provider_request(self) -> None:
-        with self._lock:
-            self.provider_requests_started += 1
-
-    def mark_capability_dispatch(self, *, side_effect: str | None = None) -> None:
-        with self._lock:
-            self.capability_dispatches_started += 1
-            if side_effect:
-                self.strongest_started_side_effect = _stronger_side_effect(
-                    self.strongest_started_side_effect, side_effect
-                )
-
-    def mark_user_output(self) -> None:
-        with self._lock:
-            self.user_output_started = True
-
-    def mark_pending_interrupt(self) -> None:
-        with self._lock:
-            self.pending_interrupt = True
-
-    def mark_uncertain(self) -> None:
-        with self._lock:
-            self.uncertain_result = True
-
-    def snapshot(self) -> dict[str, Any]:
-        with self._lock:
-            return {
-                "provider_requests_started": self.provider_requests_started,
-                "capability_dispatches_started": self.capability_dispatches_started,
-                "strongest_started_side_effect": self.strongest_started_side_effect,
-                "pending_interrupt": self.pending_interrupt,
-                "uncertain_result": self.uncertain_result,
-                "user_output_started": self.user_output_started,
-            }
-
-
-_SIDE_EFFECT_RANK = {
-    None: -1,
-    "none": 0,
-    "compute": 1,
-    "read": 2,
-    "draft": 3,
-    "write_local": 4,
-    "write_external": 5,
-    "unknown": 6,
-}
-
-
-def _stronger_side_effect(current: str | None, candidate: str | None) -> str | None:
-    if candidate is None:
-        return current
-    if current is None:
-        return candidate
-    return (
-        candidate
-        if _SIDE_EFFECT_RANK.get(candidate, -1) > _SIDE_EFFECT_RANK.get(current, -1)
-        else current
-    )
-
-
 @dataclass(frozen=True)
 class AssistantRuntimeRequest:
     run_id: UUID
@@ -352,7 +256,6 @@ class MainAgentRunState:
     run_id: UUID
     conversation_id: UUID
     manifest: ResolvedRunManifestRevision
-    fallback: MainAgentFallbackState = field(default_factory=MainAgentFallbackState)
     applied_skill_version_ids: set[UUID] = field(default_factory=set)
     final_text: str = ""
     status: str = "running"
@@ -893,11 +796,7 @@ class MainAgentService:
                 # Re-admission validates its dependencies; it never re-routes from env.
                 self.admit(mode="read_only", execution_kind=request.execution_kind)
             except MainAgentAdmissionError as exc:
-                return self._admission_failure_result(
-                    request=request,
-                    reason_code=exc.reason_code,
-                    events=events,
-                )
+                return self._failed_result(reason_code=exc.reason_code)
 
         assert self._admission is not None
         admission = self._admission
@@ -926,7 +825,6 @@ class MainAgentService:
             conversation_id=request.conversation_id,
             manifest=manifest,
         )
-        fallback = self._state.fallback
 
         # Shadow / evaluation: never write Message/L1/L2/title from MA output.
         persist = request.execution_kind == "production" and str(admission.mode) == "read_only"
@@ -954,13 +852,7 @@ class MainAgentService:
                         app_build_revision=self._app_build_revision,
                     )
                 except MainAgentAdmissionError as exc:
-                    return self._maybe_fallback(
-                        request=request,
-                        reason_code=exc.reason_code,
-                        events=events,
-                        fallback=fallback,
-                        admission=admission,
-                    )
+                    return self._failed_result(reason_code=exc.reason_code)
 
             ports = self._injected_ports
             policy_runtime = None
@@ -986,12 +878,8 @@ class MainAgentService:
                         "main agent policy composition failed run_id=%s",
                         request.run_id,
                     )
-                    return self._maybe_fallback(
-                        request=request,
-                        reason_code=ADAPTER_UNAVAILABLE_BEFORE_REQUEST,
-                        events=events,
-                        fallback=fallback,
-                        admission=admission,
+                    return self._failed_result(
+                        reason_code=ADAPTER_UNAVAILABLE_BEFORE_REQUEST
                     )
 
             # Reject no-op lifecycle for Main Agent composition.
@@ -999,12 +887,8 @@ class MainAgentService:
                 getattr(ports, "manifest_effect_lifecycle", None),
                 NoOpManifestEffectLifecyclePort,
             ):
-                return self._maybe_fallback(
-                    request=request,
-                    reason_code=ADAPTER_UNAVAILABLE_BEFORE_REQUEST,
-                    events=events,
-                    fallback=fallback,
-                    admission=admission,
+                return self._failed_result(
+                    reason_code=ADAPTER_UNAVAILABLE_BEFORE_REQUEST
                 )
 
             builder = MainAgentPromptBuilder()
@@ -1021,13 +905,7 @@ class MainAgentService:
                     tool_artifact_summaries=(),
                 )
             except Exception:
-                return self._maybe_fallback(
-                    request=request,
-                    reason_code=BUDGET_INVALID,
-                    events=events,
-                    fallback=fallback,
-                    admission=admission,
-                )
+                return self._failed_result(reason_code=BUDGET_INVALID)
 
             scope = create_execution_scope(
                 run_id=request.run_id,
@@ -1117,21 +995,7 @@ class MainAgentService:
                     capability_ledger=ports.capability_ledger,
                 )
 
-            fallback.mark_provider_request()
             result: ProviderLoopResult = self._loop.start(loop_request, ports=ports)
-            # Any capability dispatch that actually started blocks automatic Legacy
-            # fallback under §4.3 (read completions still count as started dispatches).
-            tool_records = getattr(result, "tool_calls", None) or ()
-            for record in tool_records:
-                side = None
-                try:
-                    # Prefer descriptor-level side effect if present on the record.
-                    side = getattr(record, "side_effect", None) or getattr(
-                        getattr(record, "call", None), "side_effect", None
-                    )
-                except Exception:
-                    side = None
-                fallback.mark_capability_dispatch(side_effect=side if isinstance(side, str) else "read")
             final_text = (result.final_text or "").strip()
 
             if result.status == "cancelled":
@@ -1178,13 +1042,7 @@ class MainAgentService:
                     and reason == MAIN_AGENT_FAILED
                 ):
                     reason = "provider_retry_safe_before_output"
-                    return self._maybe_fallback(
-                        request=request,
-                        reason_code=reason,
-                        events=events,
-                        fallback=fallback,
-                        admission=admission,
-                    )
+                    return self._failed_result(reason_code=reason)
                 return AssistantRuntimeResult(
                     runtime="main_agent",
                     status="failed",
@@ -1201,7 +1059,6 @@ class MainAgentService:
             # Message checkpoint + single bounded content_delta stream so SSE and
             # Message content stay ordered and non-duplicated.
             if final_text:
-                fallback.mark_user_output()
                 self._state.final_text = final_text
 
             return AssistantRuntimeResult(
@@ -1217,13 +1074,7 @@ class MainAgentService:
                 tool_summaries=tuple(events.tool_summaries),
             )
         except MainAgentAdmissionError as exc:
-            return self._maybe_fallback(
-                request=request,
-                reason_code=exc.reason_code,
-                events=events,
-                fallback=fallback,
-                admission=admission,
-            )
+            return self._failed_result(reason_code=exc.reason_code)
         except Exception:
             logger.exception(
                 "main agent run failed run_id=%s conversation_id=%s",
@@ -1337,42 +1188,17 @@ class MainAgentService:
         )
         return runtime, ports
 
-    def _admission_failure_result(
+    def _failed_result(
         self,
         *,
-        request: AssistantRuntimeRequest,
         reason_code: str,
-        events: MainAgentEventAdapter,
     ) -> AssistantRuntimeResult:
-        # Plan 2 Task 9: admission failure is typed fail-closed. Never select Legacy.
-        del events  # reserved for future structured failure events
+        """Return a typed Main Agent failure without selecting another runtime."""
         return AssistantRuntimeResult(
             runtime="main_agent",
             status="failed",
             final_text="",
-            reason_code=reason_code or FALLBACK_DISALLOWED,
-            write_message=False,
-            write_l1=False,
-            write_l2=False,
-            write_title=False,
-        )
-
-    def _maybe_fallback(
-        self,
-        *,
-        request: AssistantRuntimeRequest,
-        reason_code: str,
-        events: MainAgentEventAdapter,
-        fallback: MainAgentFallbackState,
-        admission: AdmissionContext,
-    ) -> AssistantRuntimeResult:
-        # Plan 2 Task 9: named for historical call sites; never opens a second Run.
-        del request, events, fallback, admission
-        return AssistantRuntimeResult(
-            runtime="main_agent",
-            status="failed",
-            final_text="",
-            reason_code=reason_code if reason_code else FALLBACK_DISALLOWED,
+            reason_code=reason_code or MAIN_AGENT_FAILED,
             write_message=False,
             write_l1=False,
             write_l2=False,
@@ -1401,14 +1227,11 @@ __all__ = [
     "CONTROL_UNSUPPORTED",
     "CANCELLED",
     "ENTRYPOINT_UNSUPPORTED",
-    "FALLBACK_DISALLOWED",
-    "FALLBACK_SAFE_REASONS",
     "MAIN_AGENT_COMPLETED",
     "MAIN_AGENT_FAILED",
     "MODE_OFF",
     "MODE_SHADOW_PRODUCTION",
     "MainAgentAdmissionError",
-    "MainAgentFallbackState",
     "MainAgentRunState",
     "MainAgentService",
     "NOOP_LIFECYCLE_REJECTED",

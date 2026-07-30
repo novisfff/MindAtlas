@@ -197,25 +197,11 @@ def _upgrade_to_ledger_revision() -> Iterator[None]:
     _assert_disposable_database(_POSTGRES_URL)
     _configure_database_env(_POSTGRES_URL)
     with _engine() as engine:
-        with engine.connect() as connection:
-            try:
-                row = connection.execute(
-                    text("SELECT version_num FROM alembic_version")
-                ).first()
-                current = None if row is None else str(row[0])
-            except DBAPIError:
-                current = None
-    if current in {
-        PLAN08_LIFECYCLE_REVISION,
-        PLAN08_EVIDENCE_REVISION,
-        PLAN09_LIFECYCLE_REVISION,
-        PLAN09_EVAL_REVISION,
-        PLAN09_HEAD,
-    }:
-        # Descend Plan 09 → Plan 08 tip → ledger revision used by this suite.
-        _downgrade_to_ledger_revision()
-    elif current != PLAN08_LEDGER_REVISION:
-        command.upgrade(_alembic_config(), PLAN08_LEDGER_REVISION)
+        with engine.begin() as connection:
+            connection.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
+            connection.execute(text("CREATE SCHEMA public"))
+            connection.execute(text("GRANT ALL ON SCHEMA public TO public"))
+    command.upgrade(_alembic_config(), PLAN08_LEDGER_REVISION)
     yield
 
 
