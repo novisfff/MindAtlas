@@ -75,8 +75,9 @@ def _parent_ledger(*, remaining_ms: int = 120_000):
 def _seed_running_with_base(db, *, worker_id: str = "worker-1"):
     from app.assistant.durable.materialize import materialize_base_run_state
     from app.assistant.durable.repository import DurableRunRepository, LeaseToken
-    from app.assistant.models import AssistantChatRun, Conversation, Message
+    from app.assistant.models import Conversation, Message
     from app.assistant.provider_loop.messages import ProviderUserMessage
+    from tests.assistant_runtime_support import make_main_agent_run
 
     _register_worker(db, worker_id=worker_id)
     conv = Conversation(title=f"t-{uuid.uuid4().hex[:8]}")
@@ -86,20 +87,17 @@ def _seed_running_with_base(db, *, worker_id: str = "worker-1"):
     assistant = Message(conversation_id=conv.id, role="assistant", content="")
     db.add_all([user, assistant])
     db.flush()
-    run = AssistantChatRun(
-        conversation_id=conv.id,
-        user_message_id=user.id,
-        assistant_message_id=assistant.id,
+    run = make_main_agent_run(
+        db,
+        conversation=conv,
+        user_message=user,
+        assistant_message=assistant,
         status="queued",
-        runtime_kind="main_agent",
+        build_revision=BUILD,
         runtime_contract_version=1,
-        required_app_build_revision=BUILD,
         state_revision=0,
         deadline_at=datetime.now(timezone.utc) + timedelta(minutes=30),
     )
-    db.add(run)
-    db.commit()
-    db.refresh(run)
 
     repo = DurableRunRepository(db)
     claimed = repo.claim_queued(

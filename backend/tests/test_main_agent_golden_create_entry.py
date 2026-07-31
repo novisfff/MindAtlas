@@ -88,9 +88,8 @@ class LedgerAdmissionTests(unittest.TestCase):
             freeze_capability_ledger_mode_for_run(runtime_kind="main_agent", settings=s),
             "enforced",
         )
-        self.assertIsNone(
+        with self.assertRaises(ValueError):
             freeze_capability_ledger_mode_for_run(runtime_kind="legacy", settings=s)
-        )
 
     def test_golden_eligibility_cohort(self) -> None:
         from app.assistant.capability_calls.release_admission import (

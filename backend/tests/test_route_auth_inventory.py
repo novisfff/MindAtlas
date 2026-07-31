@@ -305,6 +305,7 @@ def test_public_routes_are_exactly_liveness_and_init_status(app) -> None:
     # HEAD is auto-added for GET routes by FastAPI.
     expected_paths = {
         "/health",
+        "/ready",
         "/api/system-settings/initialization-status",
         "/api/system-settings/initialization-defaults",
         "/api/operator-auth/session",

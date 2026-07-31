@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Iterable
 from uuid import UUID
 
 from sqlalchemy.orm import Session
 
 from app.assistant.models import AssistantChatRun, AssistantChatRunEvent, Conversation, Message
+from app.assistant.runtime.contracts import require_sha256
 from app.common.time import utcnow
 
 
@@ -70,26 +72,25 @@ class AssistantChatRunService:
         conversation: Conversation,
         user_message: Message,
         assistant_message: Message,
-        runtime_kind: str = "legacy",
-        runtime_contract_version: int | None = None,
-        required_app_build_revision: str | None = None,
-        memory_commit_status: str | None = None,
-        deadline_at=None,
-        commit: bool = True,
-        run_id: UUID | None = None,
+        main_agent_rollout_revision_id: UUID,
+        main_agent_profile_version_id: UUID,
+        resolved_model_id: UUID,
+        runtime_closure_digest: str,
+        runtime_contract_version: int,
+        required_checkpoint_codec_version: int,
+        required_capability_feature_digest: str,
+        required_app_build_revision: str,
+        capability_ledger_mode: str,
+        deadline_at: datetime | None = None,
+        commit: bool = False,
     ) -> AssistantChatRun:
-        """Create a Run with immutable ``runtime_kind``.
+        """Create a Main-Agent Run with the frozen runtime closure.
 
-        Plan 06 Task 6: admission selects ``runtime_kind`` immediately before
-        insertion. Once a ``main_agent`` row exists, Legacy fallback is forbidden.
-
-        For ``runtime_kind=main_agent``, callers should pass ``commit=False``,
-        append the initial public event on the same Session, then commit once so
-        workers never claim a Run that is still missing its initialization event
-        (Plan 06 §9 / Task 3 atomic write path).
-
-        Plan 10: optional ``run_id`` pre-generates the primary key so a pre-insert
-        fallback event can reference the Legacy Run id in the same transaction.
+        Plan 2: every newly admitted Chat Run is ``runtime_kind=main_agent``. No
+        call site may pass ``runtime_kind``; Legacy is not selectable. Callers
+        should pass ``commit=False``, append the initial public event on the same
+        Session, then commit once so workers never claim a Run that is still
+        missing its initialization event.
         """
         # Plan 09 Task 4: hard tripwire when Eval scope reaches production Run writer.
         from app.assistant.evaluation.isolation import tripwire_production_writer
@@ -99,57 +100,47 @@ class AssistantChatRunService:
         if active is not None:
             raise ValueError("conversation already has an active run")
 
-        kind = str(runtime_kind or "legacy").strip().lower()
-        if kind not in {"legacy", "main_agent"}:
-            raise ValueError(f"invalid runtime_kind: {runtime_kind!r}")
+        if int(runtime_contract_version) <= 0:
+            raise ValueError("runtime_contract_version must be > 0")
+        if int(required_checkpoint_codec_version) <= 0:
+            raise ValueError("required_checkpoint_codec_version must be > 0")
+        build = str(required_app_build_revision or "").strip()
+        if not build:
+            raise ValueError("required_app_build_revision is required")
+        ledger = str(capability_ledger_mode or "").strip()
+        if ledger not in {"legacy_read_only", "enforced"}:
+            raise ValueError(f"invalid capability_ledger_mode: {capability_ledger_mode!r}")
 
-        if kind == "main_agent":
-            if runtime_contract_version is None:
-                runtime_contract_version = 1
-            if not required_app_build_revision:
-                raise ValueError(
-                    "required_app_build_revision is required for runtime_kind=main_agent"
-                )
-            if memory_commit_status is None:
-                memory_commit_status = "pending"
-            from app.assistant.capability_calls.release_admission import (
-                freeze_capability_ledger_mode_for_run,
-            )
-
-            capability_ledger_mode = freeze_capability_ledger_mode_for_run(
-                runtime_kind=kind
-            )
-        else:
-            # Legacy shape: contract version + build must be null.
-            runtime_contract_version = None
-            required_app_build_revision = None
-            if memory_commit_status is None:
-                memory_commit_status = "not_applicable"
-            capability_ledger_mode = None
-
-        run_kwargs: dict = {
-            "conversation_id": conversation.id,
-            "user_message_id": user_message.id,
-            "assistant_message_id": assistant_message.id,
-            "status": RUN_STATUS_QUEUED,
-            "last_event_seq": 0,
-            "checkpoint_seq": 0,
-            "runtime_kind": kind,
-            "runtime_contract_version": runtime_contract_version,
-            "required_app_build_revision": required_app_build_revision,
-            "memory_commit_status": memory_commit_status,
-            "capability_ledger_mode": capability_ledger_mode,
-            "deadline_at": deadline_at,
-        }
-        if run_id is not None:
-            run_kwargs["id"] = run_id
-        run = AssistantChatRun(**run_kwargs)
+        run = AssistantChatRun(
+            conversation_id=conversation.id,
+            user_message_id=user_message.id,
+            assistant_message_id=assistant_message.id,
+            status=RUN_STATUS_QUEUED,
+            last_event_seq=0,
+            checkpoint_seq=0,
+            runtime_kind="main_agent",
+            main_agent_rollout_revision_id=main_agent_rollout_revision_id,
+            main_agent_profile_version_id=main_agent_profile_version_id,
+            resolved_model_id=resolved_model_id,
+            runtime_closure_digest=require_sha256(
+                runtime_closure_digest, field_name="runtime_closure_digest"
+            ),
+            runtime_contract_version=int(runtime_contract_version),
+            required_checkpoint_codec_version=int(required_checkpoint_codec_version),
+            required_capability_feature_digest=require_sha256(
+                required_capability_feature_digest,
+                field_name="required_capability_feature_digest",
+            ),
+            required_app_build_revision=build,
+            capability_ledger_mode=ledger,
+            memory_commit_status="pending",
+            deadline_at=deadline_at,
+        )
         self.db.add(run)
+        self.db.flush()
         if commit:
             self.db.commit()
             self.db.refresh(run)
-        else:
-            self.db.flush()
         return run
 
     def append_event(

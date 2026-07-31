@@ -58,6 +58,10 @@ export interface InitializeSystemRequest {
 export interface InitializationCompletionResponse {
   initialized: boolean
   locale: Locale
+  /** Always pending_worker after successful initialization — activation is a separate step. */
+  assistantBootstrap?: 'pending_worker'
+  preparedRolloutRevisionId?: string | null
+  rolloutControlRevision?: number | null
 }
 
 export function getInitializationStatus() {

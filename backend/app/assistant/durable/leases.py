@@ -1,13 +1,14 @@
-"""Run claim / lease / heartbeat orchestration (Plan 06 Task 5 §8.2–8.3).
+"""Run claim / lease / heartbeat orchestration (Plan 06 Task 5 + Plan 2 Task 7).
 
 One PostgreSQL transaction using database ``now()``:
 
-1. select the earliest eligible compatible Run by ``next_attempt_at, created_at``
+1. select the earliest eligible Main Agent Run by ``next_attempt_at, created_at``
    with ``FOR UPDATE SKIP LOCKED``;
 2. allow ``queued``, or expired ``running/recovering``, or expired ``cancelling``
    for cancellation finalization;
-3. match ``required_app_build_revision`` and codec/runtime support advertised by
-   this worker;
+3. recheck compatibility on the locked row via
+   ``WorkerCompatibility.from_run(run).matches(identity)`` — never rewrite Run
+   requirements to match a Worker;
 4. increment ``lease_generation``, set owner/heartbeat/expiry, and increment
    ``state_revision``;
 5. use ``running`` for a normal queued claim and ``recovering`` for an expired
@@ -44,8 +45,8 @@ from app.assistant.durable.repository import (
     STATUS_RUNNING,
 )
 from app.assistant.durable.worker_registry import (
+    WorkerCompatibility,
     WorkerIdentity,
-    plan08_capability_ledger_feature_digest,
 )
 from app.common.time import utcnow
 from app.config import get_settings
@@ -53,6 +54,10 @@ from app.config import get_settings
 logger = logging.getLogger(__name__)
 
 ClaimKind = Literal["queued", "takeover_running", "reclaim_recovering", "reclaim_cancelling"]
+
+
+class RuntimeInvariantViolation(RuntimeError):
+    """Live-schema invariant broken (non-main-agent Run, etc.)."""
 
 
 @dataclass(frozen=True)
@@ -97,6 +102,11 @@ def compute_retry_backoff(
 
 class RunLeaseService:
     """Claim compatible Runs and maintain leases for one worker identity."""
+
+    # Max compatible candidates locked per claim poll. The SQL predicate below
+    # filters by the worker's supported checkpoint codecs before this limit, so
+    # incompatible codec heads cannot starve a later compatible Run.
+    _CLAIM_CANDIDATE_BATCH = 16
 
     def __init__(
         self,
@@ -161,17 +171,36 @@ class RunLeaseService:
     def _select_eligible_run(self, *, now: datetime) -> AssistantChatRun | None:
         """Select earliest eligible compatible Main Agent Run with SKIP LOCKED.
 
+        Locks a small ordered batch under ``FOR UPDATE SKIP LOCKED``, then walks
+        candidates and claims the first fully compatible row. A codec-incompatible
+        head must not abandon the poll — later compatible Runs stay claimable.
         Falls back to plain FOR UPDATE when the dialect does not support
         skip_locked (SQLite). Callers must not claim concurrency guarantees
         from SQLite tests.
+
+        Compatibility is rechecked on each locked row via
+        ``WorkerCompatibility.from_run`` — never by rewriting Run requirements
+        to match this Worker.
         """
-        # Eligibility:
-        # - main_agent only
-        # - next_attempt_at is null or <= now
-        # - queued (always claimable when due)
-        # - running/recovering/cancelling with expired or null lease
-        # - required_app_build_revision matches this worker
-        # - runtime_contract_version matches this worker
+        # Eligibility prefilter (status/due/build/contract/feature/codec). Full
+        # compatibility is still rechecked on every locked candidate via
+        # WorkerCompatibility.from_run before claiming it.
+        try:
+            supported_codec_versions = tuple(
+                sorted(
+                    {
+                        int(version)
+                        for version in self.identity.supported_checkpoint_codec_versions
+                    }
+                )
+            )
+        except (TypeError, ValueError):
+            self.db.rollback()
+            return None
+        if not supported_codec_versions:
+            self.db.rollback()
+            return None
+
         expired_lease = or_(
             AssistantChatRun.lease_expires_at.is_(None),
             AssistantChatRun.lease_expires_at <= now,
@@ -189,99 +218,82 @@ class RunLeaseService:
             AssistantChatRun.next_attempt_at.is_(None),
             AssistantChatRun.next_attempt_at <= now,
         )
-        compatibility_predicates: list[Any] = []
-        if not self._supports_plan08_ledger():
-            compatibility_predicates.append(
-                or_(
-                    AssistantChatRun.capability_ledger_mode.is_(None),
-                    AssistantChatRun.capability_ledger_mode == "legacy_read_only",
-                )
-            )
 
-        stmt = (
-            select(AssistantChatRun)
-            .where(
-                AssistantChatRun.runtime_kind == RUNTIME_KIND_MAIN_AGENT,
-                AssistantChatRun.required_app_build_revision
-                == self.identity.app_build_revision,
-                AssistantChatRun.runtime_contract_version
-                == int(self.identity.runtime_contract_version),
-                status_predicate,
-                due_predicate,
-                *compatibility_predicates,
-            )
-            .order_by(
-                # Nulls first for next_attempt_at (treat as due-now priority).
-                AssistantChatRun.next_attempt_at.asc().nullsfirst(),
-                AssistantChatRun.created_at.asc(),
-            )
-            .limit(1)
+        base_where = (
+            AssistantChatRun.runtime_kind == RUNTIME_KIND_MAIN_AGENT,
+            AssistantChatRun.required_app_build_revision
+            == self.identity.app_build_revision,
+            AssistantChatRun.runtime_contract_version
+            == int(self.identity.runtime_contract_version),
+            AssistantChatRun.required_capability_feature_digest
+            == str(self.identity.capability_feature_digest),
+            AssistantChatRun.required_checkpoint_codec_version.in_(
+                supported_codec_versions
+            ),
+            status_predicate,
+            due_predicate,
+        )
+        order = (
+            # Nulls first for next_attempt_at (treat as due-now priority).
+            AssistantChatRun.next_attempt_at.asc().nullsfirst(),
+            AssistantChatRun.created_at.asc(),
         )
 
         # Prefer SKIP LOCKED on PostgreSQL; SQLite falls back gracefully.
+        # The codec membership predicate is deliberately in SQL, before LIMIT:
+        # a long prefix of codec-incompatible rows must never hide a compatible
+        # Run beyond this candidate batch.
         try:
-            stmt = stmt.with_for_update(skip_locked=True)
-            run = self.db.scalars(stmt).first()
+            stmt = (
+                select(AssistantChatRun)
+                .where(*base_where)
+                .order_by(*order)
+                .limit(self._CLAIM_CANDIDATE_BATCH)
+                .with_for_update(skip_locked=True)
+            )
+            candidates = list(self.db.scalars(stmt).all())
         except Exception:
             # Dialect may not support skip_locked; retry without it.
             self.db.rollback()
             stmt = (
                 select(AssistantChatRun)
-                .where(
-                    AssistantChatRun.runtime_kind == RUNTIME_KIND_MAIN_AGENT,
-                    AssistantChatRun.required_app_build_revision
-                    == self.identity.app_build_revision,
-                    AssistantChatRun.runtime_contract_version
-                    == int(self.identity.runtime_contract_version),
-                    status_predicate,
-                    due_predicate,
-                    *compatibility_predicates,
-                )
-                .order_by(
-                    AssistantChatRun.next_attempt_at.asc().nullsfirst(),
-                    AssistantChatRun.created_at.asc(),
-                )
-                .limit(1)
+                .where(*base_where)
+                .order_by(*order)
+                .limit(self._CLAIM_CANDIDATE_BATCH)
                 .with_for_update()
             )
-            run = self.db.scalars(stmt).first()
+            candidates = list(self.db.scalars(stmt).all())
 
-        if run is None:
+        if not candidates:
             self.db.rollback()
             return None
-        # Codec support is process-local for Plan 06 (schema version 1 only).
-        # Runs do not store a separate required codec version column; workers
-        # that cannot decode v1 must not register codec support and therefore
-        # never claim (compatibility filter above + registration).
-        if not self._is_compatible(run):
-            self.db.rollback()
-            return None
-        return run
+
+        # Recheck full compatibility (codec membership + feature digest + kind)
+        # on each locked row via the canonical from_run path. Do not claim an
+        # incompatible row; advance to the next candidate instead of aborting.
+        for run in candidates:
+            if self._is_compatible(run):
+                return run
+
+        self.db.rollback()
+        return None
 
     def _is_compatible(self, run: AssistantChatRun) -> bool:
-        if str(run.runtime_kind) != RUNTIME_KIND_MAIN_AGENT:
-            return False
-        if str(run.required_app_build_revision or "") != self.identity.app_build_revision:
-            return False
-        if int(run.runtime_contract_version or 0) != int(
-            self.identity.runtime_contract_version
-        ):
-            return False
-        # Plan 06 Checkpoint schema version is 1; worker must advertise it.
-        if 1 not in {int(v) for v in self.identity.supported_checkpoint_codec_versions}:
-            return False
-        if (
-            str(run.capability_ledger_mode or "legacy_read_only") == "enforced"
-            and not self._supports_plan08_ledger()
-        ):
-            return False
-        return True
+        """True when this worker identity satisfies the Run's frozen requirements.
 
-    def _supports_plan08_ledger(self) -> bool:
-        return (
-            str(self.identity.capability_feature_digest)
-            == plan08_capability_ledger_feature_digest()
-        )
+        Consumes the Run itself via ``WorkerCompatibility.from_run`` — never
+        rewrites Run requirements to match the Worker.
+        """
+        if str(run.runtime_kind) != RUNTIME_KIND_MAIN_AGENT:
+            # Live schema must only contain main_agent; surface as invariant.
+            raise RuntimeInvariantViolation(
+                "non-main-agent Run in live schema"
+            )
+        try:
+            compatibility = WorkerCompatibility.from_run(run)
+        except ValueError:
+            return False
+        return compatibility.matches(self.identity)
 
     def _is_eligible(self, run: AssistantChatRun, *, now: datetime) -> bool:
         if str(run.runtime_kind) != RUNTIME_KIND_MAIN_AGENT:
@@ -508,5 +520,6 @@ __all__ = [
     "ClaimKind",
     "ClaimedLease",
     "RunLeaseService",
+    "RuntimeInvariantViolation",
     "compute_retry_backoff",
 ]

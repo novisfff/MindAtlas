@@ -819,8 +819,8 @@ def test_instruction_only_skill_owner_budget_is_zero_calls() -> None:
     assert owner.max_same_read_signature == 0
 
 
-def test_main_agent_service_missing_db_falls_back_when_composing() -> None:
-    """Without injected ports and without a usable DB, composition falls back."""
+def test_main_agent_service_missing_db_fails_closed_when_composing() -> None:
+    """Without injected ports and without a usable DB, composition fails closed."""
     from app.assistant.main_agent.service import (
         AssistantRuntimeRequest,
         MainAgentService,
@@ -845,8 +845,7 @@ def test_main_agent_service_missing_db_falls_back_when_composing() -> None:
     admission.provider_ref = provider_ref
     admission.model_ref = model_ref
     admission.frozen_model = MagicMock()
-    admission.legacy_runtime_allowed = True
-    admission.before_side_effects_only = True
+    admission.probe_diagnostics = None
 
     events: list[tuple[str, dict]] = []
     adapter = MainAgentEventAdapter(lambda n, p: events.append((n, p)))
@@ -868,10 +867,11 @@ def test_main_agent_service_missing_db_falls_back_when_composing() -> None:
             execution_kind="production",
         )
     )
-    # Composition fails closed before Provider request → fallback-safe.
-    assert result.status in {"fallback", "failed"}
-    if result.fallback_to_legacy:
-        assert result.reason_code
+    # Composition fails closed before Provider request — same durable Run, no Legacy.
+    assert result.status == "failed"
+    assert result.runtime == "main_agent"
+    assert result.reason_code
+    assert result.write_message is False
 
 
 def test_unauthorized_and_write_exposure_exact_zeros() -> None:

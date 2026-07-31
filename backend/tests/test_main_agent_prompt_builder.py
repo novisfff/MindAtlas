@@ -245,6 +245,10 @@ def test_initial_messages_layer_order_and_roles() -> None:
     assert "weekly-review" in system
     assert "tone=concise" in system
     assert "lang=zh" in system
+    assert "cross_runtime_fallback=false" in system
+    assert "legacy_fallback_allowed=" not in system
+    assert "before_side_effects_only=" not in system
+    assert "legacy_runtime_allowed" not in system
     # No raw newlines (Provider contract).
     assert "\n" not in system
     assert "\r" not in system

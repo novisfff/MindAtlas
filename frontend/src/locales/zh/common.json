@@ -358,7 +358,10 @@
         "setupToken": "仅通过 Authorization 请求头一次性发送，不会保存在浏览器中。",
         "operatorPassword": "精确的 Unicode 字符串，不做 trim。这会成为唯一的 Operator 登录密码。"
       }
-    }
+    },
+    "activationTitle": "激活助手运行时",
+    "activationDescription": "初始化已准备好 Main Agent rollout。请在兼容 Worker 在线后激活。",
+    "activationSkip": "暂不激活，继续进入系统"
   },
   "systemSetup": {
     "eyebrow": "系统总览",
@@ -1003,6 +1006,8 @@
       "aiSectionDesc": "集中配置模型、系统工具、技能库、工作流与智能体以及系统内置 AI 行为。",
       "runtimeSection": "运行能力",
       "runtimeSectionDesc": "集中查看 Docker Compose 接管的系统能力，并分别配置 LightRAG、Docling、自动化任务等运行时设置。",
+      "assistantRuntime": "助手运行时",
+      "assistantRuntimeDesc": "恢复已准备的 Main Agent rollout 激活，并控制是否接纳新对话。",
       "entryTypes": "记录类型",
       "entryTypesDesc": "管理内容类型、图标和属性",
       "tags": "标签",
@@ -2181,7 +2186,11 @@
       "profileRuntimeDisabled": "配置运行时已禁用",
       "profileNeedsPublished": "启用运行时前请先发布配置版本。",
       "profileNeedsPromotionGate": "启用运行时需要晋升门禁。",
-      "profileDisableConfirm": "确认禁用主代理配置运行时？这是显式的线上状态变更，不会修改草稿或已发布内容。"
+      "profileDisableConfirm": "确认禁用主代理配置运行时？这是显式的线上状态变更，不会修改草稿或已发布内容。",
+      "profileV1ReadOnlyBanner": "历史 Profile V1 — 只读。草稿、发布与准备需要 Profile V2。",
+      "profileV1ReadOnly": "历史 Profile V1 为只读。",
+      "profileRuntimePolicy": "运行时策略",
+      "profileV1FallbackReadonly": "历史 fallback 策略（只读）"
     }
   },
   "aiProvider": {
@@ -2473,6 +2482,70 @@
       "loadingTitle": "正在检查 Operator 会话",
       "loadingDescription": "正在确认当前浏览器是否已登录。",
       "sessionExpired": "会话已过期，请重新登录。"
+    }
+  },
+  "assistantRuntime": {
+    "activation": {
+      "title": "激活 Main Agent 运行时",
+      "description": "初始化已准备好一次 rollout。请在兼容 Worker 在线后手动激活。",
+      "waitingWorker": "正在等待兼容 Worker",
+      "activate": "激活",
+      "activating": "正在激活…",
+      "ready": "运行时已激活",
+      "conflict": "控制版本已变更。正在刷新诊断信息，请复核后重试。",
+      "error": "激活失败。请检查就绪状态后重试。",
+      "pendingBootstrap": "助手引导状态：等待 Worker"
+    },
+    "readiness": {
+      "loadingTitle": "正在检查助手就绪状态",
+      "loadingDescription": "确认当前 Main Agent 运行时可以接纳新对话。",
+      "unavailableTitle": "助手尚未就绪",
+      "unavailableDescription": "在就绪状态清除前，新对话会被阻止。既有会话历史仍可查看。"
+    },
+    "settings": {
+      "title": "助手运行时",
+      "description": "恢复已准备的 rollout 激活，并查看持久化的 Main Agent 运行时控制状态。",
+      "loading": "正在加载运行时控制状态…",
+      "loadError": "无法加载运行时控制状态。",
+      "rollout": {
+        "build": "构建 {{build}}"
+      },
+      "prepared": {
+        "title": "已准备的 rollout",
+        "description": "该服务端 rollout 在离开初始化向导后仍可恢复使用。",
+        "badge": "已准备",
+        "empty": "当前没有可激活的已准备 rollout。"
+      },
+      "active": {
+        "title": "生效的 rollout",
+        "description": "当前生效的不可变 revision 会用于新的 Main Agent 对话运行。",
+        "badge": "已生效",
+        "inactiveBadge": "未生效",
+        "empty": "当前没有生效的 rollout。"
+      },
+      "newRuns": {
+        "title": "新对话运行",
+        "description": "持久化控制未来 Main Agent 对话的接纳，不会改变已有运行。",
+        "switchLabel": "接纳新对话运行",
+        "enabled": "已允许新对话运行。",
+        "disabled": "已禁止新对话运行。",
+        "hint": "此开关只影响未来的新对话运行；已有的持久化运行会继续保持原状。",
+        "error": "无法更改新对话设置。",
+        "conflict": "控制状态已变更，已刷新最新状态。"
+      }
+    },
+    "reasons": {
+      "system_not_initialized": "系统尚未完成初始化。",
+      "operator_missing": "尚未配置 Operator 账户。",
+      "operator_auth_unavailable": "Operator 认证当前不可用。",
+      "system_seed_invalid": "系统种子完整性校验失败。请停止并检查部署完整性，不可绕过。",
+      "profile_unpublished": "Main Agent Profile 尚未发布。",
+      "model_unbound": "Main Agent 运行时尚未绑定模型。",
+      "rollout_inactive": "尚未选择生效的 Main Agent rollout。",
+      "runtime_closure_drift": "运行时闭包与已准备的 revision 不一致。请停止并检查部署完整性，不可绕过。",
+      "worker_unavailable": "当前没有与本构建、契约和编解码兼容的 Worker 在线。",
+      "schema_incompatible": "Schema 与当前 Main Agent 运行时不兼容。请停止并检查部署完整性，不可绕过。",
+      "new_runs_disabled": "新对话运行已被 Operator 开关禁用。"
     }
   }
 }

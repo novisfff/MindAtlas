@@ -1,17 +1,24 @@
-"""Plan 06 Task 5: worker registration + compatible-admission tests.
+"""Plan 06 Task 5 + Plan 2 Task 7: worker registration + compatible-admission tests.
 
 Covers:
 - register / heartbeat / draining
 - build/codec mismatch is not admitted
 - API admission sees no compatible worker when build/codec differ
 - healthcheck validates fresh compatible registration (not mere PID)
+- WorkerCompatibility is the sole matcher (from_closure / from_run / order)
 """
 
 from __future__ import annotations
 
 import unittest
 import uuid
+from contextlib import redirect_stdout
 from datetime import timedelta
+from io import StringIO
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 from tests._bootstrap import bootstrap_backend_imports, reset_caches
 
@@ -23,18 +30,37 @@ DIGEST = "a" * 64
 
 
 def _identity(**kwargs):
+    from app.assistant.durable.codec import SUPPORTED_CHECKPOINT_SCHEMA_VERSIONS
     from app.assistant.durable.worker_registry import WorkerIdentity
 
     defaults = dict(
         worker_id=f"w-{uuid.uuid4().hex[:12]}",
         app_build_revision="build-test-1",
         runtime_contract_version=1,
-        supported_checkpoint_codec_versions=(1,),
+        # Align with production workers: full supported codec set so the
+        # healthcheck default (CURRENT_CHECKPOINT_CODEC_VERSION) matches.
+        supported_checkpoint_codec_versions=tuple(
+            sorted(SUPPORTED_CHECKPOINT_SCHEMA_VERSIONS)
+        ),
         capability_feature_digest=DIGEST,
         hostname_label="test-host",
     )
     defaults.update(kwargs)
     return WorkerIdentity(**defaults)
+
+
+def _compat(**kwargs):
+    from app.assistant.durable.codec import CURRENT_CHECKPOINT_CODEC_VERSION
+    from app.assistant.durable.worker_registry import WorkerCompatibility
+
+    defaults = dict(
+        app_build_revision="build-test-1",
+        runtime_contract_version=1,
+        required_checkpoint_codec_version=CURRENT_CHECKPOINT_CODEC_VERSION,
+        required_capability_feature_digest=DIGEST,
+    )
+    defaults.update(kwargs)
+    return WorkerCompatibility(**defaults)
 
 
 class WorkerRegistryUnitTests(unittest.TestCase):
@@ -83,7 +109,7 @@ class WorkerRegistryUnitTests(unittest.TestCase):
         self.assertFalse(reg.is_fresh(row, registration_ttl=timedelta(seconds=60)))
         self.assertFalse(
             reg.has_compatible_worker(
-                app_build_revision="build-test-1",
+                _compat(),
                 registration_ttl=timedelta(seconds=60),
             )
         )
@@ -95,13 +121,13 @@ class WorkerRegistryUnitTests(unittest.TestCase):
         reg.register(_identity(app_build_revision="build-A"))
         self.assertTrue(
             reg.has_compatible_worker(
-                app_build_revision="build-A",
+                _compat(app_build_revision="build-A"),
                 registration_ttl=timedelta(seconds=60),
             )
         )
         self.assertFalse(
             reg.has_compatible_worker(
-                app_build_revision="build-B",
+                _compat(app_build_revision="build-B"),
                 registration_ttl=timedelta(seconds=60),
             )
         )
@@ -114,15 +140,13 @@ class WorkerRegistryUnitTests(unittest.TestCase):
         reg.register(_identity(supported_checkpoint_codec_versions=(99,)))
         self.assertFalse(
             reg.has_compatible_worker(
-                app_build_revision="build-test-1",
-                required_checkpoint_codec_version=1,
+                _compat(required_checkpoint_codec_version=1),
                 registration_ttl=timedelta(seconds=60),
             )
         )
         self.assertTrue(
             reg.has_compatible_worker(
-                app_build_revision="build-test-1",
-                required_checkpoint_codec_version=99,
+                _compat(required_checkpoint_codec_version=99),
                 registration_ttl=timedelta(seconds=60),
             )
         )
@@ -138,9 +162,10 @@ class WorkerRegistryUnitTests(unittest.TestCase):
 
         self.assertFalse(
             reg.has_compatible_worker(
-                app_build_revision="build-test-1",
-                required_capability_feature_digest=(
-                    plan08_capability_ledger_feature_digest()
+                _compat(
+                    required_capability_feature_digest=(
+                        plan08_capability_ledger_feature_digest()
+                    )
                 ),
                 registration_ttl=timedelta(seconds=60),
             )
@@ -153,9 +178,10 @@ class WorkerRegistryUnitTests(unittest.TestCase):
         )
         self.assertTrue(
             reg.has_compatible_worker(
-                app_build_revision="build-test-1",
-                required_capability_feature_digest=(
-                    plan08_capability_ledger_feature_digest()
+                _compat(
+                    required_capability_feature_digest=(
+                        plan08_capability_ledger_feature_digest()
+                    )
                 ),
                 registration_ttl=timedelta(seconds=60),
             )
@@ -182,9 +208,10 @@ class WorkerRegistryUnitTests(unittest.TestCase):
 
         self.assertTrue(
             reg.has_compatible_worker(
-                app_build_revision="build-test-1",
-                required_capability_feature_digest=(
-                    plan08_capability_ledger_feature_digest()
+                _compat(
+                    required_capability_feature_digest=(
+                        plan08_capability_ledger_feature_digest()
+                    )
                 ),
                 registration_ttl=timedelta(seconds=60),
             )
@@ -204,16 +231,21 @@ class WorkerRegistryUnitTests(unittest.TestCase):
         self.db.commit()
         self.assertFalse(
             reg.has_compatible_worker(
-                app_build_revision="build-test-1",
+                _compat(),
                 registration_ttl=timedelta(seconds=20),
             )
         )
 
     def test_healthcheck_fresh_compatible(self) -> None:
-        from app.assistant.durable.worker_registry import WorkerRegistry
+        from app.assistant.durable.worker_registry import (
+            WorkerRegistry,
+            default_capability_feature_digest,
+        )
 
         reg = WorkerRegistry(self.db)
-        identity = _identity()
+        identity = _identity(
+            capability_feature_digest=default_capability_feature_digest()
+        )
         reg.register(identity)
         result = reg.healthcheck(
             worker_id=identity.worker_id,
@@ -269,11 +301,15 @@ class WorkerRegistryUnitTests(unittest.TestCase):
         )
         ok = WorkerCompatibility(
             app_build_revision="b1",
+            runtime_contract_version=1,
             required_checkpoint_codec_version=2,
+            required_capability_feature_digest=DIGEST,
         )
         bad = WorkerCompatibility(
             app_build_revision="b1",
+            runtime_contract_version=1,
             required_checkpoint_codec_version=9,
+            required_capability_feature_digest=DIGEST,
         )
         self.assertTrue(ok.matches(identity))
         self.assertFalse(bad.matches(identity))
@@ -307,11 +343,96 @@ class WorkerRegistryUnitTests(unittest.TestCase):
             )
         )
         admitted = reg.has_compatible_worker(
-            app_build_revision="prod-build",
-            required_checkpoint_codec_version=1,
+            _compat(
+                app_build_revision="prod-build",
+                required_checkpoint_codec_version=1,
+            ),
             registration_ttl=timedelta(seconds=60),
         )
         self.assertFalse(admitted)
+
+    def test_find_compatible_workers_orders_by_worker_id_asc(self) -> None:
+        from app.assistant.durable.worker_registry import WorkerRegistry
+
+        reg = WorkerRegistry(self.db)
+        reg.register(_identity(worker_id="worker-z"))
+        reg.register(_identity(worker_id="worker-a"))
+        reg.register(_identity(worker_id="worker-m"))
+        rows = reg.find_compatible_workers(
+            _compat(),
+            registration_ttl=timedelta(seconds=60),
+        )
+        self.assertEqual(
+            [r.worker_id for r in rows],
+            ["worker-a", "worker-m", "worker-z"],
+        )
+
+
+class WorkerDockerHealthcheckTests(unittest.TestCase):
+    def setUp(self) -> None:
+        reset_caches()
+        from tests._db import make_session
+
+        self.db = make_session()
+
+    def tearDown(self) -> None:
+        self.db.close()
+
+    def test_healthcheck_rejects_unsuccessful_worker_state_without_db_lookup(self) -> None:
+        from app.assistant.worker import run_healthcheck
+
+        with TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "worker-state.json"
+            state_path.write_text(
+                '{"ok": false, "worker_id": "worker-1", '
+                '"app_build_revision": "build-test-1", '
+                '"reason": "schema_incompatible"}',
+                encoding="utf-8",
+            )
+            session_factory = MagicMock(
+                side_effect=AssertionError("unsuccessful state must not query DB")
+            )
+            with (
+                patch("app.assistant.worker.SessionLocal", session_factory),
+                redirect_stdout(StringIO()),
+            ):
+                exit_code = run_healthcheck(state_path=state_path)
+
+        self.assertEqual(exit_code, 1)
+        session_factory.assert_not_called()
+
+    def test_healthcheck_rejects_registration_with_release_feature_digest_mismatch(self) -> None:
+        from app.assistant.durable.worker_registry import WorkerRegistry
+        from app.assistant.worker import run_healthcheck
+
+        identity = _identity(capability_feature_digest=DIGEST)
+        WorkerRegistry(self.db).register(identity)
+        with TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "worker-state.json"
+            state_path.write_text(
+                (
+                    "{"
+                    '"ok": true, '
+                    f'"worker_id": "{identity.worker_id}", '
+                    f'"app_build_revision": "{identity.app_build_revision}", '
+                    f'"runtime_contract_version": {identity.runtime_contract_version}'
+                    "}"
+                ),
+                encoding="utf-8",
+            )
+            with (
+                patch("app.assistant.worker.SessionLocal", return_value=self.db),
+                patch(
+                    "app.assistant.worker.get_settings",
+                    return_value=SimpleNamespace(
+                        assistant_worker_registration_ttl_sec=60
+                    ),
+                ),
+                redirect_stdout(StringIO()),
+            ):
+                exit_code = run_healthcheck(state_path=state_path)
+
+        self.assertEqual(exit_code, 1)
 
 
 if __name__ == "__main__":

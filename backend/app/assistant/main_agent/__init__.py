@@ -36,19 +36,9 @@ from app.assistant.main_agent.service import (
     AssistantRuntimeRequest,
     AssistantRuntimeResult,
     MainAgentAdmissionError,
-    MainAgentFallbackState,
     MainAgentService,
     select_runtime_for_mode,
     should_construct_main_agent,
-)
-from app.assistant.main_agent.rollout import (
-    RolloutError,
-    RolloutExpectedState,
-    RolloutReport,
-    disable_rollout,
-    enable_rollout,
-    plan_rollout,
-    run_rollout,
 )
 
 __all__ = [
@@ -60,7 +50,6 @@ __all__ = [
     "CatalogSummaryRecord",
     "MainAgentAdmissionError",
     "MainAgentEventAdapter",
-    "MainAgentFallbackState",
     "MainAgentPromptBudgetExceeded",
     "MainAgentPromptBuilder",
     "MainAgentService",
@@ -72,20 +61,13 @@ __all__ = [
     "PromptBuildResult",
     "PromptLayerKind",
     "PromptLayerReport",
-    "RolloutError",
-    "RolloutExpectedState",
-    "RolloutReport",
     "SkillCatalogRecord",
     "SkillCatalogSnapshot",
     "SkillContextBuildResult",
     "ToolArtifactSummary",
     "build_catalog_snapshot",
-    "disable_rollout",
-    "enable_rollout",
     "evaluate_probe_eligibility",
     "is_internal_event",
-    "plan_rollout",
-    "run_rollout",
     "select_runtime_for_mode",
     "should_construct_main_agent",
 ]

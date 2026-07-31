@@ -54,7 +54,8 @@ def _seed_run_with_messages(
     lease_owner: str = "w1",
     lease_generation: int = 1,
 ) -> tuple[Any, Any, Any, Any]:
-    from app.assistant.models import AssistantChatRun, Conversation, Message
+    from app.assistant.models import Conversation, Message
+    from tests.assistant_runtime_support import make_main_agent_run
 
     conv = Conversation(title=f"mem-{uuid.uuid4().hex[:8]}")
     db.add(conv)
@@ -65,14 +66,14 @@ def _seed_run_with_messages(
     )
     db.add_all([user, assistant])
     db.flush()
-    run = AssistantChatRun(
-        conversation_id=conv.id,
-        user_message_id=user.id,
-        assistant_message_id=assistant.id,
+    run = make_main_agent_run(
+        db,
+        conversation=conv,
+        user_message=user,
+        assistant_message=assistant,
         status=status,
-        runtime_kind="main_agent",
+        build_revision=BUILD,
         runtime_contract_version=1,
-        required_app_build_revision=BUILD,
         state_revision=state_revision,
         memory_commit_status=memory_commit_status,
         lease_owner=lease_owner,
@@ -80,9 +81,6 @@ def _seed_run_with_messages(
         lease_expires_at=_utcnow() + timedelta(hours=1),
         heartbeat_at=_utcnow(),
     )
-    db.add(run)
-    db.commit()
-    db.refresh(run)
     db.refresh(assistant)
     db.refresh(user)
     db.refresh(conv)
@@ -637,14 +635,17 @@ class DurableMemoryReadyAndFinalizeTests(unittest.TestCase):
 
         # Active unique still blocks a later Run for the conversation.
         from app.assistant.models import AssistantChatRun
+        from tests.assistant_runtime_support import seed_main_agent_runtime
 
+        # Keep the second Run unflushed so this test observes the active-Run
+        # uniqueness boundary at commit time, while still carrying a real
+        # frozen Main-Agent runtime identity.
+        frozen = seed_main_agent_runtime(self.db, build_revision=BUILD)
         later = AssistantChatRun(
             conversation_id=conv.id,
             status="queued",
-            runtime_kind="main_agent",
-            runtime_contract_version=1,
-            required_app_build_revision=BUILD,
             memory_commit_status="pending",
+            **frozen.as_run_kwargs(),
         )
         self.db.add(later)
         with self.assertRaises(IntegrityError):

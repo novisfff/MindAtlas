@@ -5,8 +5,10 @@ import os
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from sqlalchemy.orm import Session
 
 if (os.environ.get("MINDATLAS_FAULTHANDLER") or "").strip().lower() in {"1", "true", "yes", "on"}:
     import faulthandler
@@ -18,6 +20,10 @@ if (os.environ.get("MINDATLAS_FAULTHANDLER") or "").strip().lower() in {"1", "tr
     except Exception:
         pass
 
+from app.assistant.runtime.readiness import (
+    AssistantReadinessService,
+    project_public_readiness,
+)
 from app.common.exceptions import register_exception_handlers
 from app.common.request_context import (
     normalize_request_id,
@@ -26,8 +32,9 @@ from app.common.request_context import (
     set_request_id,
     set_request_locale,
 )
-from app.common.responses import ApiResponse
+from app.common.responses import ApiResponse, ok_json_content
 from app.config import get_settings
+from app.database import get_db
 from app.entry_type.router import router as entry_type_router
 from app.tag.router import router as tag_router
 from app.entry.router import router as entry_router
@@ -39,6 +46,7 @@ from app.ai.router import router as ai_router
 from app.assistant.router import router as assistant_router
 from app.assistant.evaluation.router import skill_eval_router
 from app.assistant.skills.admin_router import skill_admin_parent_router
+from app.assistant.runtime.router import router as assistant_runtime_router
 from app.assistant.skills.router import (
     main_agent_profile_router,
     skill_package_router,
@@ -83,12 +91,28 @@ logging.basicConfig(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifespan: startup and shutdown events."""
-    from app.assistant.migration.rollout import validate_runtime_rollout_startup
-    from app.database import SessionLocal
+    """Application lifespan: startup and shutdown events.
 
-    with SessionLocal() as db:
-        validate_runtime_rollout_startup(db, settings=settings)
+    Plan 2 Task 9: no runtime selector validation. Invalid system seed logs a
+    bounded reason code and continues serving process liveness; Chat/bootstrap
+    fail closed via readiness. Never print seed/Profile content.
+    """
+    logger = logging.getLogger("app.lifespan")
+    try:
+        from app.assistant.runtime.seed import (
+            SystemSeedInvalid,
+            load_verified_assistant_system_seed,
+        )
+
+        load_verified_assistant_system_seed()
+    except SystemSeedInvalid as exc:
+        logger.error(
+            "assistant_system_seed_invalid reason=%s",
+            getattr(exc, "code", None) or str(exc),
+        )
+    except Exception as exc:  # noqa: BLE001 — startup must not crash on seed
+        reason = getattr(exc, "code", None) or type(exc).__name__
+        logger.error("assistant_system_seed_invalid reason=%s", reason)
     warm_assistant_config_system_catalog()
     setup_scheduler()
     yield
@@ -175,10 +199,27 @@ _setup = setup_router()
 _protected_browser = protected_browser_router()
 _machine = machine_router()
 
-# Public: liveness + safe initialization status/defaults + optional session probe.
+# Public: process liveness (no database) + assistant admission readiness.
 @_public.get("/health", response_model=ApiResponse)
 def health() -> ApiResponse:
+    """Process-only liveness. Never opens a database or evaluates readiness."""
     return ApiResponse.ok({"status": "ok"})
+
+
+@_public.get("/ready", name="public_assistant_ready")
+def public_ready(db: Session = Depends(get_db)) -> JSONResponse:
+    """Public assistant readiness: ready + stable reason codes only.
+
+    Chat admission and deployment acceptance consume this route. Compose
+    bootstrap and Web dependencies must keep using /health so initialization
+    and activation remain reachable when the system is not yet ready.
+    """
+    snapshot = AssistantReadinessService(db).evaluate()
+    body = ok_json_content(project_public_readiness(snapshot))
+    return JSONResponse(
+        status_code=200 if snapshot.ready else 503,
+        content=body,
+    )
 
 
 _public.include_router(public_system_settings_router)
@@ -207,6 +248,8 @@ _protected_browser.include_router(assistant_router)
 _protected_browser.include_router(assistant_config_router)
 _protected_browser.include_router(skill_package_router)
 _protected_browser.include_router(main_agent_profile_router)
+# Plan 2 Task 6: prepared rollout / activation / durable kill-switch CAS.
+_protected_browser.include_router(assistant_runtime_router)
 # Plan 09 admin/eval: always mounted; protected_browser enforces real session.
 _protected_browser.include_router(skill_admin_parent_router)
 _protected_browser.include_router(skill_eval_router)

@@ -18,6 +18,8 @@ from tests._bootstrap import bootstrap_backend_imports, reset_caches
 bootstrap_backend_imports()
 reset_caches()
 
+from tests.assistant_runtime_support import make_main_agent_run, seed_main_agent_runtime  # noqa: E402
+
 
 DURABLE_CHILD_TABLES = (
     "assistant_worker_registration",
@@ -142,60 +144,55 @@ class DurableRunModelContractTests(unittest.TestCase):
     # Checks / defaults on Run
     # ------------------------------------------------------------------
 
-    def test_run_defaults_are_legacy_compatible(self) -> None:
-        from app.assistant.models import AssistantChatRun, Conversation  # noqa: E402
+    def test_run_defaults_are_main_agent_only(self) -> None:
+        from app.assistant.models import AssistantChatRun  # noqa: E402
 
-        conv = Conversation(title="t")
-        self.db.add(conv)
-        self.db.flush()
-
-        run = AssistantChatRun(conversation_id=conv.id, status="queued")
-        self.db.add(run)
-        self.db.commit()
-        self.db.refresh(run)
-
-        self.assertEqual(run.runtime_kind, "legacy")
+        run = make_main_agent_run(self.db, status="queued")
+        self.assertEqual(run.runtime_kind, "main_agent")
         self.assertEqual(run.state_revision, 0)
         self.assertEqual(run.lease_generation, 0)
         self.assertEqual(run.recovery_count, 0)
-        self.assertEqual(run.memory_commit_status, "not_applicable")
-        self.assertIsNone(run.runtime_contract_version)
+        self.assertEqual(run.memory_commit_status, "pending")
+        self.assertEqual(run.runtime_contract_version, 1)
         self.assertIsNone(run.current_manifest_revision_id)
         self.assertIsNone(run.lease_owner)
+        self.assertIsNotNone(run.main_agent_rollout_revision_id)
+        self.assertIsInstance(run, AssistantChatRun)
 
     def test_run_status_accepts_main_agent_statuses(self) -> None:
-        from app.assistant.models import AssistantChatRun, Conversation  # noqa: E402
-
         # One conversation per status so the active partial unique index is not hit.
+        # Seed once and reuse frozen fields to avoid is_default uniqueness collisions.
+        from app.assistant.models import AssistantChatRun, Conversation  # noqa: E402
+        from tests.assistant_runtime_support import seed_main_agent_runtime
+
+        seeded = seed_main_agent_runtime(self.db, build_revision="status-matrix")
         for status in (*ACTIVE_STATUSES, *TERMINAL_STATUSES):
-            conv = Conversation(title=f"t-{status}")
+            conv = Conversation(title=f"s-{status}")
             self.db.add(conv)
             self.db.flush()
-            needs_main = status in (
-                "recovering",
-                "waiting_input",
-                "needs_reconciliation",
+            kwargs = seeded.as_run_kwargs()
+            kwargs.update(
+                {
+                    "conversation_id": conv.id,
+                    "status": status,
+                    "state_revision": 0,
+                    "last_event_seq": 0,
+                    "memory_commit_status": "pending",
+                }
             )
-            run = AssistantChatRun(
-                conversation_id=conv.id,
-                status=status,
-                runtime_kind="main_agent" if needs_main else "legacy",
-                runtime_contract_version=1 if needs_main else None,
-                required_app_build_revision="build-1" if needs_main else None,
-            )
-            self.db.add(run)
-            self.db.flush()
-        self.db.commit()
+            self.db.add(AssistantChatRun(**kwargs))
+            self.db.commit()
 
     def test_run_status_rejects_unknown(self) -> None:
         from app.assistant.models import AssistantChatRun, Conversation  # noqa: E402
 
+        seeded = seed_main_agent_runtime(self.db)
         conv = Conversation(title="t")
         self.db.add(conv)
         self.db.flush()
-        self.db.add(
-            AssistantChatRun(conversation_id=conv.id, status="not_a_status")
-        )
+        kwargs = seeded.as_run_kwargs()
+        kwargs.update({"conversation_id": conv.id, "status": "not_a_status"})
+        self.db.add(AssistantChatRun(**kwargs))
         with self.assertRaises(IntegrityError):
             self.db.commit()
         self.db.rollback()
@@ -203,63 +200,57 @@ class DurableRunModelContractTests(unittest.TestCase):
     def test_run_runtime_kind_check(self) -> None:
         from app.assistant.models import AssistantChatRun, Conversation  # noqa: E402
 
+        seeded = seed_main_agent_runtime(self.db)
         conv = Conversation(title="t")
         self.db.add(conv)
         self.db.flush()
-        self.db.add(
-            AssistantChatRun(
-                conversation_id=conv.id,
-                status="queued",
-                runtime_kind="other",
-            )
-        )
+        kwargs = seeded.as_run_kwargs()
+        kwargs.update({"conversation_id": conv.id, "status": "queued", "runtime_kind": "other"})
+        self.db.add(AssistantChatRun(**kwargs))
         with self.assertRaises(IntegrityError):
             self.db.commit()
         self.db.rollback()
 
     def test_run_memory_commit_status_check(self) -> None:
-        from app.assistant.models import AssistantChatRun, Conversation  # noqa: E402
+        from app.assistant.models import Conversation  # noqa: E402
 
         conv = Conversation(title="t")
         self.db.add(conv)
         self.db.flush()
-        self.db.add(
-            AssistantChatRun(
-                conversation_id=conv.id,
+        with self.assertRaises(IntegrityError):
+            make_main_agent_run(
+                self.db,
                 status="queued",
+                conversation=conv,
+                commit=False,
                 memory_commit_status="bogus",
             )
-        )
-        with self.assertRaises(IntegrityError):
-            self.db.commit()
         self.db.rollback()
 
     def test_run_state_revision_and_lease_generation_non_negative(self) -> None:
-        from app.assistant.models import AssistantChatRun, Conversation  # noqa: E402
+        from app.assistant.models import Conversation  # noqa: E402
 
         conv = Conversation(title="t")
         self.db.add(conv)
         self.db.flush()
-        self.db.add(
-            AssistantChatRun(
-                conversation_id=conv.id,
+        with self.assertRaises(IntegrityError):
+            make_main_agent_run(
+                self.db,
                 status="queued",
+                conversation=conv,
+                commit=False,
                 state_revision=-1,
             )
-        )
-        with self.assertRaises(IntegrityError):
-            self.db.commit()
         self.db.rollback()
 
-        self.db.add(
-            AssistantChatRun(
-                conversation_id=conv.id,
+        with self.assertRaises(IntegrityError):
+            make_main_agent_run(
+                self.db,
                 status="queued",
+                conversation=conv,
+                commit=False,
                 lease_generation=-1,
             )
-        )
-        with self.assertRaises(IntegrityError):
-            self.db.commit()
         self.db.rollback()
 
     def test_run_active_status_partial_unique_index_defined(self) -> None:
@@ -294,8 +285,7 @@ class DurableRunModelContractTests(unittest.TestCase):
         conv = Conversation(title="t")
         self.db.add(conv)
         self.db.flush()
-        run = AssistantChatRun(conversation_id=conv.id, status="queued")
-        self.db.add(run)
+        run = make_main_agent_run(self.db, status="queued", conversation=conv, commit=False)
         self.db.flush()
 
         e1 = AssistantChatRunEvent(
@@ -367,8 +357,7 @@ class DurableRunModelContractTests(unittest.TestCase):
         conv = Conversation(title="t")
         self.db.add(conv)
         self.db.flush()
-        run = AssistantChatRun(conversation_id=conv.id, status="queued")
-        self.db.add(run)
+        run = make_main_agent_run(self.db, status="queued", conversation=conv, commit=False)
         self.db.flush()
         self.db.add(
             AssistantChatRunEvent(
@@ -438,21 +427,10 @@ class DurableRunModelContractTests(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def _conversation_and_run(self, *, runtime_kind: str = "main_agent"):
-        from app.assistant.models import AssistantChatRun, Conversation  # noqa: E402
-
-        conv = Conversation(title="durable")
-        self.db.add(conv)
-        self.db.flush()
-        run = AssistantChatRun(
-            conversation_id=conv.id,
-            status="queued",
-            runtime_kind=runtime_kind,
-            runtime_contract_version=1 if runtime_kind == "main_agent" else None,
-            required_app_build_revision="build-1" if runtime_kind == "main_agent" else None,
-        )
-        self.db.add(run)
-        self.db.flush()
-        return conv, run
+        if runtime_kind != "main_agent":
+            raise AssertionError("live schema admits main_agent only")
+        run = make_main_agent_run(self.db, status="queued", build_revision="build-1")
+        return run.conversation, run
 
     def test_manifest_revision_uniqueness(self) -> None:
         from app.assistant.durable.models import AssistantRunManifestRevision  # noqa: E402
@@ -979,7 +957,7 @@ class DurableRunModelContractTests(unittest.TestCase):
         conv = Conversation(title="l1")
         self.db.add(conv)
         self.db.flush()
-        run = AssistantChatRun(conversation_id=conv.id, status="completed")
+        run = make_main_agent_run(self.db, status="completed", conversation=conv, commit=True)
         self.db.add(run)
         self.db.flush()
         mem = AssistantConversationL1Memory(

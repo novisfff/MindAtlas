@@ -19,6 +19,7 @@ import os
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Iterator
 
 import pytest
@@ -282,31 +283,79 @@ def _reset_to_parent(engine: Engine) -> str:
 
 
 def _seed_conversation_and_run(session: Session, *, runtime_kind: str = "legacy"):
-    """Insert minimal Conversation + AssistantChatRun for FK tests."""
-    from app.assistant.models import AssistantChatRun, Conversation
-    from app.common.time import utcnow
+    """Insert the historical Plan-10 Task-1 run shape without current ORM.
 
-    conv = Conversation(id=uuid.uuid4(), title="plan10-test")
-    session.add(conv)
-    session.flush()
-    run_kwargs = {
-        "id": uuid.uuid4(),
-        "conversation_id": conv.id,
-        "status": "completed",
-        "runtime_kind": runtime_kind,
-        "last_event_seq": 0,
-        "checkpoint_seq": 0,
-        "created_at": utcnow(),
-        "updated_at": utcnow(),
-    }
-    if runtime_kind == "main_agent":
-        run_kwargs["runtime_contract_version"] = 1
-        run_kwargs["required_app_build_revision"] = "development"
-        run_kwargs["capability_ledger_mode"] = "legacy_read_only"
-    run = AssistantChatRun(**run_kwargs)
-    session.add(run)
-    session.flush()
-    return conv, run
+    These cases intentionally stop at the Task-1 migration, whose
+    ``assistant_chat_run`` table predates Plan 2's frozen runtime-identity
+    columns.  The current ORM must not be used against that historical schema.
+    """
+    conv_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    session.execute(
+        text(
+            """
+            INSERT INTO assistant_conversation
+                (id, title, is_archived, created_at, updated_at)
+            VALUES
+                (:id, :title, false, NOW(), NOW())
+            """
+        ),
+        {"id": conv_id, "title": "plan10-test"},
+    )
+    session.execute(
+        text(
+            """
+            INSERT INTO assistant_chat_run
+                (id, conversation_id, status, runtime_kind, last_event_seq,
+                 checkpoint_seq, state_revision, lease_generation,
+                 recovery_count, memory_commit_status, created_at, updated_at)
+            VALUES
+                (:id, :conversation_id, :status, :runtime_kind, 0,
+                 0, 0, 0, 0, 'pending', NOW(), NOW())
+            """
+        ),
+        {
+            "id": run_id,
+            "conversation_id": conv_id,
+            "status": "completed",
+            "runtime_kind": runtime_kind,
+        },
+    )
+    return (
+        SimpleNamespace(id=conv_id, title="plan10-test"),
+        SimpleNamespace(id=run_id, conversation_id=conv_id),
+    )
+
+
+def _insert_historical_run(
+    session: Session,
+    *,
+    conversation_id: uuid.UUID,
+    status: str,
+    runtime_kind: str,
+) -> uuid.UUID:
+    """Insert one historical Run for constraints tested before Plan 2."""
+    run_id = uuid.uuid4()
+    session.execute(
+        text(
+            """
+            INSERT INTO assistant_chat_run
+                (id, conversation_id, status, runtime_kind, last_event_seq,
+                 checkpoint_seq, state_revision, lease_generation,
+                 recovery_count, memory_commit_status, created_at, updated_at)
+            VALUES
+                (:id, :conversation_id, :status, :runtime_kind, 0,
+                 0, 0, 0, 0, 'pending', NOW(), NOW())
+            """
+        ),
+        {
+            "id": run_id,
+            "conversation_id": conversation_id,
+            "status": status,
+            "runtime_kind": runtime_kind,
+        },
+    )
+    return run_id
 
 
 def _seed_eval_run(session: Session, *, purpose: str = "admin_evaluation"):
@@ -578,32 +627,21 @@ def test_shadow_comparison_and_eval_purpose_and_plan06_unique() -> None:
                 EvaluationRepositoryError,
             )
             from app.assistant.migration.repository import RuntimeMigrationRepository
-            from app.assistant.models import AssistantChatRun
-
             conv, prod_run = _seed_conversation_and_run(session, runtime_kind="legacy")
             # Second nonterminal production run must fail Plan 06 unique.
-            nonterm = AssistantChatRun(
-                id=uuid.uuid4(),
+            _insert_historical_run(
+                session,
                 conversation_id=conv.id,
                 status="queued",
                 runtime_kind="legacy",
-                last_event_seq=0,
-                checkpoint_seq=0,
             )
-            session.add(nonterm)
-            session.flush()
             with pytest.raises((IntegrityError, DBAPIError)):
-                session.add(
-                    AssistantChatRun(
-                        id=uuid.uuid4(),
-                        conversation_id=conv.id,
-                        status="running",
-                        runtime_kind="legacy",
-                        last_event_seq=0,
-                        checkpoint_seq=0,
-                    )
+                _insert_historical_run(
+                    session,
+                    conversation_id=conv.id,
+                    status="running",
+                    runtime_kind="legacy",
                 )
-                session.flush()
             session.rollback()
 
             # Re-seed after rollback.

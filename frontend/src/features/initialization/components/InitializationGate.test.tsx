@@ -60,7 +60,7 @@ describe('InitializationGate', () => {
     expect(screen.getByText('initialize-page')).toBeInTheDocument()
   })
 
-  it('redirects initialized users away from the initialization route', () => {
+  it('allows initialized users to remain on the initialization route for activation', () => {
     mockedUseInitializationStatusQuery.mockReturnValue({
       isLoading: false,
       isError: false,
@@ -70,7 +70,8 @@ describe('InitializationGate', () => {
 
     renderGate('/initialize')
 
-    expect(screen.getByText('dashboard-page')).toBeInTheDocument()
+    // Post-init activation is explicit and happens on the initialization route.
+    expect(screen.getByText('initialize-page')).toBeInTheDocument()
   })
 
   it('renders the loading state while status is pending on app routes', () => {

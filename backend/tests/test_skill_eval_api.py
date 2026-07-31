@@ -119,7 +119,7 @@ class SkillEvalApiSessionTests(unittest.TestCase):
     def _bootstrap_profile_version(self, client, headers: dict[str, str]) -> str:
         import copy
 
-        from app.assistant.skills.schemas import default_main_agent_profile_snapshot
+        from app.assistant.skills.schemas import default_main_agent_profile_snapshot_v2
 
         profile = client.get(
             "/api/assistant-config/main-agent-profiles/default",
@@ -129,7 +129,7 @@ class SkillEvalApiSessionTests(unittest.TestCase):
             return str(uuid.uuid4())
         data = profile.json()["data"]
         rev = int(data.get("aggregateRevision") or 0)
-        snap = copy.deepcopy(default_main_agent_profile_snapshot().normalized_payload())
+        snap = copy.deepcopy(default_main_agent_profile_snapshot_v2().normalized_payload())
         snap["basePrompt"] = "eval admission profile"
         draft = client.put(
             "/api/assistant-config/main-agent-profiles/default/draft",

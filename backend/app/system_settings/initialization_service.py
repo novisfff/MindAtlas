@@ -355,7 +355,8 @@ class SystemInitializationService:
     ) -> None:
         assistant_config_service = AssistantConfigService(self.db)
         # Plan 10: legacy skill rows are gone; re-seed workflows/agents via catalog sync.
-        assistant_config_service.ensure_system_catalog_synced()
+        # Flush only — InitializationCoordinator owns the sole commit.
+        assistant_config_service.ensure_system_catalog_synced(commit=False)
         assistant_config_service.reset_all_system_behaviors(confirm=True, commit=False)
 
         runtime_service = SystemRuntimeConfigService(self.db)

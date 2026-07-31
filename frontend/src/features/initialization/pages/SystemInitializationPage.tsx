@@ -19,6 +19,10 @@ import { toast } from 'sonner'
 import { Logo } from '@/components/Logo'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
+import {
+  AssistantRuntimeActivationCard,
+  useAssistantReadinessDiagnosticsQuery,
+} from '@/features/assistant-runtime'
 import { initializationKeys, useInitializationDefaultsQuery, useInitializationStatusQuery, useInitializeSystemMutation } from '../queries'
 import {
   setPersistedInitializationStatus,
@@ -672,12 +676,20 @@ export function SystemInitializationPage() {
   const [rerankMode, setRerankMode] = useState<'enabled' | 'disabled'>(() => {
     return resolveRerankMode(useInitializationWizardStore.getState().runtimeConfigDraft.knowledgeGraph)
   })
+  // Post-init activation state lives in component state only (never storage).
+  const [pendingActivation, setPendingActivation] = useState<{
+    preparedRolloutRevisionId: string
+    rolloutControlRevision: number
+  } | null>(null)
+  const diagnosticsQuery = useAssistantReadinessDiagnosticsQuery(Boolean(pendingActivation))
 
   useEffect(() => {
-    if (statusQuery.data?.initialized) {
+    // Only auto-leave when already initialized AND we are not holding a local
+    // pending activation card from this session's successful initialize call.
+    if (statusQuery.data?.initialized && !pendingActivation) {
       navigate('/dashboard', { replace: true })
     }
-  }, [navigate, statusQuery.data])
+  }, [navigate, pendingActivation, statusQuery.data])
 
   useEffect(() => {
     if (!defaultsQuery.data) return
@@ -915,7 +927,17 @@ export function SystemInitializationPage() {
       await queryClient.invalidateQueries({ queryKey: initializationKeys.status })
       await queryClient.invalidateQueries({ queryKey: ['operator-session'] })
       toast.success(t('initialization.success'))
-      navigate('/dashboard', { replace: true })
+
+      // Initialization prepares a rollout but never activates it. Keep the Plan 1
+      // session and show the explicit activation card with returned IDs in state only.
+      if (result.preparedRolloutRevisionId) {
+        setPendingActivation({
+          preparedRolloutRevisionId: result.preparedRolloutRevisionId,
+          rolloutControlRevision: result.rolloutControlRevision ?? 0,
+        })
+      } else {
+        navigate('/dashboard', { replace: true })
+      }
     } catch {
       // Never echo server/error text that might reflect secret material.
       toast.error(t('initialization.submitError'))
@@ -1653,6 +1675,58 @@ export function SystemInitializationPage() {
     )
   }
   const stepLabel = t(`initialization.steps.${STEP_KEYS[step]}.label`)
+
+  if (pendingActivation) {
+    return (
+      <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(59,130,246,0.18),_transparent_32%),radial-gradient(circle_at_top_right,_rgba(15,23,42,0.08),_transparent_28%),linear-gradient(180deg,_#f8fbff,_#f5f7fb_45%,_#eef2f9)] px-4 py-6 sm:px-6 lg:px-8">
+        <div className="mx-auto max-w-3xl space-y-6">
+          <div className="overflow-hidden rounded-[32px] border border-white/70 bg-white/88 p-6 shadow-[0_40px_120px_rgba(15,23,42,0.14)] backdrop-blur-xl sm:p-8">
+            <div className="mb-6 flex items-center gap-3">
+              <div className="rounded-2xl bg-slate-900 p-3 text-white">
+                <Logo className="h-7 w-7" />
+              </div>
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+                  {t('initialization.eyebrow')}
+                </p>
+                <h1 className="text-xl font-semibold text-slate-900">
+                  {t('initialization.activationTitle', 'Activate assistant runtime')}
+                </h1>
+                <p className="text-sm text-slate-600">
+                  {t(
+                    'initialization.activationDescription',
+                    'Initialization prepared a Main Agent rollout. Activate it after a compatible worker is online.',
+                  )}
+                </p>
+              </div>
+            </div>
+            <AssistantRuntimeActivationCard
+              preparedRolloutRevisionId={pendingActivation.preparedRolloutRevisionId}
+              rolloutControlRevision={pendingActivation.rolloutControlRevision}
+              diagnostics={diagnosticsQuery.data ?? null}
+              onActivated={() => {
+                setPendingActivation(null)
+                navigate('/dashboard', { replace: true })
+              }}
+            />
+            <div className="mt-4 flex justify-end">
+              <Button
+                type="button"
+                variant="outline"
+                className="rounded-2xl"
+                onClick={() => {
+                  setPendingActivation(null)
+                  navigate('/dashboard', { replace: true })
+                }}
+              >
+                {t('initialization.activationSkip', 'Continue without activating')}
+              </Button>
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(59,130,246,0.18),_transparent_32%),radial-gradient(circle_at_top_right,_rgba(15,23,42,0.08),_transparent_28%),linear-gradient(180deg,_#f8fbff,_#f5f7fb_45%,_#eef2f9)] px-4 py-6 sm:px-6 lg:px-8">

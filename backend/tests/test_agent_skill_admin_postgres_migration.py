@@ -27,6 +27,7 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from tests._bootstrap import bootstrap_backend_imports, reset_caches
+from tests.postgres_destructive_guard import reset_disposable_public_schema
 
 bootstrap_backend_imports()
 reset_caches()
@@ -36,7 +37,7 @@ TASK1_HEAD = "403414a62e55"
 # Sole pre-merge Plan 09 head is the evaluation workbench revision (09B).
 # Task 1 lifecycle (09A) remains a reachable intermediate (parent of 09B).
 PLAN09_HEAD = "027869a00a47"
-CURRENT_HEAD = "9f3c1a7e2b40"
+CURRENT_HEAD = "b6e2d4f8a901"
 DOWNGRADE_BLOCKED_TOKEN = (
     "MINDATLAS_PLAN09_DOWNGRADE_BLOCKED_ARCHIVED_OR_CATALOG_EVIDENCE"
 )
@@ -181,6 +182,10 @@ def _table_exists(conn, table: str) -> bool:
     ).first()
     return row is not None
 
+
+def _drop_public_schema(engine: Engine) -> None:
+    reset_disposable_public_schema(engine)
+
 def _prepare_plan09_downgrade(conn) -> None:
     """Prepare DB for Plan 09 guarded downgrades without touching immutable rows.
 
@@ -237,58 +242,15 @@ def _prepare_plan09_downgrade(conn) -> None:
 
 
 def _reset_to_parent() -> None:
-    """Bring disposable DB to Plan 08 parent of Task 1 lifecycle migration."""
+    """Build the historical parent from an empty disposable schema.
+
+    The current head includes guarded destructive migrations, so a historical
+    migration test must not attempt to downgrade a current-schema database.
+    """
     _configure_database_env(_POSTGRES_URL)
-    engine = create_engine(_as_sqlalchemy_url(_POSTGRES_URL), future=True)
-    try:
-        try:
-            current = _current_revision(engine)
-        except Exception:
-            current = None
-        if current in {TASK1_HEAD, PLAN09_HEAD}:
-            prior_eval_ack = os.environ.get("MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK")
-            prior_ledger_ack = os.environ.get(
-                "MINDATLAS_PLAN08_DOWNGRADE_ACK_PURGE_LEDGER_DATA"
-            )
-            os.environ["MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK"] = "1"
-            os.environ["MINDATLAS_PLAN08_DOWNGRADE_ACK_PURGE_LEDGER_DATA"] = "1"
-            try:
-                with engine.begin() as conn:
-                    _prepare_plan09_downgrade(conn)
-                _run_alembic("downgrade", PARENT_REVISION)
-            finally:
-                if prior_eval_ack is None:
-                    os.environ.pop("MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK", None)
-                else:
-                    os.environ["MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK"] = prior_eval_ack
-                if prior_ledger_ack is None:
-                    os.environ.pop(
-                        "MINDATLAS_PLAN08_DOWNGRADE_ACK_PURGE_LEDGER_DATA", None
-                    )
-                else:
-                    os.environ[
-                        "MINDATLAS_PLAN08_DOWNGRADE_ACK_PURGE_LEDGER_DATA"
-                    ] = prior_ledger_ack
-        elif current != PARENT_REVISION:
-            # Prefer real upgrade/downgrade; stamp only as last resort.
-            try:
-                _run_alembic("upgrade", PARENT_REVISION)
-            except Exception:
-                # If already past parent but not recognized, force cycle via head.
-                try:
-                    prior_eval_ack = os.environ.get("MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK")
-                    os.environ["MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK"] = "1"
-                    with engine.begin() as conn:
-                        _prepare_plan09_downgrade(conn)
-                    _run_alembic("downgrade", PARENT_REVISION)
-                    if prior_eval_ack is None:
-                        os.environ.pop("MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK", None)
-                    else:
-                        os.environ["MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK"] = prior_eval_ack
-                except Exception:
-                    _run_alembic("stamp", PARENT_REVISION)
-    finally:
-        engine.dispose()
+    with _engine() as engine:
+        _drop_public_schema(engine)
+    _run_alembic("upgrade", PARENT_REVISION)
     with _engine() as eng:
         assert _current_revision(eng) == PARENT_REVISION, (
             f"expected parent {PARENT_REVISION}, got {_current_revision(eng)}"
@@ -755,10 +717,10 @@ def test_09a_upgrade_downgrade_upgrade_is_independent() -> None:
 
 def _ensure_task1_head() -> None:
     _configure_database_env(_POSTGRES_URL)
-    try:
-        _run_alembic("upgrade", TASK1_HEAD)
-    except Exception:
-        _run_alembic("stamp", TASK1_HEAD)
+    with _engine() as engine:
+        current = _current_revision(engine)
+    if current != TASK1_HEAD:
+        _reset_to_parent()
         _run_alembic("upgrade", TASK1_HEAD)
 
 

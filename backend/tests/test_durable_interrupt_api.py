@@ -116,7 +116,8 @@ def _seed_revisions(db, run_id, *, parent_ledger=None):
 
 
 def _make_waiting_run(db, *, status: str = "waiting_approval", state_revision: int = STATE_REVISION):
-    from app.assistant.models import AssistantChatRun, Conversation, Message
+    from app.assistant.models import Conversation, Message
+    from tests.assistant_runtime_support import make_main_agent_run
 
     conv = Conversation(title=f"t-{uuid.uuid4().hex[:8]}")
     db.add(conv)
@@ -124,20 +125,19 @@ def _make_waiting_run(db, *, status: str = "waiting_approval", state_revision: i
     msg = Message(conversation_id=conv.id, role="assistant", content="")
     db.add(msg)
     db.flush()
-    run = AssistantChatRun(
-        conversation_id=conv.id,
-        assistant_message_id=msg.id,
+    run = make_main_agent_run(
+        db,
+        conversation=conv,
+        assistant_message=msg,
         status=status,
-        runtime_kind="main_agent",
+        build_revision="build-test-1",
         runtime_contract_version=1,
-        required_app_build_revision="build-test-1",
         state_revision=state_revision,
         last_event_seq=0,
         memory_commit_status="pending",
         deadline_at=None,
+        commit=False,
     )
-    db.add(run)
-    db.flush()
     return conv, msg, run
 
 

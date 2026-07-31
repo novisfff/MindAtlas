@@ -1,0 +1,50 @@
+{
+  "buildCompatibility": {
+    "capabilityFeatureDigest": "11af8408a0d3a6ff93a5170a9bb6758f430773d1e1343ee3982396f0ed9cd3b4",
+    "checkpointCodecVersion": 3,
+    "runtimeContractVersion": 1
+  },
+  "capabilityBindings": [
+    {
+      "key": "create_entry",
+      "targetContractDigest": "78ea168c7d4db0042cb3f79db28dcd3a3753231985a09e7fa0ff28d866ed9980",
+      "type": "tool"
+    },
+    {
+      "key": "get_entry_detail",
+      "targetContractDigest": "830847261d280dece865b84226b5f35f8624ef2c98a4b6e9c1d461c9ba719793",
+      "type": "tool"
+    },
+    {
+      "key": "search_entries",
+      "targetContractDigest": "0f5c04d84f3954e58927c26b694dd9c8d135df472352b782c6f17123b1d58559",
+      "type": "tool"
+    }
+  ],
+  "manifestDigest": "3ba69223e9c1a3ab1783c8a549a1b7cf56410f36f60a7fb67ba1f4fc84275237",
+  "modelBindingSlots": [
+    "assistant"
+  ],
+  "profileArtifact": {
+    "byteSize": 1638,
+    "mediaType": "application/json",
+    "relativePath": "main-agent-profile.v2.json",
+    "sha256": "0d755a8ab001de152508b4a3a8474fc8c037fe80bed2b46a7ac0dadf364aed11"
+  },
+  "schemaVersion": 1,
+  "seedContractDigest": "1b91fef44c4b1b0d68bcd5ebaf702c02985c41124f73a58a2e4a92f93f7ea040",
+  "skillArtifacts": [
+    {
+      "byteSize": 655,
+      "mediaType": "text/markdown",
+      "relativePath": "skills/mindatlas-universal/SKILL.md",
+      "sha256": "93367208d8b4eb73d9922bd644f66ef0e94e96fcaec39ada3584b507f71857bd"
+    },
+    {
+      "byteSize": 672,
+      "mediaType": "application/yaml",
+      "relativePath": "skills/mindatlas-universal/mindatlas.yaml",
+      "sha256": "2e15e6937c08af27ea4fcff4d082ca72612875ffa9d98574854bb954fa2bce2e"
+    }
+  ]
+}

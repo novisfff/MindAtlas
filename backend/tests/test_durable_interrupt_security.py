@@ -19,26 +19,23 @@ PEPPER = "unit-test-interrupt-pepper-not-for-prod-32b"
 
 
 def _make_main_agent_run(db, *, status: str = "waiting_approval", **kwargs: Any):
-    from app.assistant.models import AssistantChatRun, Conversation
+    from app.assistant.models import Conversation
+    from tests.assistant_runtime_support import make_main_agent_run
 
     conv = Conversation(title=f"t-{uuid.uuid4().hex[:8]}")
     db.add(conv)
     db.flush()
-    run = AssistantChatRun(
-        conversation_id=conv.id,
+    return make_main_agent_run(
+        db,
+        conversation=conv,
         status=status,
-        runtime_kind="main_agent",
+        build_revision=kwargs.pop("required_app_build_revision", "build-test-1"),
         runtime_contract_version=1,
-        required_app_build_revision="build-test-1",
         state_revision=int(kwargs.pop("state_revision", 1)),
         last_event_seq=int(kwargs.pop("last_event_seq", 0)),
         memory_commit_status=kwargs.pop("memory_commit_status", "pending"),
         **kwargs,
     )
-    db.add(run)
-    db.commit()
-    db.refresh(run)
-    return run
 
 
 def _seed_revisions(db, run_id):

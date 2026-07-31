@@ -24,6 +24,10 @@ const GraphPage = lazyNamed(() => import('@/features/graph/GraphPage'), 'GraphPa
 const DashboardPage = lazyNamed(() => import('@/features/dashboard/DashboardPage'), 'DashboardPage')
 const CalendarPage = lazyNamed(() => import('@/features/calendar/CalendarPage'), 'CalendarPage')
 const SettingsPage = lazyNamed(() => import('@/features/settings/SettingsPage'), 'SettingsPage')
+const AssistantRuntimeSettingsPage = lazyNamed(
+  () => import('@/features/settings/pages/AssistantRuntimeSettings'),
+  'AssistantRuntimeSettingsPage',
+)
 const EntryTypeSettings = lazyNamed(() => import('@/features/settings/pages/EntryTypeSettings'), 'EntryTypeSettings')
 const TagSettings = lazyNamed(() => import('@/features/settings/pages/TagSettings'), 'TagSettings')
 const AiProviderSettings = lazyNamed(() => import('@/features/ai-providers/pages/AiProviderSettings'), 'AiProviderSettings')
@@ -123,6 +127,10 @@ export default function App() {
               <Route path="/graph" element={withPageFallback(<GraphPage />)} />
               <Route path="/calendar" element={withPageFallback(<CalendarPage />)} />
               <Route path="/settings" element={withPageFallback(<SettingsPage />)} />
+              <Route
+                path="/settings/assistant-runtime"
+                element={withPageFallback(<AssistantRuntimeSettingsPage />)}
+              />
               <Route path="/settings/entry-types" element={withPageFallback(<EntryTypeSettings />)} />
               <Route path="/settings/tags" element={withPageFallback(<TagSettings />)} />
               <Route path="/settings/ai-providers" element={withPageFallback(<AiProviderSettings />)} />

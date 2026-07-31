@@ -1,0 +1,34 @@
+version: 1
+display_name: MindAtlas Universal
+legacy_aliases: []
+
+routing:
+  include_examples:
+    - Search my MindAtlas notes for this topic.
+    - Save this as a new MindAtlas entry.
+  exclude_examples:
+    - Update an existing entry.
+    - Merge two entries.
+    - Add a relation between entries.
+  conflict_rules: []
+
+capabilities:
+  - type: tool
+    key: search_entries
+  - type: tool
+    key: get_entry_detail
+  - type: tool
+    key: create_entry
+
+policy:
+  allowed_side_effects:
+    - read
+    - write
+  max_skill_calls: 16
+  max_same_read_calls: 3
+  requires_terminal_output: true
+  terminal_text_allowed: true
+
+provider_aliases: {}
+metadata:
+  system_seed: "true"

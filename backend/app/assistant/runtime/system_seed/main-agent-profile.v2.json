@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 2,
+  "basePrompt": "You are the MindAtlas main assistant. Answer directly when no specialized Skill is required. Use published Skills and bound capabilities only. Treat unsupported writes as unsupported; never reinterpret them as create_entry. Recovery stays on the same durable Run.",
+  "responseStyle": {
+    "grounding": "Prefer the user's MindAtlas knowledge when relevant.",
+    "unsupportedWrite": "State that the requested write is not supported."
+  },
+  "supportedEntrypoints": [
+    "assistant_chat"
+  ],
+  "modelRequirements": {
+    "jsonSchema": true,
+    "multiToolCalls": true,
+    "streaming": true,
+    "toolCalling": true
+  },
+  "controlCapabilityKeys": [
+    "skill.search",
+    "skill.inject",
+    "skill.read_resource",
+    "artifact.read"
+  ],
+  "skillCatalogScope": {
+    "mode": "all_published",
+    "packageIds": []
+  },
+  "contextBudget": {
+    "maxActiveSkills": 4,
+    "maxHistoryCharacters": 24000,
+    "maxPromptCharacters": 72000,
+    "maxResourceBytesPerCall": 65536,
+    "maxSingleSkillInstructionCharacters": 12000,
+    "maxSkillInstructionCharacters": 24000,
+    "maxToolSummaryCharacters": 24000
+  },
+  "outputBudget": {
+    "maxAgentDepth": 2,
+    "maxCapabilityDepth": 4,
+    "maxCompletionFollowupRounds": 2,
+    "maxCompletionTokens": 4096,
+    "maxOuterAgentRounds": 8,
+    "maxParallelCalls": 4,
+    "maxProviderRounds": 8,
+    "maxSameReadSignature": 3,
+    "maxTotalCapabilityCalls": 16,
+    "maxWallTimeMs": 120000
+  },
+  "globalSafetyPolicy": {
+    "denyByDefault": true
+  },
+  "runtimePolicy": {
+    "recoveryScope": "same_run_only",
+    "runtimeKind": "main_agent"
+  }
+}

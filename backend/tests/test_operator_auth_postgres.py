@@ -2,7 +2,8 @@
 
 Requires ``MINDATLAS_TEST_POSTGRES_URL``. Proves:
 
-- additive revision ``9f3c1a7e2b40`` is sole head after upgrade
+- additive revision ``9f3c1a7e2b40`` remains the historical target for
+  operator-control-plane migration fixtures
 - singleton / digest / expiry / revoke-reason checks
 - unique token_digest and singleton_key
 - append-only ``operator_audit_event`` (UPDATE/DELETE raise SQLSTATE 55000)
@@ -25,12 +26,14 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from tests._bootstrap import bootstrap_backend_imports, reset_caches
+from tests.postgres_destructive_guard import reset_disposable_public_schema
 
 bootstrap_backend_imports()
 reset_caches()
 
 PARENT_REVISION = "3bd7bc4257c9"
 TASK2_HEAD = "9f3c1a7e2b40"
+CURRENT_HEAD = "b6e2d4f8a901"
 DOWNGRADE_BLOCKED_TOKEN = "operator_auth_downgrade_blocked"
 DESTRUCTIVE_DOWNGRADE_ENV = "MINDATLAS_TEST_DESTRUCTIVE_DOWNGRADE"
 
@@ -173,10 +176,7 @@ def _table_exists(conn, table: str) -> bool:
 
 
 def _drop_public_schema(engine: Engine) -> None:
-    with engine.begin() as conn:
-        conn.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
-        conn.execute(text("CREATE SCHEMA public"))
-        conn.execute(text("GRANT ALL ON SCHEMA public TO public"))
+    reset_disposable_public_schema(engine)
 
 
 def _ensure_parent_revision() -> None:
@@ -431,7 +431,7 @@ def test_operator_alembic_sole_head() -> None:
 
     script = ScriptDirectory.from_config(_alembic_config())
     heads = script.get_heads()
-    assert heads == [TASK2_HEAD], f"expected sole head {TASK2_HEAD}, got {heads}"
+    assert heads == [CURRENT_HEAD], f"expected sole head {CURRENT_HEAD}, got {heads}"
 
 
 def test_operator_audit_is_append_only(pg_session: Session) -> None:

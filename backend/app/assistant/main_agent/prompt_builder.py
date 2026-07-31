@@ -42,7 +42,12 @@ from app.assistant.provider_loop.messages import (
     ProviderUserMessage,
     provider_message_payload,
 )
-from app.assistant.skills.schemas import ContextBudgetV1, MainAgentProfileSnapshotV1
+from app.assistant.skills.schemas import (
+    ContextBudgetV1,
+    MainAgentProfileSnapshotV1,
+    MainAgentProfileSnapshotV2,
+    ReadableMainAgentProfileSnapshot,
+)
 
 # Plan §6.3 defaults / hard ceilings for prompt layers.
 DEFAULT_PLATFORM_PROFILE_CHARS = 12_000
@@ -116,7 +121,7 @@ def _min_positive(*values: int | None) -> int:
 
 def resolve_prompt_budget_limits(
     *,
-    profile: MainAgentProfileSnapshotV1,
+    profile: ReadableMainAgentProfileSnapshot,
     caps: PromptBudgetCaps | None = None,
 ) -> PromptBudgetLimits:
     """Combine plan defaults, Profile snapshot, hard ceilings, and optional lower caps."""
@@ -206,9 +211,27 @@ def _response_style_text(style: Mapping[str, str]) -> str:
     return LINE_BREAK.join(parts)
 
 
+def _runtime_policy_line(profile: ReadableMainAgentProfileSnapshot) -> str:
+    """Render immutable main-agent runtime policy; never Profile-derived Legacy permission."""
+    if isinstance(profile, MainAgentProfileSnapshotV2):
+        runtime_line = (
+            "runtime_kind=main_agent "
+            "recovery_scope=same_run_only "
+            "cross_runtime_fallback=false"
+        )
+        return runtime_line
+    # Historical V1 remains parseable for read-only display paths only. Production
+    # prompt construction still refuses cross-runtime fallback text.
+    return (
+        "runtime_kind=main_agent "
+        "recovery_scope=same_run_only "
+        "cross_runtime_fallback=false"
+    )
+
+
 def _render_platform_profile_layers(
     *,
-    profile: MainAgentProfileSnapshotV1,
+    profile: ReadableMainAgentProfileSnapshot,
     entrypoint: str,
     principal: CapabilityPrincipal | None,
     locale: str,
@@ -222,14 +245,14 @@ def _render_platform_profile_layers(
     profile_layer = _section("PROFILE_BASE", _safe_text(profile_body))
 
     policy = effective_policy_digest or "none"
+    runtime_line = _runtime_policy_line(profile)
     entry_body = (
         f"entrypoint={entrypoint} "
         f"locale={locale} "
         f"{_principal_summary(principal)} "
         f"effective_policy_digest={policy} "
         f"deny_by_default={str(profile.global_safety_policy.deny_by_default).lower()} "
-        f"legacy_fallback_allowed={str(profile.fallback_policy.legacy_runtime_allowed).lower()} "
-        f"before_side_effects_only={str(profile.fallback_policy.before_side_effects_only).lower()}"
+        f"{runtime_line}"
     )
     entry_layer = _section("ENTRYPOINT_POLICY", _safe_text(entry_body))
 
@@ -679,7 +702,7 @@ class MainAgentPromptBuilder:
     def build_initial_messages(
         self,
         *,
-        profile: MainAgentProfileSnapshotV1,
+        profile: ReadableMainAgentProfileSnapshot,
         manifest: ResolvedRunManifestRevision,
         current_user_message: str,
         locale: str,
@@ -693,8 +716,12 @@ class MainAgentPromptBuilder:
         caps: PromptBudgetCaps | None = None,
         l0_turns: int = DEFAULT_L0_TURNS,
     ) -> PromptBuildResult:
-        if not isinstance(profile, MainAgentProfileSnapshotV1):
-            raise TypeError("profile must be MainAgentProfileSnapshotV1")
+        if not isinstance(
+            profile, (MainAgentProfileSnapshotV1, MainAgentProfileSnapshotV2)
+        ):
+            raise TypeError(
+                "profile must be MainAgentProfileSnapshotV1 or MainAgentProfileSnapshotV2"
+            )
         if not isinstance(manifest, ResolvedRunManifestRevision):
             raise TypeError("manifest must be ResolvedRunManifestRevision")
         if not isinstance(current_user_message, str):
@@ -1006,7 +1033,7 @@ class MainAgentPromptBuilder:
         locale: str,
         skills: Sequence[ActiveSkillInstruction],
         already_applied_skill_version_ids: Sequence[UUID] = (),
-        profile: MainAgentProfileSnapshotV1 | None = None,
+        profile: ReadableMainAgentProfileSnapshot | None = None,
         caps: PromptBudgetCaps | None = None,
         task_state_summary: str | None = None,
     ) -> SkillContextBuildResult:

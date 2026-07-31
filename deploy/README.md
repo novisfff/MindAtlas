@@ -203,12 +203,63 @@ docker compose exec minio mc mb --ignore-existing local/mindatlas
 
 **解决方案**:
 ```bash
-# 检查后端健康状态
+# 检查后端进程健康（Compose depends_on / Web bootstrap 使用 /health，不访问数据库）
 docker compose exec web curl http://api:8000/health
 
 # 查看后端日志
 docker compose logs api
 ```
+
+### 3b. Assistant Chat 无法准入（部署验收）
+
+**症状**: API 与 Web 已 healthy，但 Chat 创建 Run 返回 503 / 前端 readiness gate 关闭
+
+**说明**: Compose 与 Web 依赖的是进程 liveness `GET /health`，**不是** Assistant 准入就绪。
+初始化、兼容 Worker 注册、以及 Operator 激活之后，用下面命令做部署验收（不是 `depends_on`）：
+
+```bash
+# 期望 HTTP 200 且 data.ready=true；未初始化/未激活时 curl 因 503 非零退出
+curl --fail --silent --show-error http://localhost:8000/ready
+```
+
+公开 `/ready` 只返回 `ready` 与稳定 reason codes；带诊断 ID 的详情走认证
+`GET /api/assistant-runtime/readiness`。
+
+### 3c. Fresh Main-Agent bootstrap Compose smoke
+
+Plan 2 ships a disposable overlay and fixed runner that prove
+**initialization → compatible Worker → activation → `/ready` → one completed
+`main_agent` Chat** without committing secrets:
+
+```bash
+cd backend
+checkout_sha="$(git rev-parse HEAD)"
+evidence_path="$(mktemp)"
+.venv/bin/python scripts/smoke_main_agent_bootstrap.py \
+  --compose-file ../deploy/docker-compose.yml \
+  --overlay-file ../deploy/compose.main-agent-smoke.yml \
+  --pull-request-head-sha "$checkout_sha" \
+  --output "$evidence_path"
+```
+
+Notes:
+
+- Overlay `deploy/compose.main-agent-smoke.yml` starts an internal-only OpenAI
+  stub (`provider-stub`), one Assistant Worker, and sets `APP_ENV=test` plus
+  `MINDATLAS_TEST_PROVIDER_HOST=provider-stub` (test-only private-host gate).
+- The runner generates ephemeral Setup/session/Fernet secrets into mode-0600
+  files, never CLI secret values, and always runs
+  `docker compose down --volumes --remove-orphans`.
+- Evidence JSON uses schema version `2`; its allowlist includes the actual
+  checkout commit and the requested pull-request head, and its aggregate digest
+  covers both. It still excludes password/setup/token/cookie/api_key/prompt/
+  entry/artifact/provider payload fields.
+- Evidence is an ephemeral CI run artifact, not a committed repository file.
+  The workflow run/artifact metadata is authoritative; `buildRevision` is only
+  a runtime compatibility label and is not source provenance. CI job
+  `main-agent-bootstrap-smoke` uploads only the sanitized runner-temp JSON.
+- Base Compose still uses `/health` for depends_on; smoke acceptance uses
+  `/ready` after Operator activation.
 
 ### 4. 端口被占用
 

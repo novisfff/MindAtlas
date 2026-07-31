@@ -25,27 +25,24 @@ DIGEST_B = "b" * 64
 
 
 def _make_main_agent_run(db, *, status: str = "queued", **kwargs):
-    from app.assistant.models import AssistantChatRun, Conversation
+    from app.assistant.models import Conversation
+    from tests.assistant_runtime_support import make_main_agent_run
 
     conv = Conversation(title=f"t-{uuid.uuid4().hex[:8]}")
     db.add(conv)
     db.flush()
-    run = AssistantChatRun(
-        conversation_id=conv.id,
+    return make_main_agent_run(
+        db,
+        conversation=conv,
         status=status,
-        runtime_kind="main_agent",
+        build_revision=kwargs.pop("required_app_build_revision", "build-test-1"),
         runtime_contract_version=1,
-        required_app_build_revision="build-test-1",
         capability_ledger_mode=kwargs.pop("capability_ledger_mode", "legacy_read_only"),
         state_revision=int(kwargs.pop("state_revision", 0)),
         last_event_seq=int(kwargs.pop("last_event_seq", 0)),
         memory_commit_status=kwargs.pop("memory_commit_status", "pending"),
         **kwargs,
     )
-    db.add(run)
-    db.commit()
-    db.refresh(run)
-    return run
 
 
 def _manifest(db, run_id, *, revision: int = 1):
@@ -599,9 +596,11 @@ class CapabilityCallMigrationMetaTests(unittest.TestCase):
         heads = script.get_heads()
         self.assertEqual(len(heads), 1, heads)
         head = heads[0]
-        # Plan 1 tip is the sole script head; Plan 10 B2 tip remains its parent.
-        self.assertEqual(head, "9f3c1a7e2b40")
-        plan1 = script.get_revision(head)
+        # Plan 2 is the sole script head; the Plan 1 tip remains its parent.
+        self.assertEqual(head, "b6e2d4f8a901")
+        plan2 = script.get_revision(head)
+        self.assertEqual(plan2.down_revision, "9f3c1a7e2b40")
+        plan1 = script.get_revision(plan2.down_revision)
         self.assertEqual(plan1.down_revision, "3bd7bc4257c9")
 
         plan09_eval = script.get_revision("027869a00a47")

@@ -67,7 +67,6 @@ from app.assistant.durable.runner import (  # noqa: F401
     MainAgentRunExecutor,
     assert_no_legacy_fallback,
 )
-from app.assistant.durable.admission import admit_and_select_runtime  # noqa: F401
 from app.assistant.durable.materialize import materialize_base_run_state  # noqa: F401
 from app.assistant.durable.checkpoints import (  # noqa: F401
     commit_prepared_unit,
@@ -145,7 +144,6 @@ __all__ = [
     "RecoveryDecision",
     "MainAgentRunExecutor",
     "assert_no_legacy_fallback",
-    "admit_and_select_runtime",
     "materialize_base_run_state",
     "commit_prepared_unit",
     "commit_started_unit",

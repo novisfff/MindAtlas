@@ -325,8 +325,9 @@ def _material(plan: Any, *, configs: dict | None = None) -> Any:
 def _seed_running_with_base(db, *, deadline_at: datetime | None = None):
     from app.assistant.durable.materialize import materialize_base_run_state
     from app.assistant.durable.repository import DurableRunRepository, LeaseToken
-    from app.assistant.models import AssistantChatRun, Conversation, Message
+    from app.assistant.models import Conversation, Message
     from app.assistant.provider_loop.messages import ProviderUserMessage
+    from tests.assistant_runtime_support import make_main_agent_run
 
     _register_worker(db)
     conv = Conversation(title=f"t10-{uuid.uuid4().hex[:8]}")
@@ -336,21 +337,18 @@ def _seed_running_with_base(db, *, deadline_at: datetime | None = None):
     assistant = Message(conversation_id=conv.id, role="assistant", content="")
     db.add_all([user, assistant])
     db.flush()
-    run = AssistantChatRun(
-        conversation_id=conv.id,
-        user_message_id=user.id,
-        assistant_message_id=assistant.id,
+    run = make_main_agent_run(
+        db,
+        conversation=conv,
+        user_message=user,
+        assistant_message=assistant,
         status="queued",
-        runtime_kind="main_agent",
+        build_revision=BUILD,
         runtime_contract_version=1,
-        required_app_build_revision=BUILD,
         state_revision=0,
         deadline_at=deadline_at
         or (datetime.now(timezone.utc) + timedelta(minutes=30)),
     )
-    db.add(run)
-    db.commit()
-    db.refresh(run)
 
     repo = DurableRunRepository(db)
     claimed = repo.claim_queued(
@@ -690,7 +688,8 @@ class TestPlan07VerificationInvariants:
         from app.config import get_settings
 
         settings = get_settings()
-        assert settings.assistant_runtime_mode in {"legacy", "main_agent"}
+        # Runtime selection is durable rollout state, not an env selector.
+        assert not hasattr(settings, "assistant_runtime_mode")
         # Default production posture for this worktree verification:
         assert settings.assistant_durable_interrupts_enabled is False
         # Pepper may be blank in tests; production enable requires nonempty stable pepper.

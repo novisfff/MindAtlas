@@ -18,6 +18,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from tests._bootstrap import bootstrap_backend_imports, reset_caches
+from tests.postgres_destructive_guard import reset_disposable_public_schema
 
 bootstrap_backend_imports()
 reset_caches()
@@ -175,91 +176,16 @@ def _err_text(exc: BaseException) -> str:
     return " | ".join(parts)
 
 
-def _reset_to_plan01_parent() -> None:
-    """Bring disposable DB to Plan 01 head (parent of probe migration).
+def _drop_public_schema(engine: Engine) -> None:
+    reset_disposable_public_schema(engine)
 
-    Must use a real Alembic downgrade (or fresh upgrade from parent), never
-    ``stamp`` while leaving child schema columns in place — that makes the next
-    ``upgrade`` try to ADD COLUMN current_capability_probe_id again.
-    """
+
+def _reset_to_plan01_parent() -> None:
+    """Create the exact Plan 01 parent schema from a disposable empty database."""
     _configure_database_env(_POSTGRES_URL)
     engine = create_engine(_as_sqlalchemy_url(_POSTGRES_URL), future=True)
     try:
-        try:
-            current = _current_revision(engine)
-        except Exception:
-            current = None
-
-        if current in {
-            PLAN03_PROBE_REVISION,
-            PLAN04_HEAD,
-            PLAN06_HEAD,
-            PLAN07_HEAD,
-            PLAN08_LEDGER_REVISION,
-            PLAN08_LIFECYCLE_REVISION,
-            PLAN08_HEAD,
-            PLAN09_LIFECYCLE_REVISION,
-            PLAN09_EVAL_REVISION,
-            PLAN09_HEAD,
-        }:
-            # Satisfy both descendant downgrade guards, then let Alembic restore
-            # every intermediate schema object in revision order. Hand-written
-            # DDL + stamp leaves Plan 04's dropped CHECK constraints missing.
-            with engine.begin() as conn:
-                conn.execute(
-                    text("UPDATE ai_model SET current_capability_probe_id = NULL")
-                )
-                conn.execute(text("DELETE FROM ai_model_capability_probe"))
-                if current in {
-                    PLAN04_HEAD,
-                    PLAN06_HEAD,
-                    PLAN07_HEAD,
-                    PLAN08_LEDGER_REVISION,
-                    PLAN08_LIFECYCLE_REVISION,
-                    PLAN08_HEAD,
-                    PLAN09_LIFECYCLE_REVISION,
-                    PLAN09_EVAL_REVISION,
-                    PLAN09_HEAD,
-                }:
-                    conn.execute(
-                        text(
-                            "UPDATE assistant_skill_package "
-                            "SET catalog_enabled = false"
-                        )
-                    )
-                    conn.execute(
-                        text(
-                            "UPDATE assistant_main_agent_profile "
-                            "SET runtime_enabled = false"
-                        )
-                    )
-            prior_eval_ack = os.environ.get("MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK")
-            prior_ledger_ack = os.environ.get(
-                "MINDATLAS_PLAN08_DOWNGRADE_ACK_PURGE_LEDGER_DATA"
-            )
-            os.environ["MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK"] = "1"
-            os.environ["MINDATLAS_PLAN08_DOWNGRADE_ACK_PURGE_LEDGER_DATA"] = "1"
-            try:
-                with engine.begin() as conn:
-                    _prepare_plan09_downgrade(conn)
-                _run_alembic("downgrade", PLAN01_HEAD)
-            finally:
-                if prior_eval_ack is None:
-                    os.environ.pop("MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK", None)
-                else:
-                    os.environ["MINDATLAS_PLAN09_EVAL_DOWNGRADE_ACK"] = prior_eval_ack
-                if prior_ledger_ack is None:
-                    os.environ.pop(
-                        "MINDATLAS_PLAN08_DOWNGRADE_ACK_PURGE_LEDGER_DATA", None
-                    )
-                else:
-                    os.environ[
-                        "MINDATLAS_PLAN08_DOWNGRADE_ACK_PURGE_LEDGER_DATA"
-                    ] = prior_ledger_ack
-        elif current != PLAN01_HEAD:
-            # The guarded test only supports its parent and known descendants.
-            raise AssertionError(f"unsupported migration state: {current}")
-        # Ensure we are exactly on Plan 01 parent schema.
+        _drop_public_schema(engine)
         _run_alembic("upgrade", PLAN01_HEAD)
         assert _current_revision(engine) == PLAN01_HEAD, (
             f"expected Plan 01 parent {PLAN01_HEAD}, got {_current_revision(engine)}"

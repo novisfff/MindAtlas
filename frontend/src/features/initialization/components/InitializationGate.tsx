@@ -71,9 +71,9 @@ export function InitializationGate({ children }: { children: ReactNode }) {
     return <Navigate to="/initialize" replace />
   }
 
-  if (statusQuery.data.initialized && isInitializationRoute) {
-    return <Navigate to="/dashboard" replace />
-  }
-
+  // Initialized operators may remain on /initialize to complete explicit
+  // post-init Main Agent activation (prepared rollout is never auto-activated).
+  // The initialization page itself navigates away after activation or when
+  // there is no pending local activation state.
   return <>{children}</>
 }

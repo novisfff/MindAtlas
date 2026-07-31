@@ -39,10 +39,10 @@ from app.assistant.main_agent.service import (  # noqa: E402
     AdmissionContext,
     AssistantRuntimeRequest,
     MainAgentAdmissionError,
-    MainAgentFallbackState,
     MainAgentService,
     build_base_manifest_with_controls,
     compute_main_agent_effective_policy_digest,
+    load_default_published_profile,
     select_runtime_for_mode,
     should_construct_main_agent,
     validate_profile_for_assistant_chat,
@@ -58,7 +58,9 @@ from app.assistant.provider_loop.contracts import (  # noqa: E402
 from app.assistant.provider_loop.scheduler import SequentialSiblingExecutor  # noqa: E402
 from app.assistant.skills.schemas import (  # noqa: E402
     MainAgentProfileSnapshotV1,
+    MainAgentProfileSnapshotV2,
     default_main_agent_profile_snapshot,
+    default_main_agent_profile_snapshot_v2,
 )
 
 
@@ -75,7 +77,7 @@ PROBE_ID = UUID("00000000-0000-4000-8000-000000000822")
 
 def test_select_runtime_off_never_constructs_main_agent() -> None:
     runtime, reason = select_runtime_for_mode(mode="off", execution_kind="production")
-    assert runtime == "legacy"
+    assert runtime is None
     assert reason == MODE_OFF
     assert should_construct_main_agent(mode="off") is False
     assert should_construct_main_agent(mode="off", execution_kind="evaluation") is False
@@ -83,14 +85,16 @@ def test_select_runtime_off_never_constructs_main_agent() -> None:
 
 def test_select_runtime_shadow_production_vs_evaluation() -> None:
     runtime, reason = select_runtime_for_mode(mode="shadow", execution_kind="production")
-    assert runtime == "legacy"
+    assert runtime is None
     assert reason == MODE_SHADOW_PRODUCTION
     assert should_construct_main_agent(mode="shadow", execution_kind="production") is False
 
+    # Plan 2 Task 9: shadow never selects Legacy; evaluation shadow also refuses
+    # construction via select_runtime_for_mode (execution_kind is observational only).
     runtime, reason = select_runtime_for_mode(mode="shadow", execution_kind="evaluation")
-    assert runtime == "main_agent"
-    assert reason is None
-    assert should_construct_main_agent(mode="shadow", execution_kind="evaluation") is True
+    assert runtime is None
+    assert reason == MODE_SHADOW_PRODUCTION
+    assert should_construct_main_agent(mode="shadow", execution_kind="evaluation") is False
 
 
 def test_select_runtime_read_only_admits_main_agent() -> None:
@@ -101,62 +105,29 @@ def test_select_runtime_read_only_admits_main_agent() -> None:
 
 
 def test_validate_profile_controls_and_entrypoint() -> None:
+    # Shared-field validation still accepts historical V1 for unit coverage.
     snap = default_main_agent_profile_snapshot()
     with pytest.raises(MainAgentAdmissionError) as exc:
         validate_profile_for_assistant_chat(snap)
     assert exc.value.reason_code in {"control_missing", "entrypoint_unsupported"}
 
-    good = MainAgentProfileSnapshotV1.model_validate(
+    good_v1 = MainAgentProfileSnapshotV1.model_validate(
         {
             **snap.model_dump(by_alias=True, mode="json"),
             "controlCapabilityKeys": list(MAIN_AGENT_CONTROL_KEYS),
         }
     )
-    keys = validate_profile_for_assistant_chat(good)
+    keys = validate_profile_for_assistant_chat(good_v1)
     assert keys == MAIN_AGENT_CONTROL_KEYS
 
-
-def test_fallback_state_machine_safe_vs_disallowed() -> None:
-    state = MainAgentFallbackState()
-    assert state.allows_automatic_fallback(
-        reason_code="model_ineligible",
-        legacy_runtime_allowed=True,
-        before_side_effects_only=True,
-        cancel_requested=False,
+    # Production path is V2; shared fields validate the same way.
+    good_v2 = MainAgentProfileSnapshotV2.model_validate(
+        {
+            **default_main_agent_profile_snapshot_v2().model_dump(by_alias=True, mode="json"),
+            "controlCapabilityKeys": list(MAIN_AGENT_CONTROL_KEYS),
+        }
     )
-    state.mark_user_output()
-    assert (
-        state.allows_automatic_fallback(
-            reason_code="model_ineligible",
-            legacy_runtime_allowed=True,
-            before_side_effects_only=True,
-            cancel_requested=False,
-        )
-        is False
-    )
-
-    state2 = MainAgentFallbackState()
-    state2.mark_capability_dispatch(side_effect="write_local")
-    assert (
-        state2.allows_automatic_fallback(
-            reason_code="model_ineligible",
-            legacy_runtime_allowed=True,
-            before_side_effects_only=True,
-            cancel_requested=False,
-        )
-        is False
-    )
-
-    state3 = MainAgentFallbackState()
-    assert (
-        state3.allows_automatic_fallback(
-            reason_code="authorization_denied",
-            legacy_runtime_allowed=True,
-            before_side_effects_only=True,
-            cancel_requested=False,
-        )
-        is False
-    )
+    assert validate_profile_for_assistant_chat(good_v2) == MAIN_AGENT_CONTROL_KEYS
 
 
 def test_events_internal_visibility_and_safe_activation() -> None:
@@ -224,9 +195,9 @@ def _model_ref(provider: ProviderRef) -> ModelRef:
     )
 
 
-def _snapshot_with_controls() -> MainAgentProfileSnapshotV1:
-    base = default_main_agent_profile_snapshot()
-    return MainAgentProfileSnapshotV1.model_validate(
+def _snapshot_with_controls() -> MainAgentProfileSnapshotV2:
+    base = default_main_agent_profile_snapshot_v2()
+    return MainAgentProfileSnapshotV2.model_validate(
         {
             **base.model_dump(by_alias=True, mode="json"),
             "controlCapabilityKeys": list(MAIN_AGENT_CONTROL_KEYS),
@@ -359,8 +330,7 @@ def _admission(*, mode: str = "read_only") -> AdmissionContext:
         effective_policy_digest=compute_main_agent_effective_policy_digest(
             profile_content_digest=DIGEST_A
         ),
-        legacy_runtime_allowed=True,
-        before_side_effects_only=True,
+        probe_diagnostics=None,
     )
 
 
@@ -611,7 +581,7 @@ def test_main_agent_service_shadow_evaluation_discards_writes() -> None:
     assert result.write_title is False
 
 
-def test_main_agent_rejects_noop_lifecycle_and_falls_back() -> None:
+def test_main_agent_rejects_noop_lifecycle_and_fails_closed() -> None:
     events: list[tuple[str, dict]] = []
     adapter = MainAgentEventAdapter(lambda n, p: events.append((n, p)))
     admission = _admission(mode="read_only")
@@ -645,12 +615,13 @@ def test_main_agent_rejects_noop_lifecycle_and_falls_back() -> None:
             execution_kind="production",
         )
     )
-    assert result.status == "fallback"
-    assert result.fallback_to_legacy is True
-    assert any(name == "fallback_selected" for name, _ in events)
+    assert result.status == "failed"
+    assert result.runtime == "main_agent"
+    assert not hasattr(result, "fallback_to_legacy") or getattr(result, "fallback_to_legacy", None) in (None, False)
+    assert result.write_message is False
 
 
-def test_main_agent_service_missing_ports_falls_back_before_request() -> None:
+def test_main_agent_service_missing_ports_fails_closed_before_request() -> None:
     admission = _admission(mode="read_only")
     service = MainAgentService(
         db=None,  # type: ignore[arg-type]
@@ -669,8 +640,10 @@ def test_main_agent_service_missing_ports_falls_back_before_request() -> None:
             execution_kind="production",
         )
     )
-    assert result.fallback_to_legacy is True
+    assert result.status == "failed"
+    assert result.runtime == "main_agent"
     assert result.write_l1 is False
+    assert result.write_message is False
 
 
 def test_stream_run_skips_internal_events_but_advances_cursor() -> None:
@@ -690,6 +663,7 @@ def test_stream_run_skips_internal_events_but_advances_cursor() -> None:
             self.id = RUN_ID
             self.status = "completed"
             self.last_event_seq = 3
+            self.runtime_kind = "main_agent"
 
     events_seq = [
         _Event(1, "run_status", {"status": "running"}),
@@ -741,5 +715,96 @@ def test_off_mode_never_imports_main_agent_service_path_on_construct_check() -> 
     # Admission helper raises if someone forces mode off through admit path.
     # (db-backed admit is covered by mode selection; unit path uses select_runtime)
     runtime, reason = select_runtime_for_mode(mode="off")
-    assert runtime == "legacy"
+    assert runtime is None
     assert reason == MODE_OFF
+
+
+def _seed_default_published_profile(
+    db: Any,
+    *,
+    snapshot: MainAgentProfileSnapshotV1 | MainAgentProfileSnapshotV2,
+    runtime_enabled: bool = True,
+) -> tuple[Any, Any]:
+    from app.assistant.skills.models import (
+        AssistantMainAgentProfile,
+        AssistantMainAgentProfileVersion,
+    )
+
+    profile = AssistantMainAgentProfile(
+        profile_key="default",
+        display_name="Main Agent",
+        is_default=True,
+        migration_state="native",
+        runtime_enabled=runtime_enabled,
+    )
+    db.add(profile)
+    db.flush()
+    payload = snapshot.normalized_payload()
+    digest = snapshot.content_digest()
+    # publish versions require a non-null source_draft_version_id (shape constraint).
+    draft = AssistantMainAgentProfileVersion(
+        profile_id=profile.id,
+        sequence_no=1,
+        version_name="draft-v1",
+        version_source="save",
+        origin="bootstrap",
+        snapshot=payload,
+        content_digest=digest,
+    )
+    db.add(draft)
+    db.flush()
+    published = AssistantMainAgentProfileVersion(
+        profile_id=profile.id,
+        sequence_no=2,
+        version_name="published-v1",
+        version_source="publish",
+        origin="bootstrap",
+        source_draft_version_id=draft.id,
+        snapshot=payload,
+        content_digest=digest,
+    )
+    db.add(published)
+    db.flush()
+    profile.published_version_id = published.id
+    profile.draft_version_id = draft.id
+    db.commit()
+    db.refresh(profile)
+    db.refresh(published)
+    return profile, published
+
+
+def test_load_default_published_profile_accepts_v2() -> None:
+    from tests._db import make_session
+
+    db = make_session()
+    try:
+        snap = _snapshot_with_controls()
+        _seed_default_published_profile(db, snapshot=snap)
+        profile, version, loaded = load_default_published_profile(db)
+        assert profile.is_default is True
+        assert version.version_source == "publish"
+        assert isinstance(loaded, MainAgentProfileSnapshotV2)
+        assert loaded.schema_version == 2
+        assert loaded.content_digest() == snap.content_digest()
+        assert "fallbackPolicy" not in loaded.normalized_payload()
+    finally:
+        db.close()
+
+
+def test_load_default_published_profile_rejects_v1() -> None:
+    from tests._db import make_session
+
+    db = make_session()
+    try:
+        v1 = MainAgentProfileSnapshotV1.model_validate(
+            {
+                **default_main_agent_profile_snapshot().model_dump(by_alias=True, mode="json"),
+                "controlCapabilityKeys": list(MAIN_AGENT_CONTROL_KEYS),
+            }
+        )
+        _seed_default_published_profile(db, snapshot=v1)
+        with pytest.raises(MainAgentAdmissionError) as exc:
+            load_default_published_profile(db)
+        assert exc.value.reason_code == PROFILE_UNAVAILABLE
+    finally:
+        db.close()

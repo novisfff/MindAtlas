@@ -57,6 +57,62 @@ jobs:
             tests/test_skill_publish_gate.py \
             tests/test_skill_eval_api.py
 
+  full-postgres-backend:
+    name: Full PostgreSQL Backend Exit Gate
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: mindatlas
+          POSTGRES_PASSWORD: mindatlas
+          POSTGRES_DB: mindatlas_test_plan08_full_postgres_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U mindatlas -d mindatlas_test_plan08_full_postgres_ci"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # This is the documented Plan 2 Exit Gate against a fresh disposable DB.
+      DATABASE_URL: postgresql://mindatlas:mindatlas@localhost:5432/mindatlas_test_plan08_full_postgres_ci
+      MINDATLAS_TEST_POSTGRES_URL: postgresql://mindatlas:mindatlas@localhost:5432/mindatlas_test_plan08_full_postgres_ci
+      MINDATLAS_REQUIRE_POSTGRES: "1"
+      MINDATLAS_TEST_POSTGRES_DESTRUCTIVE: "1"
+      MINDATLAS_PLAN10_B2_TEST_OVERRIDE: "1"
+      AI_PROVIDER_FERNET_KEY: "07v02gVBdreNrXjLJZkIMdohHtgy6aDFKBHxakHjbrQ="
+      APP_ENV: test
+      APP_BUILD_REVISION: "ci-full-postgres-exit-gate"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install backend dependencies
+        run: python -m pip install -r requirements.txt pytest
+
+      - name: Upgrade fresh database to Plan 2 head
+        run: |
+          set -euo pipefail
+          alembic upgrade b6e2d4f8a901
+          alembic current
+          alembic heads
+
+      - name: Run full PostgreSQL backend Exit Gate
+        run: |
+          set -euo pipefail
+          python -m pytest -q
+
   operator-control-plane:
     name: Operator Control Plane Gates
     runs-on: ubuntu-latest
@@ -69,20 +125,21 @@ jobs:
         env:
           POSTGRES_USER: mindatlas
           POSTGRES_PASSWORD: mindatlas
-          POSTGRES_DB: mindatlas_operator_auth_ci
+          POSTGRES_DB: mindatlas_test_plan08_operator_auth_ci
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U mindatlas -d mindatlas_operator_auth_ci"
+          --health-cmd "pg_isready -U mindatlas -d mindatlas_test_plan08_operator_auth_ci"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 10
     env:
       # Disposable CI database only — never production credentials.
-      DATABASE_URL: postgresql://mindatlas:mindatlas@localhost:5432/mindatlas_operator_auth_ci
-      MINDATLAS_TEST_POSTGRES_URL: postgresql://mindatlas:mindatlas@localhost:5432/mindatlas_operator_auth_ci
+      DATABASE_URL: postgresql://mindatlas:mindatlas@localhost:5432/mindatlas_test_plan08_operator_auth_ci
+      MINDATLAS_TEST_POSTGRES_URL: postgresql://mindatlas:mindatlas@localhost:5432/mindatlas_test_plan08_operator_auth_ci
       # Hard-fail release-critical operator-auth PostgreSQL suite when URL missing.
       MINDATLAS_REQUIRE_POSTGRES: "1"
+      MINDATLAS_TEST_POSTGRES_DESTRUCTIVE: "1"
       AI_PROVIDER_FERNET_KEY: "07v02gVBdreNrXjLJZkIMdohHtgy6aDFKBHxakHjbrQ="
       # Origin only at job scope — operator secrets stay step-scoped so
       # test_settings_constructible_without_auth_secrets stays honest under CI.
@@ -206,6 +263,8 @@ jobs:
       MINDATLAS_TEST_POSTGRES_URL: postgresql://mindatlas:mindatlas@localhost:5432/mindatlas_test_plan08_ci
       # Minimal app config required by settings import during alembic env.
       AI_PROVIDER_FERNET_KEY: "07v02gVBdreNrXjLJZkIMdohHtgy6aDFKBHxakHjbrQ="
+      # Plan 2 downgrade is intentionally permitted only in an explicit test env.
+      APP_ENV: test
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -345,6 +404,201 @@ jobs:
 
       - name: System tool golden digest smoke
         run: python -m pytest tests/test_binding_json_schema.py::test_system_tool_golden_schemas_and_contract_set_digest_are_stable -q
+
+  assistant-readiness:
+    name: Assistant Seed And Readiness Gates
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: mindatlas
+          POSTGRES_PASSWORD: mindatlas
+          POSTGRES_DB: mindatlas_test_plan08_readiness_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U mindatlas -d mindatlas_test_plan08_readiness_ci"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Disposable CI database only — never production credentials.
+      DATABASE_URL: postgresql://mindatlas:mindatlas@localhost:5432/mindatlas_test_plan08_readiness_ci
+      MINDATLAS_TEST_POSTGRES_URL: postgresql://mindatlas:mindatlas@localhost:5432/mindatlas_test_plan08_readiness_ci
+      MINDATLAS_REQUIRE_POSTGRES: "1"
+      MINDATLAS_TEST_POSTGRES_DESTRUCTIVE: "1"
+      MINDATLAS_PLAN10_B2_TEST_OVERRIDE: "1"
+      AI_PROVIDER_FERNET_KEY: "07v02gVBdreNrXjLJZkIMdohHtgy6aDFKBHxakHjbrQ="
+      APP_ENV: test
+      APP_BUILD_REVISION: "ci-assistant-readiness"
+      ASSISTANT_NEW_RUNS_ENABLED: "true"
+      ASSISTANT_MAIN_AGENT_WRITE_MODE: "off"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install backend dependencies
+        run: python -m pip install -r requirements.txt pytest
+
+      - name: Verify assistant system seed digests
+        run: python scripts/build_assistant_system_seed.py --check
+
+      - name: Unit health/readiness and shared evaluator suites
+        run: |
+          set -euo pipefail
+          python -m pytest \
+            tests/test_health_readiness_api.py \
+            tests/test_assistant_runtime_readiness.py -q
+
+      - name: PostgreSQL readiness, bootstrap, activation, admission, and lease suites
+        run: |
+          set -euo pipefail
+          # Hard-fail when URL missing via MINDATLAS_REQUIRE_POSTGRES=1 (job env).
+          python -m pytest \
+            tests/test_health_readiness_postgres.py \
+            tests/test_assistant_runtime_migration_postgres.py \
+            tests/test_assistant_initialization_atomicity_postgres.py \
+            tests/test_assistant_runtime_readiness_postgres.py \
+            tests/test_assistant_runtime_activation_postgres.py \
+            tests/test_assistant_atomic_admission_postgres.py \
+            tests/test_assistant_worker_claim_compatibility_postgres.py \
+            tests/test_durable_worker_lease_postgres.py \
+            tests/test_system_initialization_concurrency_postgres.py -q
+
+      - name: Reject skipped release-critical readiness postgres suites
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          import re
+          import subprocess
+          import sys
+
+          env = dict(os.environ)
+          env["MINDATLAS_REQUIRE_POSTGRES"] = "1"
+          suites = [
+              "tests/test_health_readiness_postgres.py",
+              "tests/test_assistant_runtime_migration_postgres.py",
+              "tests/test_assistant_initialization_atomicity_postgres.py",
+              "tests/test_assistant_runtime_readiness_postgres.py",
+              "tests/test_assistant_runtime_activation_postgres.py",
+              "tests/test_assistant_atomic_admission_postgres.py",
+              "tests/test_assistant_worker_claim_compatibility_postgres.py",
+              "tests/test_durable_worker_lease_postgres.py",
+              "tests/test_system_initialization_concurrency_postgres.py",
+          ]
+          proc = subprocess.run(
+              [sys.executable, "-m", "pytest", *suites, "-q"],
+              env=env,
+              capture_output=True,
+              text=True,
+          )
+          out = (proc.stdout or "") + "\n" + (proc.stderr or "")
+          print(out)
+          if proc.returncode != 0:
+              raise SystemExit(proc.returncode)
+          lower = out.lower()
+          match = re.search(r"(\d+)\s+skipped", lower)
+          if match and int(match.group(1)) > 0:
+              raise SystemExit(
+                  "assistant readiness postgres suites skipped under require-postgres; "
+                  "release-critical gate must run"
+              )
+          if "passed" not in lower:
+              raise SystemExit(
+                  "assistant readiness postgres suites produced no pass summary"
+              )
+          print("assistant readiness postgres gate: OK")
+          PY
+
+  main-agent-bootstrap-smoke:
+    name: Main Agent Bootstrap Compose Smoke
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      APP_ENV: test
+      APP_BUILD_REVISION: "ci-main-agent-bootstrap-smoke"
+      ASSISTANT_NEW_RUNS_ENABLED: "true"
+      ASSISTANT_MAIN_AGENT_WRITE_MODE: "off"
+      # Disposable CI Fernet only — never production material.
+      AI_PROVIDER_FERNET_KEY: "07v02gVBdreNrXjLJZkIMdohHtgy6aDFKBHxakHjbrQ="
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install backend dependencies
+        run: python -m pip install -r requirements.txt pytest
+
+      - name: Unit tests for smoke evidence, stub, and SSRF gate
+        run: |
+          set -euo pipefail
+          python -m pytest tests/test_main_agent_bootstrap_smoke_script.py -q
+
+      - name: Fresh Compose bootstrap-to-chat smoke
+        env:
+          PULL_REQUEST_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          python scripts/smoke_main_agent_bootstrap.py \
+            --compose-file ../deploy/docker-compose.yml \
+            --overlay-file ../deploy/compose.main-agent-smoke.yml \
+            --build-revision "${APP_BUILD_REVISION}" \
+            --pull-request-head-sha "${PULL_REQUEST_HEAD_SHA}" \
+            --output "${RUNNER_TEMP}/main-agent-bootstrap-readiness.json"
+
+      - name: Validate evidence allowlist and digest
+        env:
+          PULL_REQUEST_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          export CHECKOUT_COMMIT_SHA="$(git rev-parse HEAD)"
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          from scripts.smoke_main_agent_bootstrap import validate_evidence
+
+          path = Path(os.environ["RUNNER_TEMP"]) / "main-agent-bootstrap-readiness.json"
+          if not path.is_file():
+              raise SystemExit("evidence file missing after smoke")
+          payload = json.loads(path.read_text(encoding="utf-8"))
+          validate_evidence(payload)
+          assert payload["checkoutCommitSha"] == os.environ["CHECKOUT_COMMIT_SHA"]
+          assert payload["pullRequestHeadSha"] == os.environ["PULL_REQUEST_HEAD_SHA"]
+          assert payload["activeRuntimeKind"] == "main_agent"
+          assert payload["chatRunCount"] == 1
+          assert payload["chatTerminalStatus"] == "completed"
+          assert payload["alembicHead"] == "b6e2d4f8a901"
+          print("main agent bootstrap evidence: OK")
+          PY
+
+      - name: Upload sanitized evidence artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: main-agent-bootstrap-readiness-evidence
+          path: ${{ runner.temp }}/main-agent-bootstrap-readiness.json
+          if-no-files-found: error
 
   frontend:
     name: Frontend Build And Tests

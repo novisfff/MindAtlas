@@ -119,7 +119,7 @@ class LocalTransactionalGoldenPathTests(unittest.TestCase):
     def setUp(self) -> None:
         from tests._db import make_session
         from app.entry_type.models import EntryType
-        from app.assistant.models import AssistantChatRun, Conversation
+        from app.assistant.models import Conversation
         from app.assistant.durable.models import (
             AssistantRunArtifact,
             AssistantRunBudgetRevision,
@@ -132,6 +132,7 @@ class LocalTransactionalGoldenPathTests(unittest.TestCase):
             ProposeCallSpec,
         )
         from app.assistant.durable.repository import LeaseToken
+        from tests.assistant_runtime_support import make_main_agent_run
         from app.assistant.policy import (
             create_initial_ledger_state,
             normalize_run_budget_limits,
@@ -152,10 +153,11 @@ class LocalTransactionalGoldenPathTests(unittest.TestCase):
         conv = Conversation(title="t")
         self.db.add(conv)
         self.db.flush()
-        self.run = AssistantChatRun(
-            conversation_id=conv.id,
+        self.run = make_main_agent_run(
+            self.db,
+            conversation=conv,
             status="running",
-            runtime_kind="main_agent",
+            build_revision="b1",
             runtime_contract_version=1,
             required_app_build_revision="b1",
             capability_ledger_mode="enforced",
@@ -164,9 +166,6 @@ class LocalTransactionalGoldenPathTests(unittest.TestCase):
             lease_generation=1,
             memory_commit_status="pending",
         )
-        self.db.add(self.run)
-        self.db.commit()
-        self.db.refresh(self.run)
         self.manifest = AssistantRunManifestRevision(
             run_id=self.run.id,
             revision=1,

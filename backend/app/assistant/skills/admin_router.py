@@ -23,7 +23,7 @@ from app.assistant.skills.schemas import (
     AddSkillPackageAliasCommand,
     AggregateRevisionCommand,
     DisableSkillPackageAliasCommand,
-    MainAgentProfileSnapshotV1,
+    MainAgentProfileSnapshotV2,
     PublishMainAgentProfileCommand,
     RestoreSkillVersionAsDraftCommand,
     SaveMainAgentProfileDraftCommand,
@@ -412,7 +412,7 @@ def put_protected_default_main_agent_draft(
     service = MainAgentProfileService(db)
     profile = _default_profile(service)
     try:
-        snapshot = MainAgentProfileSnapshotV1.model_validate(body.snapshot)
+        snapshot = MainAgentProfileSnapshotV2.model_validate(body.snapshot)
     except Exception as exc:
         raise ApiException(
             status_code=422,

@@ -31,8 +31,6 @@ ASSISTANT_INTERRUPT_COMMENT_MAX_CHARS_HARD_MAX = 4000
 
 AssistantCapabilityLedgerMode = Literal["legacy_read_only", "enforced"]
 AssistantMainAgentWriteMode = Literal["off", "golden"]
-# Plan 10 native runtime selection config.
-AssistantRuntimeMode = Literal["legacy", "main_agent"]
 
 
 def compute_artifact_orphan_grace_floor_sec(
@@ -86,15 +84,23 @@ class Settings(BaseSettings):
         alias="AI_MODEL_CAPABILITY_PROBE_ENABLED",
     )
 
-    # Plan 10 runtime mode (default legacy) and durable rollout revision label.
-    assistant_runtime_mode: AssistantRuntimeMode = Field(
-        default="legacy",
-        alias="ASSISTANT_RUNTIME_MODE",
+    # Emergency process ceiling. Durable rollout control must also allow new Runs.
+    assistant_new_runs_enabled: bool = Field(
+        default=True,
+        alias="ASSISTANT_NEW_RUNS_ENABLED",
     )
-    # Optional active durable rollout revision label (empty = none/default legacy).
-    assistant_runtime_rollout_revision: str = Field(
-        default="",
+    # Reject removed runtime selectors if they remain in process env or dotenv.
+    removed_assistant_runtime_mode: str | None = Field(
+        default=None,
+        alias="ASSISTANT_RUNTIME_MODE",
+        exclude=True,
+        repr=False,
+    )
+    removed_assistant_runtime_rollout_revision: str | None = Field(
+        default=None,
         alias="ASSISTANT_RUNTIME_ROLLOUT_REVISION",
+        exclude=True,
+        repr=False,
     )
     # Reject the removed Plan 04 switch if it remains in process env or dotenv.
     removed_assistant_main_agent_mode: str | None = Field(
@@ -312,6 +318,20 @@ class Settings(BaseSettings):
         default="",
         alias="ASSISTANT_CAPABILITY_RECONCILIATION_EVIDENCE_SECRET",
     )
+
+    @field_validator(
+        "assistant_capability_reconciliation_operator_id",
+        mode="before",
+    )
+    @classmethod
+    def _empty_uuid_as_none(cls, value: object) -> object:
+        # Compose injects ASSISTANT_CAPABILITY_RECONCILIATION_OPERATOR_ID="" when
+        # unset; treat blank as absent so Settings stays constructible.
+        if value is None:
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
     # Plan 09 evaluation: failed/unused gate evidence retention grace after expiry.
     assistant_skill_gate_evidence_grace_days: int = Field(
         default=30,
@@ -355,6 +375,12 @@ class Settings(BaseSettings):
     )
     session_hmac_keys: SecretStr | None = Field(
         default=None, alias="MINDATLAS_SESSION_HMAC_KEYS"
+    )
+    # Test-only Compose smoke provider hostname (exact DNS label).
+    # Honored only when APP_ENV=test inside validate_url_ssrf; never for IP literals.
+    mindatlas_test_provider_host: str = Field(
+        default="",
+        alias="MINDATLAS_TEST_PROVIDER_HOST",
     )
 
     # Uploads
@@ -527,8 +553,18 @@ class Settings(BaseSettings):
             return None
         raise ValueError(
             "ASSISTANT_MAIN_AGENT_MODE has been removed; use "
-            "ASSISTANT_RUNTIME_MODE and ASSISTANT_RUNTIME_ROLLOUT_REVISION"
+            "ASSISTANT_NEW_RUNS_ENABLED for the emergency process ceiling"
         )
+
+    @model_validator(mode="after")
+    def reject_removed_runtime_selectors(self) -> Settings:
+        if self.removed_assistant_runtime_mode is not None:
+            raise ValueError("removed runtime selector: ASSISTANT_RUNTIME_MODE")
+        if self.removed_assistant_runtime_rollout_revision is not None:
+            raise ValueError(
+                "removed runtime selector: ASSISTANT_RUNTIME_ROLLOUT_REVISION"
+            )
+        return self
 
     @model_validator(mode="after")
     def validate_main_agent_cross_field_bounds(self) -> Settings:

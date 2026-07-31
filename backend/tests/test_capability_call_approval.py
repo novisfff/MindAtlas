@@ -126,17 +126,19 @@ class ApprovalAuthorizeTests(unittest.TestCase):
             AssistantRunManifestRevision,
         )
         from app.assistant.durable.repository import LeaseToken
-        from app.assistant.models import AssistantChatRun, Conversation
+        from app.assistant.models import Conversation
+        from tests.assistant_runtime_support import make_main_agent_run
         import hashlib
         import os
 
         conv = Conversation(title="t")
         self.db.add(conv)
         self.db.flush()
-        run = AssistantChatRun(
-            conversation_id=conv.id,
+        run = make_main_agent_run(
+            self.db,
+            conversation=conv,
             status="running",
-            runtime_kind="main_agent",
+            build_revision="b1",
             runtime_contract_version=1,
             required_app_build_revision="b1",
             capability_ledger_mode="enforced",
@@ -145,9 +147,6 @@ class ApprovalAuthorizeTests(unittest.TestCase):
             lease_generation=1,
             memory_commit_status="pending",
         )
-        self.db.add(run)
-        self.db.commit()
-        self.db.refresh(run)
         manifest = AssistantRunManifestRevision(
             run_id=run.id,
             revision=1,

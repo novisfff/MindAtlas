@@ -304,6 +304,15 @@ class InitializeSystemRequest(CamelModel):
 class InitializationCompletionResponse(CamelModel):
     initialized: bool
     locale: SystemLocale
+    assistant_bootstrap: Literal["pending_worker"] = Field(
+        default="pending_worker", alias="assistantBootstrap"
+    )
+    prepared_rollout_revision_id: UUID | None = Field(
+        default=None, alias="preparedRolloutRevisionId"
+    )
+    rollout_control_revision: int | None = Field(
+        default=None, alias="rolloutControlRevision"
+    )
 
 
 InitializationDefaultsResponse.model_rebuild()

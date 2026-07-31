@@ -23,9 +23,21 @@ def _current_profile_rev(db, profile_id) -> int:
 
 
 def _valid_snapshot_dict(**overrides: Any) -> dict[str, Any]:
+    """Historical V1 payload for schema-validation tests."""
     from app.assistant.skills.schemas import default_main_agent_profile_snapshot
 
     payload = default_main_agent_profile_snapshot().normalized_payload()
+    payload = copy.deepcopy(payload)
+    for key, value in overrides.items():
+        payload[key] = value
+    return payload
+
+
+def _valid_v2_snapshot_dict(**overrides: Any) -> dict[str, Any]:
+    """Production V2 payload for draft/publish lifecycle tests."""
+    from app.assistant.skills.schemas import default_main_agent_profile_snapshot_v2
+
+    payload = default_main_agent_profile_snapshot_v2().normalized_payload()
     payload = copy.deepcopy(payload)
     for key, value in overrides.items():
         payload[key] = value
@@ -379,12 +391,12 @@ def _profile_draft_command(
     version_name: str | None = None,
 ):
     from app.assistant.skills.schemas import (
-        MainAgentProfileSnapshotV1,
+        MainAgentProfileSnapshotV2,
         SaveMainAgentProfileDraftCommand,
     )
 
-    snap = MainAgentProfileSnapshotV1.model_validate(
-        _valid_snapshot_dict(basePrompt=base_prompt)
+    snap = MainAgentProfileSnapshotV2.model_validate(
+        _valid_v2_snapshot_dict(basePrompt=base_prompt)
     )
     return SaveMainAgentProfileDraftCommand(
         snapshot=snap,
@@ -495,18 +507,18 @@ class MainAgentProfileServiceLifecycleTests(unittest.TestCase):
     def test_save_identical_draft_reuses_row_and_moves_pointer(self) -> None:
         from app.assistant.skills.models import AssistantMainAgentProfileVersion
         from app.assistant.skills.schemas import (
-            MainAgentProfileSnapshotV1,
+            MainAgentProfileSnapshotV2,
             SaveMainAgentProfileDraftCommand,
-            default_main_agent_profile_snapshot,
+            default_main_agent_profile_snapshot_v2,
         )
 
         profile = self.svc.ensure_default()
         bootstrap_draft_id = profile.draft_version.id  # type: ignore[union-attr]
-        snap = default_main_agent_profile_snapshot()
+        snap = default_main_agent_profile_snapshot_v2()
 
         # First admin save of a *changed* snapshot advances migration_state.
-        changed = MainAgentProfileSnapshotV1.model_validate(
-            _valid_snapshot_dict(basePrompt="admin authored prompt v1")
+        changed = MainAgentProfileSnapshotV2.model_validate(
+            _valid_v2_snapshot_dict(basePrompt="admin authored prompt v1")
         )
         v2 = self.svc.save_draft(
             profile.id,
@@ -543,60 +555,48 @@ class MainAgentProfileServiceLifecycleTests(unittest.TestCase):
             refreshed2.draft_version.id, bootstrap_draft_id  # type: ignore[union-attr]
         )
 
-    def test_legacy_origin_promotes_bootstrap_to_shadow_not_native(self) -> None:
-        """Shadow/migration-owned saves must not steal native ownership."""
+    def test_legacy_origin_is_rejected_for_profile_drafts(self) -> None:
+        """Legacy origin is no longer a valid production draft channel."""
+        from pydantic import ValidationError
         from app.assistant.skills.schemas import (
-            MainAgentProfileSnapshotV1,
+            MainAgentProfileSnapshotV2,
             SaveMainAgentProfileDraftCommand,
         )
 
         profile = self.svc.ensure_default()
         self.assertEqual(profile.migration_state, "bootstrap")
 
-        legacy_snap = MainAgentProfileSnapshotV1.model_validate(
-            _valid_snapshot_dict(basePrompt="legacy bridge prompt")
-        )
-        draft = self.svc.save_draft(
-            profile.id,
-            SaveMainAgentProfileDraftCommand(snapshot=legacy_snap,
-                version_name="legacy-general-chat",
-                origin="legacy",
-                source_ref={"legacySkillName": "general_chat"}, expected_aggregate_revision=_current_profile_rev(self.db, profile.id), request_id="profile-draft-4"),
-        )
-        self.assertEqual(draft.origin, "legacy")
-        refreshed = self.svc.get_default()
-        self.assertEqual(refreshed.migration_state, "shadow")
-        self.assertEqual(refreshed.draft_version.id, draft.id)  # type: ignore[union-attr]
-
-        # Second legacy save stays shadow.
-        again = self.svc.save_draft(
-            profile.id,
+        with self.assertRaises(ValidationError):
             SaveMainAgentProfileDraftCommand(
-                snapshot=MainAgentProfileSnapshotV1.model_validate(
-                    _valid_snapshot_dict(basePrompt="legacy bridge prompt v2")
+                snapshot=MainAgentProfileSnapshotV2.model_validate(
+                    _valid_v2_snapshot_dict(basePrompt="legacy bridge prompt")
                 ),
-                origin="legacy", expected_aggregate_revision=_current_profile_rev(self.db, profile.id), request_id="profile-draft-108"),
-        )
-        refreshed2 = self.svc.get_default()
-        self.assertEqual(refreshed2.migration_state, "shadow")
-        self.assertEqual(refreshed2.draft_version.id, again.id)  # type: ignore[union-attr]
+                version_name="legacy-general-chat",
+                origin="legacy",  # type: ignore[arg-type]
+                source_ref={"legacySkillName": "general_chat"},
+                expected_aggregate_revision=_current_profile_rev(self.db, profile.id),
+                request_id="profile-draft-4",
+            )
 
-        # Only api origin promotes to native.
+        # Only api origin promotes bootstrap → native.
         admin = self.svc.save_draft(
             profile.id,
             SaveMainAgentProfileDraftCommand(
-                snapshot=MainAgentProfileSnapshotV1.model_validate(
-                    _valid_snapshot_dict(basePrompt="admin takes over")
+                snapshot=MainAgentProfileSnapshotV2.model_validate(
+                    _valid_v2_snapshot_dict(basePrompt="admin takes over")
                 ),
-                origin="api", expected_aggregate_revision=_current_profile_rev(self.db, profile.id), request_id="profile-draft-107"),
+                origin="api",
+                expected_aggregate_revision=_current_profile_rev(self.db, profile.id),
+                request_id="profile-draft-107",
+            ),
         )
-        refreshed3 = self.svc.get_default()
-        self.assertEqual(refreshed3.migration_state, "native")
-        self.assertEqual(refreshed3.draft_version.id, admin.id)  # type: ignore[union-attr]
+        refreshed = self.svc.get_default()
+        self.assertEqual(refreshed.migration_state, "native")
+        self.assertEqual(refreshed.draft_version.id, admin.id)  # type: ignore[union-attr]
 
     def test_save_changed_drafts_append_sequence(self) -> None:
         from app.assistant.skills.schemas import (
-            MainAgentProfileSnapshotV1,
+            MainAgentProfileSnapshotV2,
             SaveMainAgentProfileDraftCommand,
         )
 
@@ -604,16 +604,16 @@ class MainAgentProfileServiceLifecycleTests(unittest.TestCase):
         a = self.svc.save_draft(
             profile.id,
             SaveMainAgentProfileDraftCommand(
-                snapshot=MainAgentProfileSnapshotV1.model_validate(
-                    _valid_snapshot_dict(basePrompt="prompt-a")
+                snapshot=MainAgentProfileSnapshotV2.model_validate(
+                    _valid_v2_snapshot_dict(basePrompt="prompt-a")
                 ),
                 origin="api", expected_aggregate_revision=_current_profile_rev(self.db, profile.id), request_id="profile-draft-106"),
         )
         b = self.svc.save_draft(
             profile.id,
             SaveMainAgentProfileDraftCommand(
-                snapshot=MainAgentProfileSnapshotV1.model_validate(
-                    _valid_snapshot_dict(basePrompt="prompt-b")
+                snapshot=MainAgentProfileSnapshotV2.model_validate(
+                    _valid_v2_snapshot_dict(basePrompt="prompt-b")
                 ),
                 origin="api", expected_aggregate_revision=_current_profile_rev(self.db, profile.id), request_id="profile-draft-105"),
         )
@@ -626,7 +626,7 @@ class MainAgentProfileServiceLifecycleTests(unittest.TestCase):
     def test_publish_creates_new_row_and_records_source_draft(self) -> None:
         from app.assistant.skills.models import AssistantMainAgentProfileVersion
         from app.assistant.skills.schemas import (
-            MainAgentProfileSnapshotV1,
+            MainAgentProfileSnapshotV2,
             PublishMainAgentProfileCommand,
             SaveMainAgentProfileDraftCommand,
         )
@@ -635,8 +635,8 @@ class MainAgentProfileServiceLifecycleTests(unittest.TestCase):
         draft = self.svc.save_draft(
             profile.id,
             SaveMainAgentProfileDraftCommand(
-                snapshot=MainAgentProfileSnapshotV1.model_validate(
-                    _valid_snapshot_dict(basePrompt="ready to publish")
+                snapshot=MainAgentProfileSnapshotV2.model_validate(
+                    _valid_v2_snapshot_dict(basePrompt="ready to publish")
                 ),
                 origin="api", expected_aggregate_revision=_current_profile_rev(self.db, profile.id), request_id="profile-draft-104"),
         )
@@ -676,7 +676,7 @@ class MainAgentProfileServiceLifecycleTests(unittest.TestCase):
         )
         from app.assistant.skills.schemas import (
             PublishMainAgentProfileCommand,
-            default_main_agent_profile_snapshot,
+            default_main_agent_profile_snapshot_v2,
         )
         from app.common.exceptions import ApiException
 
@@ -690,7 +690,7 @@ class MainAgentProfileServiceLifecycleTests(unittest.TestCase):
         )
         self.db.add(other)
         self.db.flush()
-        snap = default_main_agent_profile_snapshot()
+        snap = default_main_agent_profile_snapshot_v2()
         foreign_draft = AssistantMainAgentProfileVersion(
             profile_id=other.id,
             sequence_no=1,
@@ -712,7 +712,7 @@ class MainAgentProfileServiceLifecycleTests(unittest.TestCase):
 
     def test_publish_rejects_partial_control_keys(self) -> None:
         from app.assistant.skills.schemas import (
-            MainAgentProfileSnapshotV1,
+            MainAgentProfileSnapshotV2,
             PublishMainAgentProfileCommand,
             SaveMainAgentProfileDraftCommand,
         )
@@ -722,8 +722,8 @@ class MainAgentProfileServiceLifecycleTests(unittest.TestCase):
         draft = self.svc.save_draft(
             profile.id,
             SaveMainAgentProfileDraftCommand(
-                snapshot=MainAgentProfileSnapshotV1.model_validate(
-                    _valid_snapshot_dict(
+                snapshot=MainAgentProfileSnapshotV2.model_validate(
+                    _valid_v2_snapshot_dict(
                         basePrompt="with controls",
                         controlCapabilityKeys=["skill.inject"],
                     )
@@ -873,7 +873,7 @@ class MainAgentProfileServiceLifecycleTests(unittest.TestCase):
 
         profile = self.svc.ensure_default()
         from app.assistant.skills.schemas import (
-            MainAgentProfileSnapshotV1,
+            MainAgentProfileSnapshotV2,
             PublishMainAgentProfileCommand,
             SaveMainAgentProfileDraftCommand,
         )
@@ -881,8 +881,8 @@ class MainAgentProfileServiceLifecycleTests(unittest.TestCase):
         draft = self.svc.save_draft(
             profile.id,
             SaveMainAgentProfileDraftCommand(
-                snapshot=MainAgentProfileSnapshotV1.model_validate(
-                    _valid_snapshot_dict(basePrompt="still disabled runtime")
+                snapshot=MainAgentProfileSnapshotV2.model_validate(
+                    _valid_v2_snapshot_dict(basePrompt="still disabled runtime")
                 ),
                 origin="api", expected_aggregate_revision=_current_profile_rev(self.db, profile.id), request_id="profile-draft-101"),
         )

@@ -20,7 +20,10 @@ from app.assistant.skills.router import (  # noqa: E402
     main_agent_profile_router,
     skill_package_router,
 )
-from app.assistant.skills.schemas import default_main_agent_profile_snapshot  # noqa: E402
+from app.assistant.skills.schemas import (  # noqa: E402
+    default_main_agent_profile_snapshot,
+    default_main_agent_profile_snapshot_v2,
+)
 from app.assistant_config.router import router as assistant_config_router  # noqa: E402
 from app.common.exceptions import register_exception_handlers  # noqa: E402
 from app.database import get_db  # noqa: E402
@@ -42,7 +45,8 @@ PROTECTED_PROFILE_VERSION_DETAIL = (
 
 
 def _snapshot_payload(**overrides: Any) -> dict[str, Any]:
-    payload = copy.deepcopy(default_main_agent_profile_snapshot().normalized_payload())
+    """V2-only HTTP draft body (production exclusive)."""
+    payload = copy.deepcopy(default_main_agent_profile_snapshot_v2().normalized_payload())
     payload.update(overrides)
     return payload
 
@@ -213,12 +217,14 @@ class MainAgentProfileApiTests(unittest.TestCase):
             "/api/assistant-config/main-agent-profiles/default"
         ).json()["data"]
         rev = int(profile.get("aggregateRevision") or 0)
-        bad = _snapshot_payload(schemaVersion=2)
+
+        # V1 snapshots are rejected at the V2-only HTTP draft boundary.
+        v1 = copy.deepcopy(default_main_agent_profile_snapshot().normalized_payload())
         resp = self.client.put(
             "/api/assistant-config/main-agent-profiles/default/draft",
             content=json.dumps(
                 {
-                    "snapshot": bad,
+                    "snapshot": v1,
                     "expectedAggregateRevision": rev,
                     "requestId": f"bad-snap-{uuid4().hex[:8]}",
                 }
