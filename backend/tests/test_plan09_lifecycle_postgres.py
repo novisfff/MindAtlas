@@ -28,6 +28,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from tests._bootstrap import bootstrap_backend_imports, reset_caches
+from tests.postgres_destructive_guard import reset_disposable_public_schema
 
 bootstrap_backend_imports()
 reset_caches()
@@ -144,10 +145,7 @@ def _ensure_head() -> None:
         pytest.skip("MINDATLAS_TEST_POSTGRES_DESTRUCTIVE=1 required for upgrade")
     _configure_database_env(_POSTGRES_URL)
     with _engine() as engine:
-        with engine.begin() as conn:
-            conn.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
-            conn.execute(text("CREATE SCHEMA public"))
-            conn.execute(text("GRANT ALL ON SCHEMA public TO public"))
+        reset_disposable_public_schema(engine)
     _run_alembic("upgrade", PLAN09_HEAD)
     with _engine() as engine:
         assert _current_revision(engine) == PLAN09_HEAD, (

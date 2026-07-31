@@ -7,10 +7,13 @@ aggregate digest. Secrets are read only from mode-0600 files named by env vars.
 
 Usage:
   cd backend
+  checkout_sha="$(git rev-parse HEAD)"
+  evidence_path="$(mktemp)"
   .venv/bin/python scripts/smoke_main_agent_bootstrap.py \\
     --compose-file ../deploy/docker-compose.yml \\
     --overlay-file ../deploy/compose.main-agent-smoke.yml \\
-    --output ../docs/superpowers/evidence/2026-07-28-main-agent-bootstrap-readiness.json
+    --pull-request-head-sha "$checkout_sha" \\
+    --output "$evidence_path"
 """
 
 from __future__ import annotations
@@ -44,6 +47,8 @@ if str(_BACKEND_ROOT) not in sys.path:
 ALLOWED_EVIDENCE_KEYS: set[str] = {
     "schemaVersion",
     "verificationKind",
+    "checkoutCommitSha",
+    "pullRequestHeadSha",
     "buildRevision",
     "alembicHead",
     "seedManifestDigest",
@@ -71,7 +76,7 @@ SENSITIVE_FRAGMENTS: tuple[str, ...] = (
 )
 
 VERIFICATION_KIND = "main_agent_bootstrap_readiness"
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 PLAN2_ALEMBIC_HEAD = "b6e2d4f8a901"
 SMOKE_MODEL = "mindatlas-smoke-model"
 PROVIDER_BASE_URL = "http://provider-stub:8089/v1"
@@ -80,6 +85,7 @@ TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
 EXPECTED_RUNTIME_KIND = "main_agent"
 _ALEMBIC_REVISION_RE = re.compile(r"[0-9a-f]{12}")
 _NON_NEGATIVE_INTEGER_RE = re.compile(r"(?:0|[1-9][0-9]*)")
+_SOURCE_COMMIT_SHA_RE = re.compile(r"[0-9a-f]{40}")
 
 # Env vars that name secret *files* (never CLI secret values).
 ENV_SETUP_TOKEN_FILE = "MINDATLAS_SMOKE_SETUP_TOKEN_FILE"
@@ -296,6 +302,16 @@ def validate_evidence(evidence: Mapping[str, object]) -> None:
         )
     serialized = json.dumps(dict(evidence), sort_keys=True, ensure_ascii=False).lower()
     _scan_sensitive(serialized)
+    if evidence["schemaVersion"] != SCHEMA_VERSION:
+        raise EvidenceSchemaError(
+            f"schemaVersion must be {SCHEMA_VERSION}"
+        )
+    for field in ("checkoutCommitSha", "pullRequestHeadSha"):
+        value = evidence[field]
+        if not isinstance(value, str) or not _SOURCE_COMMIT_SHA_RE.fullmatch(value):
+            raise EvidenceSchemaError(
+                f"{field} must be 40 lowercase hex characters"
+            )
     claimed = evidence["aggregateDigest"]
     if not isinstance(claimed, str) or not re.fullmatch(r"[0-9a-f]{64}", claimed):
         raise EvidenceSchemaError("aggregateDigest must be 64 lowercase hex characters")
@@ -847,6 +863,45 @@ def probe_build_revision(explicit: str | None) -> str:
     return f"plan2-smoke-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
 
 
+def resolve_source_provenance(
+    pull_request_head_sha: str | None,
+) -> tuple[str, str]:
+    """Return trusted checkout SHA and validated PR-head SHA for evidence."""
+    if (
+        pull_request_head_sha is not None
+        and not _SOURCE_COMMIT_SHA_RE.fullmatch(pull_request_head_sha)
+    ):
+        raise SmokeFailure(
+            "pullRequestHeadSha must be 40 lowercase hex characters"
+        )
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(_BACKEND_ROOT),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as exc:
+        raise SmokeFailure(
+            "checkoutCommitSha unavailable from git rev-parse HEAD"
+        ) from exc
+    checkout_sha = (completed.stdout or "").strip()
+    if (
+        completed.returncode != 0
+        or not _SOURCE_COMMIT_SHA_RE.fullmatch(checkout_sha)
+    ):
+        raise SmokeFailure(
+            "checkoutCommitSha unavailable from git rev-parse HEAD"
+        )
+    return (
+        checkout_sha,
+        checkout_sha
+        if pull_request_head_sha is None
+        else pull_request_head_sha,
+    )
+
+
 def run_unit_suites() -> dict[str, object]:
     """Run the fixed smoke unit suite; record counts only."""
     import pytest as pytest_mod
@@ -1272,6 +1327,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--project-name", default="")
     parser.add_argument("--build-revision", default="")
+    parser.add_argument("--pull-request-head-sha", default=None)
     parser.add_argument("--api-base-url", default="")
     parser.add_argument("--skip-compose", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--skip-unit-suites", action="store_true", help=argparse.SUPPRESS)
@@ -1292,6 +1348,14 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if not overlay_file.is_file():
         print(f"overlay file missing: {overlay_file}", file=sys.stderr)
+        return 2
+
+    try:
+        checkout_commit_sha, pull_request_head_sha = resolve_source_provenance(
+            args.pull_request_head_sha
+        )
+    except SmokeFailure as exc:
+        print(f"smoke failed: {exc}", file=sys.stderr)
         return 2
 
     build_revision = probe_build_revision(args.build_revision or None)
@@ -1363,6 +1427,8 @@ def main(argv: list[str] | None = None) -> int:
         payload: dict[str, object] = {
             "schemaVersion": SCHEMA_VERSION,
             "verificationKind": VERIFICATION_KIND,
+            "checkoutCommitSha": checkout_commit_sha,
+            "pullRequestHeadSha": pull_request_head_sha,
             "buildRevision": build_revision,
             "alembicHead": observed_alembic_head,
             "seedManifestDigest": seed_manifest_digest(),

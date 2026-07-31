@@ -19,6 +19,7 @@ from tests._bootstrap import bootstrap_backend_imports, reset_caches
 bootstrap_backend_imports()
 reset_caches()
 
+import scripts.smoke_main_agent_bootstrap as smoke_script  # noqa: E402
 from scripts.smoke_main_agent_bootstrap import (  # noqa: E402
     ALLOWED_EVIDENCE_KEYS,
     SENSITIVE_FRAGMENTS,
@@ -44,8 +45,10 @@ from tests.support.openai_stub_server import (  # noqa: E402
 
 def _safe_payload() -> dict[str, Any]:
     return {
-        "schemaVersion": "1",
+        "schemaVersion": "2",
         "verificationKind": "main_agent_bootstrap_readiness",
+        "checkoutCommitSha": "0123456789abcdef0123456789abcdef01234567",
+        "pullRequestHeadSha": "89abcdef0123456789abcdef0123456789abcdef",
         "buildRevision": "plan2-smoke-deadbeef",
         "alembicHead": "b6e2d4f8a901",
         "seedManifestDigest": "3ba69223e9c1a3ab1783c8a549a1b7cf56410f36f60a7fb67ba1f4fc84275237",
@@ -78,6 +81,124 @@ def _safe_payload() -> dict[str, Any]:
         },
         "generatedAtUtc": "2026-07-28T00:00:00+00:00",
     }
+
+
+@pytest.mark.parametrize("field", ["checkoutCommitSha", "pullRequestHeadSha"])
+def test_finalize_evidence_rejects_invalid_source_sha(field: str) -> None:
+    evidence = finalize_evidence(_safe_payload())
+    evidence[field] = "not-a-sha"
+    with pytest.raises(EvidenceSchemaError, match=field):
+        validate_evidence(evidence)
+
+
+def test_source_attributed_evidence_requires_schema_version_2() -> None:
+    payload = _safe_payload()
+    payload["schemaVersion"] = "1"
+    with pytest.raises(EvidenceSchemaError, match="schemaVersion"):
+        finalize_evidence(payload)
+
+
+@pytest.mark.parametrize("field", ["checkoutCommitSha", "pullRequestHeadSha"])
+def test_source_sha_is_covered_by_aggregate_digest(field: str) -> None:
+    baseline = finalize_evidence(_safe_payload())
+    changed = _safe_payload()
+    changed[field] = "a" * 40
+    updated = finalize_evidence(changed)
+    assert updated["aggregateDigest"] != baseline["aggregateDigest"]
+
+
+def test_source_provenance_derives_checkout_and_defaults_pr_head(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkout_sha = "0123456789abcdef0123456789abcdef01234567"
+    run = MagicMock(returncode=0, stdout=f"{checkout_sha}\n", stderr="")
+    monkeypatch.setattr(smoke_script.subprocess, "run", MagicMock(return_value=run))
+
+    assert smoke_script.resolve_source_provenance(None) == (
+        checkout_sha,
+        checkout_sha,
+    )
+    smoke_script.subprocess.run.assert_called_once_with(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(smoke_script._BACKEND_ROOT),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_source_provenance_preserves_supplied_valid_pr_head(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkout_sha = "0123456789abcdef0123456789abcdef01234567"
+    pull_request_head_sha = "89abcdef0123456789abcdef0123456789abcdef"
+    run = MagicMock(returncode=0, stdout=f"{checkout_sha}\n", stderr="")
+    monkeypatch.setattr(smoke_script.subprocess, "run", MagicMock(return_value=run))
+
+    assert smoke_script.resolve_source_provenance(pull_request_head_sha) == (
+        checkout_sha,
+        pull_request_head_sha,
+    )
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout"),
+    [
+        (1, ""),
+        (0, "not-a-sha\n"),
+        (0, "A" * 40),
+    ],
+)
+def test_source_provenance_fails_closed_for_invalid_checkout(
+    monkeypatch: pytest.MonkeyPatch,
+    returncode: int,
+    stdout: str,
+) -> None:
+    run = MagicMock(returncode=returncode, stdout=stdout, stderr="ignored")
+    monkeypatch.setattr(smoke_script.subprocess, "run", MagicMock(return_value=run))
+
+    with pytest.raises(SmokeFailure, match="checkoutCommitSha"):
+        smoke_script.resolve_source_provenance(None)
+
+
+@pytest.mark.parametrize("pull_request_head_sha", ["", " ", "\t", "not-a-sha"])
+def test_source_provenance_rejects_explicit_invalid_pr_head_before_secrets_or_compose(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pull_request_head_sha: str,
+) -> None:
+    compose_file = tmp_path / "compose.yml"
+    overlay_file = tmp_path / "overlay.yml"
+    compose_file.touch()
+    overlay_file.touch()
+    compose_runner = MagicMock()
+    generate_secrets = MagicMock(
+        side_effect=AssertionError("invalid provenance reached secret generation")
+    )
+    run_suites = MagicMock(
+        side_effect=AssertionError("invalid provenance reached unit suites")
+    )
+    monkeypatch.setattr(smoke_script, "ComposeRunner", compose_runner)
+    monkeypatch.setattr(smoke_script, "generate_ephemeral_secrets", generate_secrets)
+    monkeypatch.setattr(smoke_script, "run_unit_suites", run_suites)
+
+    result = smoke_script.main(
+        [
+            "--compose-file",
+            str(compose_file),
+            "--overlay-file",
+            str(overlay_file),
+            "--output",
+            str(tmp_path / "evidence.json"),
+            "--pull-request-head-sha",
+            pull_request_head_sha,
+        ]
+    )
+
+    assert result == 2
+    generate_secrets.assert_not_called()
+    run_suites.assert_not_called()
+    compose_runner.assert_not_called()
 
 
 def test_smoke_evidence_has_only_safe_keys() -> None:
@@ -152,20 +273,6 @@ def test_write_evidence_atomic_mode_and_round_trip(tmp_path: Path) -> None:
     assert reloaded["activeRuntimeKind"] == "main_agent"
     assert reloaded["chatRunCount"] == 1
     assert reloaded["chatTerminalStatus"] == "completed"
-
-
-def test_committed_smoke_evidence_records_python311_verification() -> None:
-    evidence_path = (
-        Path(__file__).resolve().parents[2]
-        / "docs/superpowers/evidence/2026-07-28-main-agent-bootstrap-readiness.json"
-    )
-    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
-    validate_evidence(evidence)
-
-    suites = evidence["testSuites"]
-    assert isinstance(suites, dict)
-    assert suites["passed"] is True
-    assert str(suites["pythonVersion"]).startswith("3.11.")
 
 
 def test_safe_payload_fragments_stay_clean() -> None:

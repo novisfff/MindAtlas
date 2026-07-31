@@ -125,20 +125,21 @@ jobs:
         env:
           POSTGRES_USER: mindatlas
           POSTGRES_PASSWORD: mindatlas
-          POSTGRES_DB: mindatlas_operator_auth_ci
+          POSTGRES_DB: mindatlas_test_plan08_operator_auth_ci
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U mindatlas -d mindatlas_operator_auth_ci"
+          --health-cmd "pg_isready -U mindatlas -d mindatlas_test_plan08_operator_auth_ci"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 10
     env:
       # Disposable CI database only — never production credentials.
-      DATABASE_URL: postgresql://mindatlas:mindatlas@localhost:5432/mindatlas_operator_auth_ci
-      MINDATLAS_TEST_POSTGRES_URL: postgresql://mindatlas:mindatlas@localhost:5432/mindatlas_operator_auth_ci
+      DATABASE_URL: postgresql://mindatlas:mindatlas@localhost:5432/mindatlas_test_plan08_operator_auth_ci
+      MINDATLAS_TEST_POSTGRES_URL: postgresql://mindatlas:mindatlas@localhost:5432/mindatlas_test_plan08_operator_auth_ci
       # Hard-fail release-critical operator-auth PostgreSQL suite when URL missing.
       MINDATLAS_REQUIRE_POSTGRES: "1"
+      MINDATLAS_TEST_POSTGRES_DESTRUCTIVE: "1"
       AI_PROVIDER_FERNET_KEY: "07v02gVBdreNrXjLJZkIMdohHtgy6aDFKBHxakHjbrQ="
       # Origin only at job scope — operator secrets stay step-scoped so
       # test_settings_constructible_without_auth_secrets stays honest under CI.
@@ -416,19 +417,20 @@ jobs:
         env:
           POSTGRES_USER: mindatlas
           POSTGRES_PASSWORD: mindatlas
-          POSTGRES_DB: mindatlas_readiness_ci
+          POSTGRES_DB: mindatlas_test_plan08_readiness_ci
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U mindatlas -d mindatlas_readiness_ci"
+          --health-cmd "pg_isready -U mindatlas -d mindatlas_test_plan08_readiness_ci"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 10
     env:
       # Disposable CI database only — never production credentials.
-      DATABASE_URL: postgresql://mindatlas:mindatlas@localhost:5432/mindatlas_readiness_ci
-      MINDATLAS_TEST_POSTGRES_URL: postgresql://mindatlas:mindatlas@localhost:5432/mindatlas_readiness_ci
+      DATABASE_URL: postgresql://mindatlas:mindatlas@localhost:5432/mindatlas_test_plan08_readiness_ci
+      MINDATLAS_TEST_POSTGRES_URL: postgresql://mindatlas:mindatlas@localhost:5432/mindatlas_test_plan08_readiness_ci
       MINDATLAS_REQUIRE_POSTGRES: "1"
+      MINDATLAS_TEST_POSTGRES_DESTRUCTIVE: "1"
       MINDATLAS_PLAN10_B2_TEST_OVERRIDE: "1"
       AI_PROVIDER_FERNET_KEY: "07v02gVBdreNrXjLJZkIMdohHtgy6aDFKBHxakHjbrQ="
       APP_ENV: test
@@ -553,27 +555,36 @@ jobs:
           python -m pytest tests/test_main_agent_bootstrap_smoke_script.py -q
 
       - name: Fresh Compose bootstrap-to-chat smoke
+        env:
+          PULL_REQUEST_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
           python scripts/smoke_main_agent_bootstrap.py \
             --compose-file ../deploy/docker-compose.yml \
             --overlay-file ../deploy/compose.main-agent-smoke.yml \
             --build-revision "${APP_BUILD_REVISION}" \
-            --output ../docs/superpowers/evidence/2026-07-28-main-agent-bootstrap-readiness.json
+            --pull-request-head-sha "${PULL_REQUEST_HEAD_SHA}" \
+            --output "${RUNNER_TEMP}/main-agent-bootstrap-readiness.json"
 
       - name: Validate evidence allowlist and digest
+        env:
+          PULL_REQUEST_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
+          export CHECKOUT_COMMIT_SHA="$(git rev-parse HEAD)"
           python - <<'PY'
           import json
+          import os
           from pathlib import Path
           from scripts.smoke_main_agent_bootstrap import validate_evidence
 
-          path = Path("../docs/superpowers/evidence/2026-07-28-main-agent-bootstrap-readiness.json")
+          path = Path(os.environ["RUNNER_TEMP"]) / "main-agent-bootstrap-readiness.json"
           if not path.is_file():
               raise SystemExit("evidence file missing after smoke")
           payload = json.loads(path.read_text(encoding="utf-8"))
           validate_evidence(payload)
+          assert payload["checkoutCommitSha"] == os.environ["CHECKOUT_COMMIT_SHA"]
+          assert payload["pullRequestHeadSha"] == os.environ["PULL_REQUEST_HEAD_SHA"]
           assert payload["activeRuntimeKind"] == "main_agent"
           assert payload["chatRunCount"] == 1
           assert payload["chatTerminalStatus"] == "completed"
@@ -586,7 +597,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: main-agent-bootstrap-readiness-evidence
-          path: docs/superpowers/evidence/2026-07-28-main-agent-bootstrap-readiness.json
+          path: ${{ runner.temp }}/main-agent-bootstrap-readiness.json
           if-no-files-found: error
 
   frontend:

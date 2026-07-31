@@ -233,10 +233,13 @@ Plan 2 ships a disposable overlay and fixed runner that prove
 
 ```bash
 cd backend
+checkout_sha="$(git rev-parse HEAD)"
+evidence_path="$(mktemp)"
 .venv/bin/python scripts/smoke_main_agent_bootstrap.py \
   --compose-file ../deploy/docker-compose.yml \
   --overlay-file ../deploy/compose.main-agent-smoke.yml \
-  --output ../docs/superpowers/evidence/2026-07-28-main-agent-bootstrap-readiness.json
+  --pull-request-head-sha "$checkout_sha" \
+  --output "$evidence_path"
 ```
 
 Notes:
@@ -247,9 +250,14 @@ Notes:
 - The runner generates ephemeral Setup/session/Fernet secrets into mode-0600
   files, never CLI secret values, and always runs
   `docker compose down --volumes --remove-orphans`.
-- Evidence JSON is allowlisted (no password/setup/token/cookie/api_key/prompt/
-  entry/artifact/provider payload). CI job
-  `main-agent-bootstrap-smoke` uploads only that sanitized file.
+- Evidence JSON uses schema version `2`; its allowlist includes the actual
+  checkout commit and the requested pull-request head, and its aggregate digest
+  covers both. It still excludes password/setup/token/cookie/api_key/prompt/
+  entry/artifact/provider payload fields.
+- Evidence is an ephemeral CI run artifact, not a committed repository file.
+  The workflow run/artifact metadata is authoritative; `buildRevision` is only
+  a runtime compatibility label and is not source provenance. CI job
+  `main-agent-bootstrap-smoke` uploads only the sanitized runner-temp JSON.
 - Base Compose still uses `/health` for depends_on; smoke acceptance uses
   `/ready` after Operator activation.
 

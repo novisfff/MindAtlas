@@ -362,7 +362,7 @@ Stable runtime HTTP failures:
 | `backend/scripts/smoke_main_agent_bootstrap.py` | Fixed fresh-install initialization-to-Chat smoke with sanitized output. |
 | `deploy/compose.main-agent-smoke.yml` | Disposable provider stub, API, Web, and compatible Worker smoke overlay. |
 | `backend/tests/support/openai_stub_server.py` | Deterministic OpenAI-compatible test server used only by smoke. |
-| `docs/superpowers/evidence/2026-07-28-main-agent-bootstrap-readiness.json` | Safe generated execution evidence; created by Task 12, not hand-authored. |
+| CI artifact `main-agent-bootstrap-readiness-evidence` | Ephemeral, source-attributed Task 12 execution evidence; workflow-run and artifact metadata are authoritative. |
 
 The focused test files are introduced in the Tasks that own them. Existing tests that assert selectable Legacy runtime are explicitly retired or rewritten in Task 9.
 
@@ -1958,12 +1958,13 @@ Run:
   tests/test_assistant_system_bootstrap.py \
   tests/test_system_initialization_service.py -q
 MINDATLAS_TEST_POSTGRES_URL="$MINDATLAS_TEST_POSTGRES_URL" \
+MINDATLAS_TEST_POSTGRES_DESTRUCTIVE=1 \
   .venv/bin/python -m pytest \
   tests/test_assistant_initialization_atomicity_postgres.py \
   tests/test_system_initialization_concurrency_postgres.py -q
 ```
 
-Expected: all tests PASS; PostgreSQL test summary has zero skipped tests; failure injection leaves every owned table empty.
+Expected: all tests PASS; PostgreSQL test summary has zero skipped tests; failure injection leaves every owned table empty. The explicit destructive opt-in is required because both fixtures truncate owned tables with `CASCADE`; their actual engine target must be a local `mindatlas_test_plan08_` PostgreSQL database with no URL query parameters.
 
 - [ ] **Step 11: Commit**
 
@@ -4211,14 +4212,14 @@ git commit -m "feat(runtime): add assistant activation and readiness ui"
 - Create: `backend/tests/test_main_agent_bootstrap_smoke_script.py`
 - Create: `backend/scripts/smoke_main_agent_bootstrap.py`
 - Create: `deploy/compose.main-agent-smoke.yml`
-- Create at execution: `docs/superpowers/evidence/2026-07-28-main-agent-bootstrap-readiness.json`
+- Delete: `docs/superpowers/evidence/2026-07-28-main-agent-bootstrap-readiness.json`
 - Modify: `.github/workflows/ci.yml`
 - Modify: `deploy/README.md`
 
 **Interfaces:**
 
 - Consumes: fresh migration through `b6e2d4f8a901`, Setup-authorized initialization, Session/CSRF, deterministic provider stub, compatible Worker, activation API, public readiness, atomic Chat admission, and safe evidence digest convention.
-- Produces: one fixed disposable Compose smoke workflow and a sanitized JSON proof of initialization-to-Main-Agent-Chat.
+- Produces: one fixed disposable Compose smoke workflow and a sanitized schema-version-`2` JSON proof of initialization-to-Main-Agent-Chat. Evidence is written outside the repository and retained only as a CI run artifact; workflow-run/artifact metadata is authoritative, while `buildRevision` remains a runtime compatibility label and is not source provenance.
 
 - [ ] **Step 1: Write failing evidence allowlist tests**
 
@@ -4226,6 +4227,8 @@ git commit -m "feat(runtime): add assistant activation and readiness ui"
 ALLOWED_EVIDENCE_KEYS = {
     "schemaVersion",
     "verificationKind",
+    "checkoutCommitSha",
+    "pullRequestHeadSha",
     "buildRevision",
     "alembicHead",
     "seedManifestDigest",
@@ -4367,6 +4370,11 @@ def finalize_evidence(payload: dict[str, object]) -> dict[str, object]:
 ```
 
 Write with `tempfile.NamedTemporaryFile` in the destination directory, `fsync`, permission `0o600`, then `os.replace`. Validate the final file against the allowlist and digest before exit.
+Both `checkoutCommitSha` and `pullRequestHeadSha` are exactly 40 lowercase hex
+characters and are part of the canonical payload covered by `aggregateDigest`.
+The runner derives `checkoutCommitSha` itself with fail-closed
+`git rev-parse HEAD`; `--pull-request-head-sha` defaults to that checkout SHA
+for local and push runs.
 
 - [ ] **Step 6: Unit-test failure cleanup and redaction**
 
@@ -4397,10 +4405,13 @@ Use ephemeral secret files with mode 0600 and an environment file outside the re
 
 ```bash
 cd backend
+checkout_sha="$(git rev-parse HEAD)"
+evidence_path="$(mktemp)"
 .venv/bin/python scripts/smoke_main_agent_bootstrap.py \
   --compose-file ../deploy/docker-compose.yml \
   --overlay-file ../deploy/compose.main-agent-smoke.yml \
-  --output ../docs/superpowers/evidence/2026-07-28-main-agent-bootstrap-readiness.json
+  --pull-request-head-sha "$checkout_sha" \
+  --output "$evidence_path"
 ```
 
 Expected:
@@ -4415,22 +4426,29 @@ chat: main_agent completed
 evidence: verified
 ```
 
-The command exits 0, always runs `docker compose down --volumes --remove-orphans`, and leaves one evidence file. No secret appears in terminal output.
+The command exits 0, always runs `docker compose down --volumes --remove-orphans`, and leaves one temporary evidence file outside the repository. No secret appears in terminal output.
 
 - [ ] **Step 8: Validate the evidence independently**
 
 Run:
 
 ```bash
+EVIDENCE_PATH="$evidence_path" \
+CHECKOUT_COMMIT_SHA="$checkout_sha" \
+PULL_REQUEST_HEAD_SHA="$checkout_sha" \
 .venv/bin/python - <<'PY'
 import json
+import os
 from pathlib import Path
 from app.assistant.domain.digests import sha256_canonical_json
 
-path = Path("../docs/superpowers/evidence/2026-07-28-main-agent-bootstrap-readiness.json")
+path = Path(os.environ["EVIDENCE_PATH"])
 payload = json.loads(path.read_text("utf-8"))
 claimed = payload.pop("aggregateDigest")
 assert sha256_canonical_json(payload) == claimed
+assert payload["schemaVersion"] == "2"
+assert payload["checkoutCommitSha"] == os.environ["CHECKOUT_COMMIT_SHA"]
+assert payload["pullRequestHeadSha"] == os.environ["PULL_REQUEST_HEAD_SHA"]
 assert payload["activeRuntimeKind"] == "main_agent"
 assert payload["chatRunCount"] == 1
 assert payload["chatTerminalStatus"] == "completed"
@@ -4442,7 +4460,16 @@ Expected: prints `main agent bootstrap evidence: OK`.
 
 - [ ] **Step 9: Add the smoke to CI as a required fixed job**
 
-CI builds once with a non-secret synthetic build revision, invokes the fixed script, uploads the sanitized evidence artifact, and fails on a skipped/absent PostgreSQL, Worker, or smoke service. It never uploads Compose environment files, logs containing request bodies, cookie jars, or database volumes.
+CI builds once with a non-secret synthetic build revision, passes
+`${{ github.event.pull_request.head.sha || github.sha }}` as the expected PR
+head, and lets the script derive the actual checkout with `git rev-parse HEAD`.
+It independently verifies the checkout SHA and PR-head fields immediately after
+generation, uploads only
+`$RUNNER_TEMP/main-agent-bootstrap-readiness.json`, and fails on a
+skipped/absent PostgreSQL, Worker, or smoke service. The CI workflow run and
+artifact metadata identify the authoritative execution; `buildRevision` does
+not. CI never uploads Compose environment files, logs containing request
+bodies, cookie jars, database volumes, or repository-generated evidence.
 
 - [ ] **Step 10: Run final Plan 2 verification**
 
@@ -4480,10 +4507,12 @@ git add \
   backend/scripts/smoke_main_agent_bootstrap.py \
   deploy/compose.main-agent-smoke.yml \
   deploy/README.md \
-  .github/workflows/ci.yml \
-  docs/superpowers/evidence/2026-07-28-main-agent-bootstrap-readiness.json
+  .github/workflows/ci.yml
 git commit -m "test(runtime): verify fresh main agent bootstrap"
 ```
+
+Do not generate or `git add` an evidence JSON. Evidence belongs only in the
+temporary output location and the CI artifact for the run that produced it.
 
 ---
 
@@ -4509,10 +4538,13 @@ export MINDATLAS_TEST_POSTGRES_DESTRUCTIVE=1
 export DATABASE_URL="$MINDATLAS_TEST_POSTGRES_URL"
 .venv-plan2/bin/alembic upgrade b6e2d4f8a901
 .venv-plan2/bin/python -m pytest -q
+checkout_sha="$(git rev-parse HEAD)"
+evidence_path="$(mktemp)"
 .venv-plan2/bin/python scripts/smoke_main_agent_bootstrap.py \
   --compose-file ../deploy/docker-compose.yml \
   --overlay-file ../deploy/compose.main-agent-smoke.yml \
-  --output ../docs/superpowers/evidence/2026-07-28-main-agent-bootstrap-readiness.json
+  --pull-request-head-sha "$checkout_sha" \
+  --output "$evidence_path"
 cd ../frontend
 npm ci
 npm test
@@ -4583,7 +4615,7 @@ Stop the plan and preserve exact non-secret diagnostics if any condition occurs:
 - Initialization ownership check: core staging, Operator/catalog staging, trusted bootstrap, marker/audit, one coordinator commit, and post-commit Session issuance are explicit. Initialization never calls activation.
 - Migration check: Plan 2 is exactly `9f3c1a7e2b40 -> b6e2d4f8a901`; it neither creates nor edits `pre_ga_v1_0001` or `pre_ga_v1_0002`.
 - Runtime-boundary check: live application imports are AST-gated away from `app.assistant.migration`; historical migration code is not treated as a selectable runtime.
-- Evidence check: the Plan 2 artifact has a fixed safe-key allowlist and canonical aggregate digest; secret/request/content fields are forbidden.
+- Evidence check: the ephemeral Plan 2 CI artifact uses schema version `2`, has a fixed safe-key allowlist, binds both source SHA fields into its canonical aggregate digest, and forbids secret/request/content fields. Workflow-run/artifact metadata is authoritative; `buildRevision` is not provenance.
 - Placeholder scan:
 
 ```bash

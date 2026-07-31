@@ -17,6 +17,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from tests._bootstrap import bootstrap_backend_imports, reset_caches
+from tests.postgres_destructive_guard import reset_disposable_public_schema
 
 bootstrap_backend_imports()
 reset_caches()
@@ -233,10 +234,7 @@ def _purge_durable_data(conn) -> None:
 
 
 def _drop_public_schema(engine: Engine) -> None:
-    with engine.begin() as conn:
-        conn.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
-        conn.execute(text("CREATE SCHEMA public"))
-        conn.execute(text("GRANT ALL ON SCHEMA public TO public"))
+    reset_disposable_public_schema(engine)
 
 
 def _reset_to_plan05_parent() -> None:

@@ -23,11 +23,14 @@ from typing import Iterator
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
-from sqlalchemy.engine.url import make_url
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session, sessionmaker
 
 from tests._bootstrap import bootstrap_backend_imports, reset_caches
+from tests.postgres_destructive_guard import (
+    assert_disposable_postgres_target,
+    reset_disposable_public_schema,
+)
 
 bootstrap_backend_imports()
 reset_caches()
@@ -51,7 +54,6 @@ PLAN08_EVIDENCE_REVISION = "d7e8f9a0b1c3"
 PLAN09_LIFECYCLE_REVISION = "403414a62e55"
 PLAN09_EVAL_REVISION = "027869a00a47"
 PLAN09_HEAD = "027869a00a47"
-DISPOSABLE_DATABASE_PREFIX = "mindatlas_test_plan08_"
 DESTRUCTIVE_OPT_IN_ENV = "MINDATLAS_TEST_POSTGRES_DESTRUCTIVE"
 
 
@@ -70,22 +72,6 @@ def _configure_database_env(url: str) -> None:
         get_settings.cache_clear()
     except Exception:
         pass
-
-
-def _assert_disposable_database(url: str) -> None:
-    parsed = make_url(url)
-    if parsed.get_backend_name() != "postgresql":
-        raise RuntimeError("MINDATLAS_TEST_POSTGRES_URL must use PostgreSQL")
-    database = str(parsed.database or "").lower()
-    if not database.startswith(DISPOSABLE_DATABASE_PREFIX):
-        raise RuntimeError(
-            "MINDATLAS_TEST_POSTGRES_URL must use the generated disposable "
-            f"database prefix {DISPOSABLE_DATABASE_PREFIX!r}"
-        )
-    if os.environ.get(DESTRUCTIVE_OPT_IN_ENV, "").strip() != "1":
-        raise RuntimeError(
-            f"{DESTRUCTIVE_OPT_IN_ENV}=1 is required for destructive PostgreSQL tests"
-        )
 
 
 def _alembic_config():
@@ -194,13 +180,9 @@ def _upgrade_to_ledger_revision() -> Iterator[None]:
     from alembic import command
 
     assert _POSTGRES_URL
-    _assert_disposable_database(_POSTGRES_URL)
     _configure_database_env(_POSTGRES_URL)
     with _engine() as engine:
-        with engine.begin() as connection:
-            connection.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
-            connection.execute(text("CREATE SCHEMA public"))
-            connection.execute(text("GRANT ALL ON SCHEMA public TO public"))
+        reset_disposable_public_schema(engine)
     command.upgrade(_alembic_config(), PLAN08_LEDGER_REVISION)
     yield
 
@@ -444,25 +426,32 @@ def _error_text(exc: BaseException) -> str:
 def test_disposable_database_guard_requires_explicit_opt_in(monkeypatch) -> None:
     monkeypatch.delenv(DESTRUCTIVE_OPT_IN_ENV, raising=False)
     with pytest.raises(RuntimeError, match=DESTRUCTIVE_OPT_IN_ENV):
-        _assert_disposable_database(
+        assert_disposable_postgres_target(
             "postgresql://localhost/mindatlas_test_plan08_guard"
         )
 
 
 @pytest.mark.parametrize(
-    "url",
+    ("url", "expected_message"),
     (
-        "sqlite:///mindatlas_test_plan08_guard.db",
-        "postgresql://localhost/production_test",
+        (
+            "sqlite:///mindatlas_test_plan08_guard.db",
+            "PostgreSQL backend",
+        ),
+        (
+            "postgresql://localhost/production_test",
+            "database beginning with 'mindatlas_test_plan08_'",
+        ),
     ),
 )
 def test_disposable_database_guard_rejects_wrong_dialect_or_prefix(
     monkeypatch,
     url: str,
+    expected_message: str,
 ) -> None:
     monkeypatch.setenv(DESTRUCTIVE_OPT_IN_ENV, "1")
-    with pytest.raises(RuntimeError):
-        _assert_disposable_database(url)
+    with pytest.raises(RuntimeError, match=expected_message):
+        assert_disposable_postgres_target(url)
 
 
 def test_stamped_plan08_database_upgrades_to_executable_attempt_lifecycle() -> None:

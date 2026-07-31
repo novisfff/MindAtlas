@@ -10,7 +10,7 @@ import os
 import threading
 import uuid
 from contextlib import contextmanager
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -225,31 +225,34 @@ class _PostgresRuntime:
             conv = Conversation(title=f"pg-claim-{uuid.uuid4().hex[:10]}")
             s.add(conv)
             s.flush()
-            run = AssistantChatRun(
-                conversation_id=conv.id,
-                status="queued",
-                runtime_kind="main_agent",
-                main_agent_rollout_revision_id=prepared.id,
-                main_agent_profile_version_id=prepared.profile_version_id,
-                resolved_model_id=prepared.model_id,
-                runtime_closure_digest=DIGEST_9,
-                runtime_contract_version=int(
+            run_kwargs: dict[str, Any] = {
+                "conversation_id": conv.id,
+                "status": "queued",
+                "runtime_kind": "main_agent",
+                "main_agent_rollout_revision_id": prepared.id,
+                "main_agent_profile_version_id": prepared.profile_version_id,
+                "resolved_model_id": prepared.model_id,
+                "runtime_closure_digest": DIGEST_9,
+                "runtime_contract_version": int(
                     overrides.get("runtime_contract_version", 1)
                 ),
-                required_checkpoint_codec_version=int(
+                "required_checkpoint_codec_version": int(
                     overrides.get("required_checkpoint_codec_version", 3)
                 ),
-                required_capability_feature_digest=str(
+                "required_capability_feature_digest": str(
                     overrides.get("required_capability_feature_digest", FEATURE)
                 ),
-                required_app_build_revision=str(
+                "required_app_build_revision": str(
                     overrides.get("required_app_build_revision", self.build)
                 ),
-                capability_ledger_mode="enforced",
-                memory_commit_status="pending",
-                state_revision=0,
-                last_event_seq=0,
-            )
+                "capability_ledger_mode": "enforced",
+                "memory_commit_status": "pending",
+                "state_revision": 0,
+                "last_event_seq": 0,
+            }
+            if "created_at" in overrides:
+                run_kwargs["created_at"] = overrides["created_at"]
+            run = AssistantChatRun(**run_kwargs)
             s.add(run)
             s.commit()
             s.refresh(run)
@@ -404,16 +407,15 @@ def test_compatible_worker_claims_queued_run(postgres_runtime):
     assert reloaded.lease_owner == worker.worker_id
 
 
-def test_claim_skips_codec_incompatible_earliest_run(postgres_runtime):
-    """Earliest eligible Run with an unsupported codec must not starve a later match.
+def test_claim_skips_full_codec_incompatible_candidate_batch(postgres_runtime):
+    """Codec membership is filtered in SQL before LIMIT.
 
-    SQL prefilter matches build/contract/feature only; codec is rechecked on the
-    locked row. Claim must scan further SKIP LOCKED candidates instead of
-    abandoning the poll after one codec-incompatible lock.
+    Canonical compatibility is rechecked after locking before a Run is claimed.
     """
     # Worker supports codecs 1 and 2 only — not 3 (current) or 99.
     worker = postgres_runtime.worker_identity_with()
     # Rebuild identity with a restricted codec set while keeping other fields.
+    from app.assistant.durable.leases import RunLeaseService
     from app.assistant.durable.worker_registry import WorkerIdentity
 
     worker = WorkerIdentity(
@@ -425,18 +427,28 @@ def test_claim_skips_codec_incompatible_earliest_run(postgres_runtime):
         hostname_label="pg-claim-codec-scan",
     )
 
-    # Earliest by created_at: requires codec 99 (worker cannot support).
-    bad = postgres_runtime.queued_run(required_checkpoint_codec_version=99)
-    # Later eligible Run: requires codec 2 (worker supports).
-    good = postgres_runtime.queued_run(required_checkpoint_codec_version=2)
+    batch_size = RunLeaseService._CLAIM_CANDIDATE_BATCH
+    start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    bad_runs = [
+        postgres_runtime.queued_run(
+            required_checkpoint_codec_version=99,
+            created_at=start + timedelta(microseconds=index),
+        )
+        for index in range(batch_size)
+    ]
+    good = postgres_runtime.queued_run(
+        required_checkpoint_codec_version=2,
+        created_at=start + timedelta(microseconds=batch_size),
+    )
 
     claimed = postgres_runtime.claim(worker)
     assert claimed is not None, "claim_next must advance past codec-incompatible head"
     assert str(claimed.run_id) == str(good.id)
 
-    bad_reloaded = postgres_runtime.reload(bad.id)
-    assert bad_reloaded.status == "queued"
-    assert bad_reloaded.lease_owner is None
+    for bad in bad_runs:
+        bad_reloaded = postgres_runtime.reload(bad.id)
+        assert bad_reloaded.status == "queued"
+        assert bad_reloaded.lease_owner is None
 
     good_reloaded = postgres_runtime.reload(good.id)
     assert good_reloaded.status == "running"

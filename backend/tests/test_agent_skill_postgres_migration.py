@@ -18,6 +18,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from tests._bootstrap import bootstrap_backend_imports, reset_caches
+from tests.postgres_destructive_guard import reset_disposable_public_schema
 
 bootstrap_backend_imports()
 reset_caches()
@@ -137,10 +138,7 @@ def _reset_to_head() -> None:
     """Create the Plan 09 historical schema from a disposable empty database."""
     _configure_database_env(_POSTGRES_URL)
     with _engine() as engine:
-        with engine.begin() as conn:
-            conn.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
-            conn.execute(text("CREATE SCHEMA public"))
-            conn.execute(text("GRANT ALL ON SCHEMA public TO public"))
+        reset_disposable_public_schema(engine)
     # This historical suite stops before Plan 10 removes the legacy tables.
     _run_alembic("upgrade", PLAN09_HEAD)
 

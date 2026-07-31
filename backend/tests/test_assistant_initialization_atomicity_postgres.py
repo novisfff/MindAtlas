@@ -16,6 +16,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from tests._bootstrap import bootstrap_backend_imports, reset_caches
+from tests.postgres_destructive_guard import assert_disposable_postgres_target
 
 bootstrap_backend_imports()
 reset_caches()
@@ -115,6 +116,7 @@ def _ensure_schema(engine) -> None:
 
 
 def _truncate_owned(engine) -> None:
+    assert_disposable_postgres_target(str(engine.url))
     tables = [
         "assistant_main_agent_rollout_event",
         "assistant_runtime_bootstrap_gate_use",
