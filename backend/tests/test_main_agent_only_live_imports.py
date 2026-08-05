@@ -36,19 +36,6 @@ FORBIDDEN_SELECTOR_SYMBOLS = frozenset(
 # migration fixtures, and V1 read-only parser fixtures only.
 INVENTORY_ALLOWLIST: frozenset[str] = frozenset(
     {
-        "test_ai_runtime_legacy_cleanup.py:59",
-        "test_ai_runtime_legacy_cleanup.py:61",
-        "test_ai_runtime_legacy_cleanup.py:73",
-        "test_ai_runtime_legacy_cleanup.py:97",
-        "test_ai_runtime_legacy_cleanup.py:116",
-        "test_ai_runtime_migration_repository_postgres.py:580",
-        "test_ai_runtime_migration_repository_postgres.py:630",
-        "test_ai_runtime_migration_repository_postgres.py:636",
-        "test_ai_runtime_migration_repository_postgres.py:643",
-        "test_ai_runtime_migration_repository_postgres.py:648",
-        "test_ai_runtime_migration_repository_postgres.py:680",
-        "test_ai_runtime_migration_repository_postgres.py:728",
-        "test_ai_runtime_migration_repository_postgres.py:750",
         "test_assistant_atomic_admission.py:623",
         "test_assistant_atomic_admission.py:629",
         "test_assistant_runtime_config.py:15",
