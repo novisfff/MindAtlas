@@ -1983,6 +1983,98 @@ def upgrade() -> None:
     op.execute('CREATE TRIGGER trg_assistant_skill_version_resource_reject_update BEFORE UPDATE ON assistant_skill_version_resource FOR EACH ROW EXECUTE FUNCTION mindatlas_reject_immutable_mutation()')
     op.execute('CREATE TRIGGER trg_assistant_tool_config_revision_guard BEFORE UPDATE ON assistant_tool FOR EACH ROW EXECUTE FUNCTION mindatlas_tool_config_revision_guard()')
     op.execute('CREATE TRIGGER trg_operator_audit_event_append_only BEFORE DELETE OR UPDATE ON operator_audit_event FOR EACH ROW EXECUTE FUNCTION mindatlas_reject_operator_audit_mutation()')
+    runtime_identity_payload = {
+        "schemaFamily": 'pre_ga_v1',
+        "schemaRevision": 'pre_ga_v1_0001',
+        "structuralFingerprint": '7dda92eee351071dabb9a274399769b1ca01dce07382cb6462653809c5cfbaab',
+        "seedContractDigest": '1b91fef44c4b1b0d68bcd5ebaf702c02985c41124f73a58a2e4a92f93f7ea040',
+        "deploymentClass": deployment_class,
+        "runtimeContractVersion": 1,
+        "checkpointCodecVersion": 3,
+        "capabilityFeatureDigest": '11af8408a0d3a6ff93a5170a9bb6758f430773d1e1343ee3982396f0ed9cd3b4',
+        "operatorAuthContractVersion": 'operator-auth-v1',
+    }
+    runtime_identity_digest = hashlib.sha256(
+        json.dumps(
+            runtime_identity_payload,
+            sort_keys=True,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    op.create_table(
+        "mindatlas_schema_identity",
+        sa.Column("singleton_key", sa.String(32), primary_key=True, nullable=False),
+        sa.Column("schema_family", sa.String(32), nullable=False),
+        sa.Column("schema_revision", sa.String(64), nullable=False),
+        sa.Column("structural_fingerprint", sa.CHAR(64), nullable=False),
+        sa.Column("runtime_identity_digest", sa.CHAR(64), nullable=False),
+        sa.Column("seed_contract_digest", sa.CHAR(64), nullable=False),
+        sa.Column("deployment_class", sa.String(16), nullable=False),
+        sa.Column("runtime_contract_version", sa.Integer(), nullable=False),
+        sa.Column("checkpoint_codec_version", sa.Integer(), nullable=False),
+        sa.Column("capability_feature_digest", sa.CHAR(64), nullable=False),
+        sa.Column("operator_auth_contract_version", sa.String(64), nullable=False),
+        sa.Column("identity_contract_version", sa.Integer(), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.CheckConstraint(
+            "singleton_key = 'current'",
+            name="ck_schema_identity_singleton",
+        ),
+        sa.CheckConstraint(
+            "schema_family = 'pre_ga_v1'",
+            name="ck_schema_identity_family",
+        ),
+        sa.CheckConstraint(
+            "deployment_class IN ('development','rehearsal','production')",
+            name="ck_schema_identity_deployment_class",
+        ),
+        sa.CheckConstraint(
+            "structural_fingerprint ~ '^[0-9a-f]{64}$' "
+            "AND runtime_identity_digest ~ '^[0-9a-f]{64}$' "
+            "AND seed_contract_digest ~ '^[0-9a-f]{64}$' "
+            "AND capability_feature_digest ~ '^[0-9a-f]{64}$'",
+            name="ck_schema_identity_digest_shapes",
+        ),
+        sa.CheckConstraint(
+            "runtime_contract_version > 0 AND checkpoint_codec_version > 0 "
+            "AND identity_contract_version > 0",
+            name="ck_schema_identity_positive_versions",
+        ),
+    )
+    op.execute("CREATE FUNCTION mindatlas_guard_schema_identity_mutation()\nRETURNS trigger\nLANGUAGE plpgsql\nAS $$\nDECLARE\n  expected_revision text;\nBEGIN\n  IF TG_OP = 'DELETE' THEN\n    RAISE EXCEPTION 'schema identity deletion is forbidden';\n  END IF;\n  IF NEW.singleton_key <> OLD.singleton_key\n     OR NEW.schema_family <> OLD.schema_family\n     OR NEW.deployment_class <> OLD.deployment_class\n     OR NEW.created_at <> OLD.created_at\n     OR NEW.identity_contract_version < OLD.identity_contract_version THEN\n    RAISE EXCEPTION 'schema identity immutable field changed';\n  END IF;\n  expected_revision := current_setting(\n    'mindatlas.schema_migration_revision', true\n  );\n  IF expected_revision IS NULL OR expected_revision = ''\n     OR NEW.schema_revision <> expected_revision\n     OR NEW.schema_revision = OLD.schema_revision\n     OR NEW.updated_at <= OLD.updated_at THEN\n    RAISE EXCEPTION 'schema identity advance is not migration-authorized';\n  END IF;\n  RETURN NEW;\nEND;\n$$")
+    op.execute('CREATE TRIGGER trg_mindatlas_schema_identity_guard\nBEFORE UPDATE OR DELETE ON mindatlas_schema_identity\nFOR EACH ROW EXECUTE FUNCTION mindatlas_guard_schema_identity_mutation()')
+    op.get_bind().execute(
+        sa.text(
+            "INSERT INTO mindatlas_schema_identity ("
+            "singleton_key, schema_family, schema_revision, "
+            "structural_fingerprint, runtime_identity_digest, "
+            "seed_contract_digest, deployment_class, "
+            "runtime_contract_version, checkpoint_codec_version, "
+            "capability_feature_digest, operator_auth_contract_version, "
+            "identity_contract_version, created_at, updated_at"
+            ") VALUES ("
+            "'current', :family, :revision, :fingerprint, "
+            ":runtime_identity_digest, :seed_digest, :deployment_class, "
+            ":runtime_contract_version, :checkpoint_codec_version, "
+            ":feature_digest, :operator_auth_version, 1, "
+            "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP"
+            ")"
+        ),
+        {
+            "family": 'pre_ga_v1',
+            "revision": 'pre_ga_v1_0001',
+            "fingerprint": '7dda92eee351071dabb9a274399769b1ca01dce07382cb6462653809c5cfbaab',
+            "runtime_identity_digest": runtime_identity_digest,
+            "seed_digest": '1b91fef44c4b1b0d68bcd5ebaf702c02985c41124f73a58a2e4a92f93f7ea040',
+            "deployment_class": deployment_class,
+            "runtime_contract_version": 1,
+            "checkpoint_codec_version": 3,
+            "feature_digest": '11af8408a0d3a6ff93a5170a9bb6758f430773d1e1343ee3982396f0ed9cd3b4',
+            "operator_auth_version": 'operator-auth-v1',
+        },
+    )
 
 
 def downgrade() -> None:
@@ -2001,6 +2093,10 @@ def downgrade() -> None:
         ).scalar_one()
         if int(count) != 0:
             raise RuntimeError("schema_test_downgrade_nonempty")
+    op.execute('DROP TRIGGER trg_mindatlas_schema_identity_guard '
+               'ON mindatlas_schema_identity')
+    op.execute('DROP FUNCTION mindatlas_guard_schema_identity_mutation()')
+    op.execute('DROP TABLE mindatlas_schema_identity')
     op.execute('DROP TRIGGER "trg_operator_audit_event_append_only" ON "public"."operator_audit_event"')
     op.execute('DROP TRIGGER "trg_assistant_tool_config_revision_guard" ON "public"."assistant_tool"')
     op.execute('DROP TRIGGER "trg_assistant_skill_version_resource_reject_update" ON "public"."assistant_skill_version_resource"')
@@ -2383,3 +2479,4 @@ def downgrade() -> None:
     op.drop_index(op.f('ix_ai_credential_name'), table_name='ai_credential')
     op.drop_table('ai_credential')
     # ### end Alembic commands ###
+    op.execute('DROP TYPE "public"."timemode"')

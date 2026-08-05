@@ -711,6 +711,15 @@ def test_generator_is_byte_reproducible_and_self_contained(
     assert "DROP " not in upgrade_source.upper()
     assert 'os.environ.get("MINDATLAS_DEPLOYMENT_CLASS", "")' in upgrade_source
     assert "schema_deployment_class_invalid" in upgrade_source
+    assert "mindatlas_schema_identity" in upgrade_source
+    assert "ck_schema_identity_singleton" in upgrade_source
+    assert "ck_schema_identity_family" in upgrade_source
+    assert "ck_schema_identity_deployment_class" in upgrade_source
+    assert "ck_schema_identity_digest_shapes" in upgrade_source
+    assert "ck_schema_identity_positive_versions" in upgrade_source
+    assert "mindatlas_guard_schema_identity_mutation" in upgrade_source
+    assert "trg_mindatlas_schema_identity_guard" in upgrade_source
+    assert "runtime_identity_digest" in upgrade_source
     forbidden = set(LEGACY_TABLE_NAMES) | {
         "b6e2d4f8a901",
         "9f3c1a7e2b40",
@@ -738,8 +747,13 @@ def test_generator_is_byte_reproducible_and_self_contained(
     assert "schema_test_downgrade_forbidden" in downgrade_source
     assert "schema_test_downgrade_nonempty" in downgrade_source
     assert "I_ACKNOWLEDGE_EMPTY_SCHEMA_DESTRUCTION" in downgrade_source
-    assert downgrade_source.count("DROP TRIGGER") == 71
-    assert downgrade_source.count("DROP FUNCTION") == 30
+    assert downgrade_source.count("DROP TRIGGER") == 72
+    assert downgrade_source.count("DROP FUNCTION") == 31
+    assert "DROP TABLE mindatlas_schema_identity" in downgrade_source
+    assert 'DROP TYPE "public"."timemode"' in downgrade_source
+    assert downgrade_source.index("op.drop_table('entry')") < (
+        downgrade_source.index('DROP TYPE "public"."timemode"')
+    )
     for constraint_name in deferred_foreign_keys:
         assert f"op.drop_constraint('{constraint_name}'" in downgrade_source
     assert downgrade_source.index("schema_test_downgrade_nonempty") < (
@@ -940,12 +954,20 @@ def test_generated_root_upgrade_matches_captured_clean_schema(
 
     try:
         with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "CREATE TABLE alembic_version ("
+                    "version_num VARCHAR(32) NOT NULL, "
+                    "CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num)"
+                    ")"
+                )
+            )
             with Operations.context(MigrationContext.configure(connection)):
                 namespace["upgrade"]()
             raw_actual = PostgresCatalogReader(connection).read_document()
             actual = project_logical_application_document(
                 raw_actual,
-                control_stage=SchemaControlStage.MODEL_REFERENCE,
+                control_stage=SchemaControlStage.CLEAN_ROOT_MIGRATED,
             )
             expected = (
                 load_logical_application_contract().logical_application_document
@@ -954,6 +976,339 @@ def test_generated_root_upgrade_matches_captured_clean_schema(
     finally:
         reset_disposable_public_schema(engine)
         engine.dispose()
+
+
+@pytest.mark.skipif(
+    not _POSTGRES_URL,
+    reason="MINDATLAS_TEST_POSTGRES_URL is required for expected manifest proof",
+)
+def test_expected_manifest_is_generated_from_executed_clean_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.schema.identity import DEFAULT_EXPECTED_SCHEMA_CONTRACT_PATH
+    from scripts.generate_pre_ga_baseline import (
+        DEFAULT_STAGED_ROOT,
+        GeneratorContext,
+        generate_expected_manifest,
+        main,
+    )
+
+    engine = create_engine(_sqlalchemy_url(_POSTGRES_URL), future=True)
+    reset_disposable_public_schema(engine)
+    engine.dispose()
+    context = GeneratorContext(database_url=_POSTGRES_URL)
+
+    generated = generate_expected_manifest(context)
+
+    assert DEFAULT_EXPECTED_SCHEMA_CONTRACT_PATH.read_bytes() == generated
+    monkeypatch.setenv("EXPECTED_MANIFEST_GENERATOR_DATABASE_URL", _POSTGRES_URL)
+    assert main(
+        [
+            "--database-url-env",
+            "EXPECTED_MANIFEST_GENERATOR_DATABASE_URL",
+            "--output",
+            str(DEFAULT_STAGED_ROOT),
+            "--check",
+            "--check-expected-manifest",
+        ]
+    ) == 0
+
+
+@pytest.mark.skipif(
+    not _POSTGRES_URL,
+    reason="MINDATLAS_TEST_POSTGRES_URL is required for marker drift proof",
+)
+def test_expected_manifest_rejects_self_consistent_marker_contract_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.generate_pre_ga_baseline as generator
+
+    from app.assistant.runtime.system_seed.expected import SEED_CONTRACT_DIGEST
+
+    engine = create_engine(_sqlalchemy_url(_POSTGRES_URL), future=True)
+    reset_disposable_public_schema(engine)
+    engine.dispose()
+    drifted = generator.DEFAULT_STAGED_ROOT.read_bytes().replace(
+        SEED_CONTRACT_DIGEST.encode("ascii"),
+        ("f" * 64).encode("ascii"),
+    )
+    assert drifted != generator.DEFAULT_STAGED_ROOT.read_bytes()
+    monkeypatch.setattr(generator, "generate_baseline", lambda context: drifted)
+
+    with pytest.raises(
+        generator.BaselineGenerationError,
+        match="marker_contract_mismatch",
+    ):
+        generator.generate_expected_manifest(
+            generator.GeneratorContext(database_url=_POSTGRES_URL)
+        )
+
+
+def test_combined_write_preserves_root_when_expected_generation_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import scripts.generate_pre_ga_baseline as generator
+
+    output = tmp_path / "baseline.py"
+    output.write_bytes(b"old-root")
+    monkeypatch.setenv("ATOMIC_EXPECTED_TEST_DATABASE_URL", "postgresql://unused")
+    monkeypatch.setattr(generator, "generate_baseline", lambda context: b"new-root")
+
+    def fail_expected(context):  # noqa: ANN001, ANN202
+        raise generator.BaselineGenerationError(
+            "expected_manifest_generation_failed"
+        )
+
+    monkeypatch.setattr(generator, "generate_expected_manifest", fail_expected)
+
+    result = generator.main(
+        [
+            "--database-url-env",
+            "ATOMIC_EXPECTED_TEST_DATABASE_URL",
+            "--output",
+            str(output),
+            "--write",
+            "--write-expected-manifest",
+        ]
+    )
+
+    assert result == 2
+    assert output.read_bytes() == b"old-root"
+
+
+@pytest.mark.parametrize(
+    ("root_before", "expected_before"),
+    (
+        (b"old-root", b"old-expected"),
+        (None, b"old-expected"),
+        (b"old-root", None),
+        (None, None),
+    ),
+)
+@pytest.mark.parametrize(
+    "failure_stage",
+    (
+        "first_replace",
+        "second_replace",
+        "first_directory_fsync",
+        "second_directory_fsync",
+    ),
+)
+def test_group_atomic_writer_restores_both_artifacts_on_single_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    root_before: bytes | None,
+    expected_before: bytes | None,
+    failure_stage: str,
+) -> None:
+    import scripts.generate_pre_ga_baseline as generator
+
+    root = tmp_path / "root" / "baseline.py"
+    expected = tmp_path / "manifest" / "expected.json"
+    root.parent.mkdir()
+    expected.parent.mkdir()
+    if root_before is not None:
+        root.write_bytes(root_before)
+    if expected_before is not None:
+        expected.write_bytes(expected_before)
+
+    real_replace = generator.os.replace
+    replace_calls = 0
+
+    def faulting_replace(source, destination):  # noqa: ANN001, ANN202
+        nonlocal replace_calls
+        if Path(destination) in {root, expected}:
+            replace_calls += 1
+            if (
+                failure_stage == "first_replace" and replace_calls == 1
+            ) or (
+                failure_stage == "second_replace" and replace_calls == 2
+            ):
+                raise OSError("injected replace failure")
+        return real_replace(source, destination)
+
+    directory_fsync_calls = 0
+
+    def faulting_directory_fsync(path):  # noqa: ANN001, ANN202
+        nonlocal directory_fsync_calls
+        directory_fsync_calls += 1
+        ordinal = "first" if directory_fsync_calls == 1 else "second"
+        if failure_stage == f"{ordinal}_directory_fsync":
+            raise OSError("injected directory fsync failure")
+
+    monkeypatch.setattr(generator.os, "replace", faulting_replace)
+    monkeypatch.setattr(generator, "_fsync_directory", faulting_directory_fsync)
+
+    with pytest.raises(OSError):
+        generator._write_atomic_group(
+            ((root, b"new-root"), (expected, b"new-expected"))
+        )
+
+    assert (root.read_bytes() if root.exists() else None) == root_before
+    assert (expected.read_bytes() if expected.exists() else None) == expected_before
+    assert set(root.parent.iterdir()) == ({root} if root_before is not None else set())
+    assert set(expected.parent.iterdir()) == (
+        {expected} if expected_before is not None else set()
+    )
+
+
+def test_group_atomic_writer_rejects_aliases_of_the_same_destination(
+    tmp_path: Path,
+) -> None:
+    import scripts.generate_pre_ga_baseline as generator
+
+    real_directory = tmp_path / "real"
+    real_directory.mkdir()
+    alias_directory = tmp_path / "alias"
+    alias_directory.symlink_to(real_directory, target_is_directory=True)
+    real_output = real_directory / "artifact"
+    alias_output = alias_directory / "artifact"
+    real_output.write_bytes(b"old")
+    assert real_output.resolve() == alias_output.resolve()
+
+    with pytest.raises(
+        generator.BaselineGenerationError,
+        match="atomic_output_paths_collide",
+    ):
+        generator._write_atomic_group(
+            ((real_output, b"root"), (alias_output, b"expected"))
+        )
+
+    assert real_output.read_bytes() == b"old"
+    assert set(real_directory.iterdir()) == {real_output}
+
+
+def test_group_atomic_writer_commits_two_distinct_paths_without_residue(
+    tmp_path: Path,
+) -> None:
+    import scripts.generate_pre_ga_baseline as generator
+
+    root = tmp_path / "root" / "baseline.py"
+    expected = tmp_path / "manifest" / "expected.json"
+    root.parent.mkdir()
+    expected.parent.mkdir()
+    root.write_bytes(b"old-root")
+
+    generator._write_atomic_group(
+        ((root, b"new-root"), (expected, b"new-expected"))
+    )
+
+    assert root.read_bytes() == b"new-root"
+    assert expected.read_bytes() == b"new-expected"
+    assert set(root.parent.iterdir()) == {root}
+    assert set(expected.parent.iterdir()) == {expected}
+
+
+def test_combined_cli_rejects_output_manifest_alias_before_generation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import scripts.generate_pre_ga_baseline as generator
+
+    manifest_root = tmp_path / "manifests"
+    manifest_root.mkdir()
+    alias_root = tmp_path / "manifest-alias"
+    alias_root.symlink_to(manifest_root, target_is_directory=True)
+    expected = manifest_root / "pre_ga_v1-expected.json"
+    expected.write_bytes(b"old-expected")
+    alias_output = alias_root / expected.name
+    context = generator.GeneratorContext(
+        database_url="postgresql://unused",
+        manifest_root=manifest_root,
+    )
+    monkeypatch.setattr(
+        generator,
+        "GeneratorContext",
+        lambda database_url: context,
+    )
+    monkeypatch.setenv("COLLISION_TEST_DATABASE_URL", "postgresql://unused")
+
+    def generation_must_not_start(context):  # noqa: ANN001, ANN202
+        raise AssertionError("generation must not start for colliding outputs")
+
+    monkeypatch.setattr(generator, "generate_baseline", generation_must_not_start)
+
+    result = generator.main(
+        [
+            "--database-url-env",
+            "COLLISION_TEST_DATABASE_URL",
+            "--output",
+            str(alias_output),
+            "--write",
+            "--write-expected-manifest",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert captured.out == ""
+    assert captured.err.strip() == "atomic_output_paths_collide"
+    assert expected.read_bytes() == b"old-expected"
+
+
+def test_combined_cli_rejects_symlink_loop_before_generation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import scripts.generate_pre_ga_baseline as generator
+
+    loop = tmp_path / "loop"
+    loop.symlink_to(loop.name)
+    monkeypatch.setenv("SYMLINK_LOOP_TEST_DATABASE_URL", "postgresql://unused")
+
+    def generation_must_not_start(context):  # noqa: ANN001, ANN202
+        raise AssertionError("generation must not start for invalid output paths")
+
+    monkeypatch.setattr(generator, "generate_baseline", generation_must_not_start)
+
+    result = generator.main(
+        [
+            "--database-url-env",
+            "SYMLINK_LOOP_TEST_DATABASE_URL",
+            "--output",
+            str(loop / "baseline.py"),
+            "--write",
+            "--write-expected-manifest",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert captured.out == ""
+    assert captured.err.strip() == "atomic_output_path_invalid"
+    assert set(tmp_path.iterdir()) == {loop}
+
+
+@pytest.mark.skipif(
+    not _POSTGRES_URL,
+    reason="MINDATLAS_TEST_POSTGRES_URL is required for bounded marker failure proof",
+)
+def test_expected_manifest_wraps_marker_reader_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.generate_pre_ga_baseline as generator
+
+    from app.schema.identity import SchemaIdentityError
+
+    engine = create_engine(_sqlalchemy_url(_POSTGRES_URL), future=True)
+    reset_disposable_public_schema(engine)
+    engine.dispose()
+
+    def fail_marker(connection):  # noqa: ANN001, ANN202
+        raise SchemaIdentityError("marker_malformed")
+
+    monkeypatch.setattr(generator, "read_schema_identity", fail_marker)
+
+    with pytest.raises(
+        generator.BaselineGenerationError,
+        match="expected_manifest_generation_failed",
+    ):
+        generator.generate_expected_manifest(
+            generator.GeneratorContext(database_url=_POSTGRES_URL)
+        )
 
 
 def test_generator_rejects_multiple_live_roots(tmp_path: Path) -> None:

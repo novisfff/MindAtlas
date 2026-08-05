@@ -14,7 +14,9 @@ import tempfile
 
 from alembic.autogenerate import produce_migrations, render_python_code
 from alembic.migration import MigrationContext
-from sqlalchemy import create_engine
+from alembic.operations import Operations
+from sqlalchemy import Enum as SQLAlchemyEnum
+from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -22,7 +24,20 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from app.database import Base  # noqa: E402
+from app.assistant.durable.codec import (  # noqa: E402
+    CURRENT_CHECKPOINT_CODEC_VERSION,
+)
+from app.assistant.durable.worker_registry import (  # noqa: E402
+    RUNTIME_CONTRACT_VERSION,
+    default_capability_feature_digest,
+)
+from app.assistant.runtime.system_seed.expected import (  # noqa: E402
+    SEED_CONTRACT_DIGEST,
+)
 from app.model_registry import load_all_live_models  # noqa: E402
+from app.operator_auth.constants import (  # noqa: E402
+    OPERATOR_AUTH_CONTRACT_VERSION,
+)
 from app.schema.application_contract import (  # noqa: E402
     LogicalApplicationContractError,
     SchemaControlStage,
@@ -31,12 +46,27 @@ from app.schema.application_contract import (  # noqa: E402
 )
 from app.schema.canonical import (  # noqa: E402
     SchemaComparisonError,
+    canonical_json_bytes,
     compare_documents,
+    sha256_canonical_json,
     structural_fingerprint,
 )
 from app.schema.catalog import CatalogReadError, PostgresCatalogReader  # noqa: E402
-from app.schema.contracts import CLEAN_ROOT_REVISION, SCHEMA_FAMILY  # noqa: E402
+from app.schema.contracts import (  # noqa: E402
+    CLEAN_ROOT_REVISION,
+    SCHEMA_FAMILY,
+    SCHEMA_IDENTITY_CONTRACT_VERSION,
+    CanonicalObjectKey,
+    CanonicalSchemaDocument,
+    DeploymentClass,
+)
 from app.schema.exclusions import LEGACY_TABLE_NAMES  # noqa: E402
+from app.schema.identity import (  # noqa: E402
+    SCHEMA_IDENTITY_CONTROL_FINGERPRINT,
+    SchemaIdentityError,
+    read_schema_identity,
+    schema_runtime_identity_digest,
+)
 from app.schema.sql_objects import (  # noqa: E402
     SchemaManifestError,
     install_retained_sql_objects,
@@ -50,6 +80,7 @@ DEFAULT_STAGED_ROOT = (
     / "baseline_staging"
     / "pre_ga_v1_0001_clean_baseline.py"
 )
+_EXPECTED_MANIFEST_FILENAME = "pre_ga_v1-expected.json"
 
 
 class BaselineGenerationError(RuntimeError):
@@ -364,6 +395,182 @@ def _retained_downgrade_lines() -> tuple[str, ...]:
     return tuple(lines)
 
 
+_SCHEMA_IDENTITY_GUARD_SQL = """CREATE FUNCTION mindatlas_guard_schema_identity_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  expected_revision text;
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'schema identity deletion is forbidden';
+  END IF;
+  IF NEW.singleton_key <> OLD.singleton_key
+     OR NEW.schema_family <> OLD.schema_family
+     OR NEW.deployment_class <> OLD.deployment_class
+     OR NEW.created_at <> OLD.created_at
+     OR NEW.identity_contract_version < OLD.identity_contract_version THEN
+    RAISE EXCEPTION 'schema identity immutable field changed';
+  END IF;
+  expected_revision := current_setting(
+    'mindatlas.schema_migration_revision', true
+  );
+  IF expected_revision IS NULL OR expected_revision = ''
+     OR NEW.schema_revision <> expected_revision
+     OR NEW.schema_revision = OLD.schema_revision
+     OR NEW.updated_at <= OLD.updated_at THEN
+    RAISE EXCEPTION 'schema identity advance is not migration-authorized';
+  END IF;
+  RETURN NEW;
+END;
+$$"""
+
+_SCHEMA_IDENTITY_TRIGGER_SQL = """CREATE TRIGGER trg_mindatlas_schema_identity_guard
+BEFORE UPDATE OR DELETE ON mindatlas_schema_identity
+FOR EACH ROW EXECUTE FUNCTION mindatlas_guard_schema_identity_mutation()"""
+
+
+def _marker_upgrade_lines(expected) -> tuple[str, ...]:  # noqa: ANN001
+    if CURRENT_CHECKPOINT_CODEC_VERSION != 3:
+        raise BaselineGenerationError("checkpoint_codec_contract_invalid")
+    feature_digest = default_capability_feature_digest()
+    lines = (
+        "    runtime_identity_payload = {",
+        f'        "schemaFamily": {SCHEMA_FAMILY!r},',
+        f'        "schemaRevision": {CLEAN_ROOT_REVISION!r},',
+        "        \"structuralFingerprint\": "
+        f"{expected.logical_application_fingerprint!r},",
+        f'        "seedContractDigest": {SEED_CONTRACT_DIGEST!r},',
+        '        "deploymentClass": deployment_class,',
+        f'        "runtimeContractVersion": {RUNTIME_CONTRACT_VERSION!r},',
+        f'        "checkpointCodecVersion": {CURRENT_CHECKPOINT_CODEC_VERSION!r},',
+        f'        "capabilityFeatureDigest": {feature_digest!r},',
+        "        \"operatorAuthContractVersion\": "
+        f"{OPERATOR_AUTH_CONTRACT_VERSION!r},",
+        "    }",
+        "    runtime_identity_digest = hashlib.sha256(",
+        "        json.dumps(",
+        "            runtime_identity_payload,",
+        "            sort_keys=True,",
+        "            ensure_ascii=False,",
+        "            separators=(\",\", \":\"),",
+        '        ).encode("utf-8")',
+        "    ).hexdigest()",
+        "    op.create_table(",
+        '        "mindatlas_schema_identity",',
+        '        sa.Column("singleton_key", sa.String(32), primary_key=True, nullable=False),',
+        '        sa.Column("schema_family", sa.String(32), nullable=False),',
+        '        sa.Column("schema_revision", sa.String(64), nullable=False),',
+        '        sa.Column("structural_fingerprint", sa.CHAR(64), nullable=False),',
+        '        sa.Column("runtime_identity_digest", sa.CHAR(64), nullable=False),',
+        '        sa.Column("seed_contract_digest", sa.CHAR(64), nullable=False),',
+        '        sa.Column("deployment_class", sa.String(16), nullable=False),',
+        '        sa.Column("runtime_contract_version", sa.Integer(), nullable=False),',
+        '        sa.Column("checkpoint_codec_version", sa.Integer(), nullable=False),',
+        '        sa.Column("capability_feature_digest", sa.CHAR(64), nullable=False),',
+        '        sa.Column("operator_auth_contract_version", sa.String(64), nullable=False),',
+        '        sa.Column("identity_contract_version", sa.Integer(), nullable=False),',
+        '        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),',
+        '        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),',
+        "        sa.CheckConstraint(",
+        "            \"singleton_key = 'current'\",",
+        '            name="ck_schema_identity_singleton",',
+        "        ),",
+        "        sa.CheckConstraint(",
+        "            \"schema_family = 'pre_ga_v1'\",",
+        '            name="ck_schema_identity_family",',
+        "        ),",
+        "        sa.CheckConstraint(",
+        "            \"deployment_class IN ('development','rehearsal','production')\",",
+        '            name="ck_schema_identity_deployment_class",',
+        "        ),",
+        "        sa.CheckConstraint(",
+        "            \"structural_fingerprint ~ '^[0-9a-f]{64}$' \"",
+        "            \"AND runtime_identity_digest ~ '^[0-9a-f]{64}$' \"",
+        "            \"AND seed_contract_digest ~ '^[0-9a-f]{64}$' \"",
+        "            \"AND capability_feature_digest ~ '^[0-9a-f]{64}$'\",",
+        '            name="ck_schema_identity_digest_shapes",',
+        "        ),",
+        "        sa.CheckConstraint(",
+        "            \"runtime_contract_version > 0 AND checkpoint_codec_version > 0 \"",
+        "            \"AND identity_contract_version > 0\",",
+        '            name="ck_schema_identity_positive_versions",',
+        "        ),",
+        "    )",
+        f"    op.execute({_SCHEMA_IDENTITY_GUARD_SQL!r})",
+        f"    op.execute({_SCHEMA_IDENTITY_TRIGGER_SQL!r})",
+        "    op.get_bind().execute(",
+        "        sa.text(",
+        "            \"INSERT INTO mindatlas_schema_identity (\"",
+        "            \"singleton_key, schema_family, schema_revision, \"",
+        "            \"structural_fingerprint, runtime_identity_digest, \"",
+        "            \"seed_contract_digest, deployment_class, \"",
+        "            \"runtime_contract_version, checkpoint_codec_version, \"",
+        "            \"capability_feature_digest, operator_auth_contract_version, \"",
+        "            \"identity_contract_version, created_at, updated_at\"",
+        "            \") VALUES (\"",
+        "            \"'current', :family, :revision, :fingerprint, \"",
+        "            \":runtime_identity_digest, :seed_digest, :deployment_class, \"",
+        "            \":runtime_contract_version, :checkpoint_codec_version, \"",
+        "            \":feature_digest, :operator_auth_version, 1, \"",
+        "            \"CURRENT_TIMESTAMP, CURRENT_TIMESTAMP\"",
+        "            \")\"",
+        "        ),",
+        "        {",
+        f'            "family": {SCHEMA_FAMILY!r},',
+        f'            "revision": {CLEAN_ROOT_REVISION!r},',
+        "            \"fingerprint\": "
+        f"{expected.logical_application_fingerprint!r},",
+        '            "runtime_identity_digest": runtime_identity_digest,',
+        f'            "seed_digest": {SEED_CONTRACT_DIGEST!r},',
+        '            "deployment_class": deployment_class,',
+        f'            "runtime_contract_version": {RUNTIME_CONTRACT_VERSION!r},',
+        "            \"checkpoint_codec_version\": "
+        f"{CURRENT_CHECKPOINT_CODEC_VERSION!r},",
+        f'            "feature_digest": {feature_digest!r},',
+        "            \"operator_auth_version\": "
+        f"{OPERATOR_AUTH_CONTRACT_VERSION!r},",
+        "        },",
+        "    )",
+    )
+    return lines
+
+
+def _marker_downgrade_lines() -> tuple[str, ...]:
+    return (
+        "    op.execute('DROP TRIGGER trg_mindatlas_schema_identity_guard '",
+        "               'ON mindatlas_schema_identity')",
+        "    op.execute('DROP FUNCTION mindatlas_guard_schema_identity_mutation()')",
+        "    op.execute('DROP TABLE mindatlas_schema_identity')",
+    )
+
+
+def _enum_downgrade_lines() -> tuple[str, ...]:
+    named_types: set[tuple[str, str]] = set()
+    for table in Base.metadata.tables.values():
+        for column in table.columns:
+            enum_type = column.type
+            if not isinstance(enum_type, SQLAlchemyEnum) or not (
+                enum_type.native_enum
+            ):
+                continue
+            if not enum_type.name:
+                raise BaselineGenerationError("native_enum_type_unnamed")
+            schema = enum_type.schema or table.schema or "public"
+            named_types.add((schema, enum_type.name))
+    return tuple(
+        _indent_statement(
+            "op.execute("
+            + repr(
+                f"DROP TYPE {_quote_identifier(schema)}."
+                f"{_quote_identifier(name)}"
+            )
+            + ")"
+        )
+        for schema, name in sorted(named_types)
+    )
+
+
 def _render_downgrade_guard() -> str:
     live_tables = tuple(sorted(Base.metadata.tables))
     return "\n".join(
@@ -387,7 +594,7 @@ def _render_downgrade_guard() -> str:
     )
 
 
-def _render_revision(upgrade_body: str, downgrade_body: str) -> bytes:
+def _render_revision(upgrade_body: str, downgrade_body: str, expected) -> bytes:  # noqa: ANN001
     upgrade_parts = [
         "def upgrade() -> None:",
         "    deployment_class = os.environ.get(\"MINDATLAS_DEPLOYMENT_CLASS\", \"\").strip()",
@@ -396,13 +603,16 @@ def _render_revision(upgrade_body: str, downgrade_body: str) -> bytes:
         _normalize_rendered_body(upgrade_body),
         *_deferred_foreign_key_upgrade_lines(),
         *_retained_upgrade_lines(),
+        *_marker_upgrade_lines(expected),
     ]
     downgrade_parts = [
         "def downgrade() -> None:",
         _render_downgrade_guard(),
+        *_marker_downgrade_lines(),
         *_retained_downgrade_lines(),
         *_deferred_foreign_key_downgrade_lines(),
         _normalize_rendered_body(downgrade_body),
+        *_enum_downgrade_lines(),
     ]
     source = (
         _HEADER
@@ -418,7 +628,7 @@ def _render_revision(upgrade_body: str, downgrade_body: str) -> bytes:
     return source.encode("utf-8")
 
 
-def _render_from_empty_database(connection) -> bytes:  # noqa: ANN001
+def _render_from_empty_database(connection, expected) -> bytes:  # noqa: ANN001
     migration_context = MigrationContext.configure(
         connection,
         opts={
@@ -444,7 +654,7 @@ def _render_from_empty_database(connection) -> bytes:  # noqa: ANN001
         )
     except Exception as exc:
         raise BaselineGenerationError("alembic_autogenerate_failed") from exc
-    return _render_revision(upgrade_body, downgrade_body)
+    return _render_revision(upgrade_body, downgrade_body, expected)
 
 
 def generate_baseline(context: GeneratorContext) -> bytes:
@@ -461,7 +671,197 @@ def generate_baseline(context: GeneratorContext) -> bytes:
             connection.rollback()
             _prove_model_reference(connection, expected)
             _require_empty_database(connection)
-            return _render_from_empty_database(connection)
+            return _render_from_empty_database(connection, expected)
+    except BaselineGenerationError:
+        raise
+    except SQLAlchemyError as exc:
+        raise BaselineGenerationError("generator_database_unavailable") from exc
+    finally:
+        engine.dispose()
+
+
+_CLEAN_ROOT_CONTROL_KEYS = frozenset(
+    {
+        CanonicalObjectKey("table", "public", "alembic_version"),
+        CanonicalObjectKey(
+            "table",
+            "public",
+            "mindatlas_schema_identity",
+        ),
+        CanonicalObjectKey(
+            "function",
+            "public",
+            "mindatlas_guard_schema_identity_mutation",
+        ),
+        CanonicalObjectKey(
+            "trigger",
+            "public",
+            "trg_mindatlas_schema_identity_guard",
+            "mindatlas_schema_identity",
+        ),
+    }
+)
+
+
+def _execute_generated_root(connection, content: bytes) -> None:  # noqa: ANN001
+    try:
+        namespace: dict[str, object] = {}
+        exec(
+            compile(content, "<generated-pre-ga-root>", "exec"),
+            namespace,
+        )
+        connection.execute(
+            text(
+                "CREATE TABLE alembic_version ("
+                "version_num VARCHAR(32) NOT NULL, "
+                "CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num)"
+                ")"
+            )
+        )
+        previous = os.environ.get("MINDATLAS_DEPLOYMENT_CLASS")
+        os.environ["MINDATLAS_DEPLOYMENT_CLASS"] = "development"
+        try:
+            with Operations.context(MigrationContext.configure(connection)):
+                namespace["upgrade"]()
+        finally:
+            if previous is None:
+                os.environ.pop("MINDATLAS_DEPLOYMENT_CLASS", None)
+            else:
+                os.environ["MINDATLAS_DEPLOYMENT_CLASS"] = previous
+        connection.execute(
+            text(
+                "INSERT INTO alembic_version (version_num) "
+                "VALUES (:revision)"
+            ),
+            {"revision": CLEAN_ROOT_REVISION},
+        )
+    except (
+        AttributeError,
+        KeyError,
+        OSError,
+        RuntimeError,
+        SQLAlchemyError,
+        SyntaxError,
+        TypeError,
+        ValueError,
+    ):
+        raise BaselineGenerationError("generated_root_execution_failed") from None
+
+
+def generate_expected_manifest(context: GeneratorContext) -> bytes:
+    """Execute the generated root and derive its committed identity contract."""
+    content = generate_baseline(context)
+    expected = _validate_manifests(context)
+    engine = create_engine(_sqlalchemy_url(context.database_url), future=True)
+    try:
+        with engine.connect() as connection:
+            _require_empty_database(connection)
+            connection.rollback()
+            transaction = connection.begin()
+            try:
+                _execute_generated_root(connection, content)
+                raw = PostgresCatalogReader(connection).read_document()
+                logical = project_logical_application_document(
+                    raw,
+                    control_stage=SchemaControlStage.CLEAN_ROOT_MIGRATED,
+                )
+                compare_documents(
+                    expected.logical_application_document,
+                    logical,
+                    exclusions=None,
+                )
+                application_fingerprint = structural_fingerprint(logical)
+                controls = tuple(
+                    item
+                    for item in raw.objects
+                    if item.key in _CLEAN_ROOT_CONTROL_KEYS
+                )
+                if {item.key for item in controls} != _CLEAN_ROOT_CONTROL_KEYS:
+                    raise BaselineGenerationError(
+                        "schema_control_contract_missing"
+                    )
+                control_fingerprint = structural_fingerprint(
+                    CanonicalSchemaDocument(1, raw.postgres_major, controls)
+                )
+                if (
+                    control_fingerprint
+                    != SCHEMA_IDENTITY_CONTROL_FINGERPRINT
+                ):
+                    raise BaselineGenerationError(
+                        "schema_control_contract_drift"
+                    )
+                marker = read_schema_identity(connection)
+                feature_digest = default_capability_feature_digest()
+                if (
+                    marker.schema_family != SCHEMA_FAMILY
+                    or marker.schema_revision != CLEAN_ROOT_REVISION
+                    or marker.structural_fingerprint
+                    != application_fingerprint
+                    or marker.seed_contract_digest != SEED_CONTRACT_DIGEST
+                    or marker.deployment_class
+                    is not DeploymentClass.DEVELOPMENT
+                    or marker.runtime_contract_version
+                    != RUNTIME_CONTRACT_VERSION
+                    or marker.checkpoint_codec_version
+                    != CURRENT_CHECKPOINT_CODEC_VERSION
+                    or marker.capability_feature_digest != feature_digest
+                    or marker.operator_auth_contract_version
+                    != OPERATOR_AUTH_CONTRACT_VERSION
+                    or marker.identity_contract_version
+                    != SCHEMA_IDENTITY_CONTRACT_VERSION
+                    or marker.runtime_identity_digest
+                    != schema_runtime_identity_digest(
+                        marker.to_identity_material()
+                    )
+                ):
+                    raise BaselineGenerationError(
+                        "marker_contract_mismatch"
+                    )
+                manifest_payload = {
+                    "schemaVersion": 1,
+                    "schemaFamily": SCHEMA_FAMILY,
+                    "schemaRevision": CLEAN_ROOT_REVISION,
+                    "applicationStructuralFingerprint": (
+                        application_fingerprint
+                    ),
+                    "schemaIdentityControlFingerprint": control_fingerprint,
+                    "seedContractDigest": SEED_CONTRACT_DIGEST,
+                    "runtimeContractVersion": RUNTIME_CONTRACT_VERSION,
+                    "checkpointCodecVersion": (
+                        CURRENT_CHECKPOINT_CODEC_VERSION
+                    ),
+                    "capabilityFeatureDigest": (
+                        feature_digest
+                    ),
+                    "operatorAuthContractVersion": (
+                        OPERATOR_AUTH_CONTRACT_VERSION
+                    ),
+                    "canonicalizationVersion": 2,
+                }
+                manifest = {
+                    **manifest_payload,
+                    "manifestDigest": sha256_canonical_json(
+                        manifest_payload
+                    ),
+                }
+                result = canonical_json_bytes(manifest) + b"\n"
+            except BaselineGenerationError:
+                raise
+            except (
+                CatalogReadError,
+                LogicalApplicationContractError,
+                SchemaComparisonError,
+                SchemaIdentityError,
+                SQLAlchemyError,
+            ):
+                raise BaselineGenerationError(
+                    "expected_manifest_generation_failed"
+                ) from None
+            finally:
+                transaction.rollback()
+            _require_empty_database(connection)
+            connection.rollback()
+            return result
     except BaselineGenerationError:
         raise
     except SQLAlchemyError as exc:
@@ -540,6 +940,103 @@ def _write_atomic(output: Path, content: bytes) -> None:
             backup.unlink(missing_ok=True)
 
 
+def _canonical_output_path(output: Path) -> Path:
+    try:
+        return output.resolve()
+    except RuntimeError:
+        raise BaselineGenerationError("atomic_output_path_invalid") from None
+
+
+def _write_atomic_group(items: tuple[tuple[Path, bytes], ...]) -> None:
+    canonical_items = tuple(
+        (_canonical_output_path(output), content) for output, content in items
+    )
+    if not canonical_items or len(
+        {output for output, _ in canonical_items}
+    ) != len(canonical_items):
+        raise BaselineGenerationError("atomic_output_paths_collide")
+    items = canonical_items
+    records: list[dict[str, object]] = []
+    replaced: set[Path] = set()
+    parents: list[Path] = []
+    try:
+        for output, content in items:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            if output.parent not in parents:
+                parents.append(output.parent)
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=f".{output.name}.",
+                suffix=".tmp",
+                dir=output.parent,
+            )
+            temporary = Path(temporary_name)
+            backup: Path | None = None
+            try:
+                with os.fdopen(descriptor, "wb") as handle:
+                    handle.write(content)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                if output.exists():
+                    backup_descriptor, backup_name = tempfile.mkstemp(
+                        prefix=f".{output.name}.",
+                        suffix=".rollback",
+                        dir=output.parent,
+                    )
+                    os.close(backup_descriptor)
+                    backup = Path(backup_name)
+                    backup.unlink()
+                    os.link(output, backup)
+            except BaseException:
+                temporary.unlink(missing_ok=True)
+                if backup is not None:
+                    backup.unlink(missing_ok=True)
+                raise
+            records.append(
+                {
+                    "output": output,
+                    "temporary": temporary,
+                    "backup": backup,
+                }
+            )
+
+        for record in records:
+            output = record["output"]
+            temporary = record["temporary"]
+            assert isinstance(output, Path)
+            assert isinstance(temporary, Path)
+            os.replace(temporary, output)
+            record["temporary"] = None
+            replaced.add(output)
+        for parent in parents:
+            _fsync_directory(parent)
+    except BaseException:
+        for record in reversed(records):
+            output = record["output"]
+            backup = record["backup"]
+            assert isinstance(output, Path)
+            if output not in replaced:
+                continue
+            if isinstance(backup, Path):
+                os.replace(backup, output)
+                record["backup"] = None
+            else:
+                output.unlink(missing_ok=True)
+        for parent in parents:
+            try:
+                _fsync_directory(parent)
+            except OSError:
+                pass
+        raise
+    finally:
+        for record in records:
+            temporary = record["temporary"]
+            backup = record["backup"]
+            if isinstance(temporary, Path):
+                temporary.unlink(missing_ok=True)
+            if isinstance(backup, Path):
+                backup.unlink(missing_ok=True)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--database-url-env", required=True)
@@ -547,13 +1044,32 @@ def main(argv: list[str] | None = None) -> int:
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--write", action="store_true")
     mode.add_argument("--check", action="store_true")
+    parser.add_argument("--write-expected-manifest", action="store_true")
+    parser.add_argument("--check-expected-manifest", action="store_true")
     args = parser.parse_args(argv)
 
     try:
+        if (
+            args.write_expected_manifest
+            and (not args.write or args.check_expected_manifest)
+        ) or (
+            args.check_expected_manifest
+            and (not args.check or args.write_expected_manifest)
+        ):
+            raise BaselineGenerationError("expected_manifest_mode_invalid")
         context = GeneratorContext(
             database_url=_read_database_url(args.database_url_env)
         )
-        output = args.output.resolve()
+        output = _canonical_output_path(args.output)
+        expected_output: Path | None = None
+        if args.write_expected_manifest or args.check_expected_manifest:
+            expected_output = _canonical_output_path(
+                context.manifest_root / _EXPECTED_MANIFEST_FILENAME
+            )
+            if output == expected_output:
+                raise BaselineGenerationError(
+                    "atomic_output_paths_collide"
+                )
         live_roots = require_single_live_root(context.live_versions_dir)
         require_safe_output_destination(
             output,
@@ -561,8 +1077,21 @@ def main(argv: list[str] | None = None) -> int:
             live_roots,
         )
         content = generate_baseline(context)
+        expected_content: bytes | None = None
+        if args.write_expected_manifest or args.check_expected_manifest:
+            expected_content = generate_expected_manifest(context)
         if args.write:
-            _write_atomic(output, content)
+            if args.write_expected_manifest:
+                assert expected_content is not None
+                assert expected_output is not None
+                _write_atomic_group(
+                    (
+                        (output, content),
+                        (expected_output, expected_content),
+                    )
+                )
+            else:
+                _write_atomic(output, content)
         else:
             try:
                 existing = output.read_bytes()
@@ -570,6 +1099,19 @@ def main(argv: list[str] | None = None) -> int:
                 raise BaselineGenerationError("baseline_output_missing") from exc
             if existing != content:
                 raise BaselineGenerationError("baseline_output_drift")
+        if args.check_expected_manifest:
+            assert expected_content is not None
+            assert expected_output is not None
+            try:
+                existing_expected = expected_output.read_bytes()
+            except OSError as exc:
+                raise BaselineGenerationError(
+                    "expected_manifest_output_missing"
+                ) from exc
+            if existing_expected != expected_content:
+                raise BaselineGenerationError(
+                    "expected_manifest_output_drift"
+                )
         print(
             "pre_ga_baseline_ok "
             f"revision={CLEAN_ROOT_REVISION} family={SCHEMA_FAMILY}"

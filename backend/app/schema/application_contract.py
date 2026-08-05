@@ -30,6 +30,7 @@ class SchemaControlStage(StrEnum):
 
     PRE_SQUASH_MIGRATED = "pre_squash_migrated"
     MODEL_REFERENCE = "model_reference"
+    CLEAN_ROOT_MIGRATED = "clean_root_migrated"
 
 
 class LogicalApplicationContractError(RuntimeError):
@@ -351,6 +352,26 @@ _RESERVED_IDENTITY_CONTROL_KEYS = frozenset(
     }
 )
 
+_CLEAN_ROOT_CONTROL_DEFINITION_DIGESTS = {
+    ALEMBIC_VERSION_KEY: ALEMBIC_VERSION_DEFINITION_DIGEST,
+    CanonicalObjectKey(
+        "table",
+        "public",
+        "mindatlas_schema_identity",
+    ): "c0f16b8db95114c38ccc73bc2a01142caf3208e785edcd5b895173282f8f9b19",
+    CanonicalObjectKey(
+        "function",
+        "public",
+        "mindatlas_guard_schema_identity_mutation",
+    ): "fe7230b9525a065d755fa69e01b081a91713b21044fa240f0bf5cf5aafe6207d",
+    CanonicalObjectKey(
+        "trigger",
+        "public",
+        "trg_mindatlas_schema_identity_guard",
+        "mindatlas_schema_identity",
+    ): "9c8342c385ceba424064ab08f856204cac0eaf941104f715929300c021786c17",
+}
+
 _TABLE_KEYS = frozenset(
     {
         "relationKind",
@@ -656,6 +677,19 @@ def project_logical_application_document(
             raise LogicalApplicationContractError(
                 "schema_control_contract_drift"
             )
+    elif stage is SchemaControlStage.CLEAN_ROOT_MIGRATED:
+        for key, expected_digest in (
+            _CLEAN_ROOT_CONTROL_DEFINITION_DIGESTS.items()
+        ):
+            control = objects_by_key.pop(key, None)
+            if control is None:
+                raise LogicalApplicationContractError(
+                    "schema_control_contract_missing"
+                )
+            if control.definition_digest != expected_digest:
+                raise LogicalApplicationContractError(
+                    "schema_control_contract_drift"
+                )
     elif ALEMBIC_VERSION_KEY in objects_by_key:
         raise LogicalApplicationContractError(
             "schema_control_stage_invalid"
