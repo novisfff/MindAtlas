@@ -1,8 +1,7 @@
-"""Plan 09 Task 1 — skill admin API mount boundary and OpenAPI proofs."""
+"""Plan 09 skill admin API — session principal + OpenAPI proofs."""
 
 from __future__ import annotations
 
-import os
 import unittest
 import uuid
 from pathlib import Path
@@ -17,16 +16,19 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from app.assistant.skills.admin_router import (  # noqa: E402
     PLAN09_ADMIN_PREFIX,
-    TRUSTED_MOUNT_ENV,
-    mount_skill_admin_router,
-    should_mount_skill_admin_router,
     skill_admin_parent_router,
-    skill_admin_trusted_mount_enabled,
 )
 from app.assistant.skills.router import skill_package_router  # noqa: E402
 from app.common.exceptions import register_exception_handlers  # noqa: E402
 from app.database import get_db  # noqa: E402
+from app.operator_auth.route_policy import protected_browser_router  # noqa: E402
 from tests._db import make_session  # noqa: E402
+from tests.operator_session_helpers import (  # noqa: E402
+    build_authenticated_skill_client,
+    csrf_headers,
+    origin_headers,
+    restore_operator_settings,
+)
 
 
 PLAN09_PATH_MARKERS = (
@@ -81,192 +83,108 @@ def _mindatlas_yaml() -> str:
     )
 
 
-class MountGuardUnitTests(unittest.TestCase):
-    def tearDown(self) -> None:
-        os.environ.pop(TRUSTED_MOUNT_ENV, None)
-        os.environ.pop("APP_ENV", None)
-
-    def test_staging_production_never_mount(self) -> None:
-        os.environ[TRUSTED_MOUNT_ENV] = "1"
-        self.assertFalse(should_mount_skill_admin_router(app_env="staging"))
-        self.assertFalse(should_mount_skill_admin_router(app_env="production"))
-        self.assertFalse(should_mount_skill_admin_router(app_env="PRODUCTION"))
-
-    def test_trusted_guard_required_outside_prod(self) -> None:
-        os.environ.pop(TRUSTED_MOUNT_ENV, None)
-        self.assertFalse(should_mount_skill_admin_router(app_env="development"))
-        self.assertFalse(should_mount_skill_admin_router(app_env="test"))
-        os.environ[TRUSTED_MOUNT_ENV] = "1"
-        self.assertTrue(should_mount_skill_admin_router(app_env="development"))
-        self.assertTrue(should_mount_skill_admin_router(app_env="test"))
-
-    def test_guard_value_must_be_exact(self) -> None:
-        os.environ[TRUSTED_MOUNT_ENV] = "true"
-        self.assertFalse(skill_admin_trusted_mount_enabled())
-        os.environ[TRUSTED_MOUNT_ENV] = "1"
-        self.assertTrue(skill_admin_trusted_mount_enabled())
-
-
 class SkillAdminOpenApiMountTests(unittest.TestCase):
-    def tearDown(self) -> None:
-        os.environ.pop(TRUSTED_MOUNT_ENV, None)
-
-    def _client(self, *, mount: bool) -> TestClient:
-        app = FastAPI()
-        register_exception_handlers(app)
+    def test_openapi_includes_admin_when_mounted_under_protected_browser(self) -> None:
         session = make_session()
+        try:
+            client, _headers, _settings = build_authenticated_skill_client(
+                db=session,
+                include_routers=[skill_package_router, skill_admin_parent_router],
+            )
+            schema = client.get("/openapi.json").json()
+            paths = schema.get("paths") or {}
+            admin_paths = [p for p in paths if PLAN09_ADMIN_PREFIX in p]
+            self.assertGreaterEqual(len(admin_paths), 5)
+            self.assertIn(
+                f"{PLAN09_ADMIN_PREFIX}/main-agent-profiles/default/versions/{{version_id}}",
+                paths,
+            )
+            for path, methods in paths.items():
+                if PLAN09_ADMIN_PREFIX not in path:
+                    continue
+                self.assertNotIn("delete", {m.lower() for m in methods.keys()})
+            self.assertIn("/api/assistant-config/skill-packages", paths)
+        finally:
+            restore_operator_settings()
+            session.close()
 
-        def _override_db():
-            try:
-                yield session
-            finally:
-                pass
+    def test_admin_mutation_requires_session_and_csrf(self) -> None:
+        session = make_session()
+        try:
+            client, headers, _settings = build_authenticated_skill_client(
+                db=session,
+                include_routers=[skill_package_router, skill_admin_parent_router],
+            )
+            name = f"api-pack-{uuid.uuid4().hex[:8]}"
+            create = client.post(
+                "/api/assistant-config/skill-packages",
+                headers=headers,
+                json={
+                    "skillMd": _minimal_skill_md(name=name),
+                    "mindatlasYaml": _mindatlas_yaml(),
+                    "resources": [],
+                },
+            )
+            self.assertEqual(create.status_code, 200, create.text)
+            package_id = create.json()["data"]["id"]
 
-        app.dependency_overrides[get_db] = _override_db
-        app.include_router(skill_package_router)
-        if mount:
-            os.environ[TRUSTED_MOUNT_ENV] = "1"
-            mounted = mount_skill_admin_router(app, app_env="development")
-            self.assertTrue(mounted)
-        else:
-            os.environ.pop(TRUSTED_MOUNT_ENV, None)
-            mounted = mount_skill_admin_router(app, app_env="production")
-            self.assertFalse(mounted)
-        self._session = session
-        return TestClient(app)
+            # No session cookies → 401 from protected browser / principal dep.
+            bare = TestClient(client.app)
+            r = bare.patch(
+                f"{PLAN09_ADMIN_PREFIX}/skill-packages/{package_id}/metadata",
+                headers=origin_headers(),
+                json={
+                    "requestId": "m1",
+                    "expectedAggregateRevision": 0,
+                    "displayName": "X",
+                },
+            )
+            self.assertEqual(r.status_code, 401, r.text)
 
-    def test_openapi_absent_when_unmounted_prod_like(self) -> None:
-        client = self._client(mount=False)
-        schema = client.get("/openapi.json").json()
-        paths = schema.get("paths") or {}
-        for path in paths:
-            for marker in PLAN09_PATH_MARKERS:
-                self.assertNotIn(
-                    marker,
-                    path,
-                    msg=f"Plan 09 path leaked into unmounted OpenAPI: {path}",
-                )
-        # Plan 01 paths still present.
-        self.assertIn("/api/assistant-config/skill-packages", paths)
+            # Forged operator identity headers never authenticate.
+            r_forged = bare.patch(
+                f"{PLAN09_ADMIN_PREFIX}/skill-packages/{package_id}/metadata",
+                headers=origin_headers(
+                    **{
+                        "X-MindAtlas-Operator-Id": "forged",
+                        "X-MindAtlas-Operator-Role": "operator",
+                    }
+                ),
+                json={
+                    "requestId": "m1b",
+                    "expectedAggregateRevision": 0,
+                    "displayName": "X",
+                },
+            )
+            self.assertEqual(r_forged.status_code, 401, r_forged.text)
 
-    def test_openapi_present_when_trusted_mount(self) -> None:
-        client = self._client(mount=True)
-        schema = client.get("/openapi.json").json()
-        paths = schema.get("paths") or {}
-        admin_paths = [p for p in paths if PLAN09_ADMIN_PREFIX in p]
-        self.assertGreaterEqual(len(admin_paths), 5)
-        # Protected Profile version detail is mounted under skill-admin only.
-        self.assertIn(
-            f"{PLAN09_ADMIN_PREFIX}/main-agent-profiles/default/versions/{{version_id}}",
-            paths,
-        )
-        self.assertNotIn(
-            "/api/assistant-config/main-agent-profiles/default/versions/{version_id}",
-            paths,
-        )
-        # No physical DELETE methods on Plan 09 admin routes.
-        for path, methods in paths.items():
-            if PLAN09_ADMIN_PREFIX not in path:
-                continue
-            self.assertNotIn("delete", {m.lower() for m in methods.keys()})
+            # Authenticated operator metadata CAS works.
+            r3 = client.patch(
+                f"{PLAN09_ADMIN_PREFIX}/skill-packages/{package_id}/metadata",
+                headers=headers,
+                json={
+                    "requestId": "m2",
+                    "expectedAggregateRevision": 0,
+                    "displayName": "Admin Name",
+                },
+            )
+            self.assertEqual(r3.status_code, 200, r3.text)
+            data = r3.json()["data"]
+            self.assertEqual(data["displayName"], "Admin Name")
+            self.assertEqual(data["aggregateRevision"], 1)
 
-    def test_admin_mutation_requires_principal_headers_when_mounted(self) -> None:
-        client = self._client(mount=True)
-        # Create package via Plan 01 surface first.
-        name = f"api-pack-{uuid.uuid4().hex[:8]}"
-        create = client.post(
-            "/api/assistant-config/skill-packages",
-            json={
-                "skillMd": _minimal_skill_md(name=name),
-                "mindatlasYaml": _mindatlas_yaml(),
-                "resources": [],
-            },
-        )
-        self.assertEqual(create.status_code, 200, create.text)
-        package_id = create.json()["data"]["id"]
-
-        # Missing principal headers → 401
-        r = client.patch(
-            f"{PLAN09_ADMIN_PREFIX}/skill-packages/{package_id}/metadata",
-            json={
-                "requestId": "m1",
-                "expectedAggregateRevision": 0,
-                "displayName": "X",
-            },
-        )
-        self.assertEqual(r.status_code, 401)
-
-        # Viewer cannot enable catalog.
-        r2 = client.post(
-            f"{PLAN09_ADMIN_PREFIX}/skill-packages/{package_id}/catalog/enable",
-            headers={
-                "X-MindAtlas-Operator-Id": "viewer-1",
-                "X-MindAtlas-Operator-Role": "viewer",
-            },
-            json={"requestId": "en1", "expectedAggregateRevision": 0},
-        )
-        self.assertEqual(r2.status_code, 403)
-
-        # Operator metadata CAS works.
-        r3 = client.patch(
-            f"{PLAN09_ADMIN_PREFIX}/skill-packages/{package_id}/metadata",
-            headers={
-                "X-MindAtlas-Operator-Id": "op-1",
-                "X-MindAtlas-Operator-Role": "operator",
-            },
-            json={
-                "requestId": "m2",
-                "expectedAggregateRevision": 0,
-                "displayName": "Admin Name",
-            },
-        )
-        self.assertEqual(r3.status_code, 200, r3.text)
-        data = r3.json()["data"]
-        self.assertEqual(data["displayName"], "Admin Name")
-        self.assertEqual(data["aggregateRevision"], 1)
-
-        # Archive path present and works.
-        r4 = client.post(
-            f"{PLAN09_ADMIN_PREFIX}/skill-packages/{package_id}/archive",
-            headers={
-                "X-MindAtlas-Operator-Id": "op-1",
-                "X-MindAtlas-Operator-Role": "operator",
-            },
-            json={"requestId": "ar1", "expectedAggregateRevision": 1},
-        )
-        self.assertEqual(r4.status_code, 200, r4.text)
-        self.assertIsNotNone(r4.json()["data"]["archivedAt"])
-        self.assertFalse(r4.json()["data"]["catalogEnabled"])
-
-    def test_header_boolean_is_not_auth_without_mount(self) -> None:
-        """Forged admin headers must not authorize when router is unmounted."""
-        client = self._client(mount=False)
-        name = f"no-mount-{uuid.uuid4().hex[:8]}"
-        create = client.post(
-            "/api/assistant-config/skill-packages",
-            json={
-                "skillMd": _minimal_skill_md(name=name),
-                "mindatlasYaml": _mindatlas_yaml(),
-                "resources": [],
-            },
-        )
-        self.assertEqual(create.status_code, 200, create.text)
-        package_id = create.json()["data"]["id"]
-        r = client.patch(
-            f"{PLAN09_ADMIN_PREFIX}/skill-packages/{package_id}/metadata",
-            headers={
-                "X-MindAtlas-Operator-Id": "op-1",
-                "X-MindAtlas-Operator-Role": "operator",
-                "X-Is-Admin": "true",
-            },
-            json={
-                "requestId": "m1",
-                "expectedAggregateRevision": 0,
-                "displayName": "Nope",
-            },
-        )
-        # Unmounted → 404 not found, not 200.
-        self.assertIn(r.status_code, {404, 405})
+            # Archive path present and works.
+            r4 = client.post(
+                f"{PLAN09_ADMIN_PREFIX}/skill-packages/{package_id}/archive",
+                headers=csrf_headers(client),
+                json={"requestId": "ar1", "expectedAggregateRevision": 1},
+            )
+            self.assertEqual(r4.status_code, 200, r4.text)
+            self.assertIsNotNone(r4.json()["data"]["archivedAt"])
+            self.assertFalse(r4.json()["data"]["catalogEnabled"])
+        finally:
+            restore_operator_settings()
+            session.close()
 
 
 class SkillAdminMigrationModelTests(unittest.TestCase):
@@ -274,9 +192,9 @@ class SkillAdminMigrationModelTests(unittest.TestCase):
 
     def setUp(self) -> None:
         reset_caches()
-        from tests._db import make_session
+        from tests._db import make_session as _make
 
-        self.db = make_session()
+        self.db = _make()
 
     def tearDown(self) -> None:
         self.db.close()
@@ -317,7 +235,6 @@ class SkillAdminMigrationModelTests(unittest.TestCase):
             self.assertIsNone(a.disabled_by)
 
     def test_migration_revision_parent_and_unique_id(self) -> None:
-        from pathlib import Path
         import re
 
         versions = Path(__file__).resolve().parents[1] / "alembic" / "versions"
@@ -325,14 +242,12 @@ class SkillAdminMigrationModelTests(unittest.TestCase):
         self.assertEqual(len(lifecycle), 1)
         text = lifecycle[0].read_text(encoding="utf-8")
         self.assertIn('down_revision = "d7e8f9a0b1c3"', text)
-        # Must not reuse occupied b4c5d6e7f8a9.
         self.assertNotIn("b4c5d6e7f8a9", text)
         rev_match = re.search(r'revision\s*=\s*["\']([0-9a-f]+)["\']', text)
         self.assertIsNotNone(rev_match)
         rev = rev_match.group(1)  # type: ignore[union-attr]
         self.assertNotEqual(rev, "b4c5d6e7f8a9")
         self.assertNotEqual(rev, "d7e8f9a0b1c3")
-        # Descendants of Task 1 head (Plan 09 later tasks may chain from lifecycle).
         children = []
         for path in versions.glob("*.py"):
             if path.name.startswith("__"):
@@ -341,7 +256,6 @@ class SkillAdminMigrationModelTests(unittest.TestCase):
             m = re.search(r"down_revision\s*=\s*[\"']([^\"']+)[\"']", content)
             if m and m.group(1) == rev:
                 children.append(path.name)
-        # Task 3 evaluation workbench is the expected sole direct child of Task 1.
         self.assertTrue(
             any("add_skill_evaluation_workbench" in name for name in children),
             f"expected evaluation migration to descend from Task 1 head; got {children}",

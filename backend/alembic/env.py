@@ -27,6 +27,11 @@ from app.ai_registry.models import (  # noqa: E402, F401
     AiComponentBinding,
 )
 from app.assistant.models import Conversation, Message  # noqa: E402, F401
+from app.assistant.runtime.models import (  # noqa: E402, F401
+    AssistantMainAgentRolloutControl,
+    AssistantMainAgentRolloutEvent,
+    AssistantMainAgentRolloutRevision,
+)
 from app.assistant.capability_calls.models import (  # noqa: E402, F401
     AssistantCapabilityCall,
     AssistantCapabilityCallAttempt,
@@ -87,6 +92,11 @@ from app.lightrag.models import EntryIndexOutbox  # noqa: E402, F401
 from app.openclaw_integration.models import OpenClawCapabilityItem  # noqa: E402, F401
 from app.report.models import MonthlyReport, WeeklyReport  # noqa: E402, F401
 from app.system_settings.models import AppSetting  # noqa: E402, F401
+from app.operator_auth.models import (  # noqa: E402, F401
+    OperatorAccount,
+    OperatorAuditEvent,
+    OperatorSession,
+)
 
 config = context.config
 

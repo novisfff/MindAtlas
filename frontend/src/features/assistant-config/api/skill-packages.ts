@@ -2,12 +2,18 @@
  * Typed clients for Plan 01 skill packages + Plan 09 admin lifecycle.
  *
  * Plan 01 (always mounted): /api/assistant-config/skill-packages
- * Plan 09 admin (trusted mount only): /api/assistant-config/skill-admin
+ * Plan 09 admin (protected browser session): /api/assistant-config/skill-admin
  *
- * UI never supplies authority. Optional operator headers from env are
- * trusted-mount local/dev only — not release authentication.
+ * UI never supplies authority. Session cookies (and CSRF in Task 9) carry
+ * the Operator principal — never client-asserted identity headers.
  */
-import { apiClient, ApiError, isApiError } from '@/lib/api/client'
+import {
+  apiClient,
+  ApiError,
+  browserFetchInit,
+  isApiError,
+  reportBrowserSessionExpired,
+} from '@/lib/api/client'
 
 function readViteEnv(key: string): string | undefined {
   try {
@@ -204,16 +210,6 @@ export interface MappedSkillPackageError {
   details?: unknown
 }
 
-/** Optional trusted-mount operator headers (dev/test only; not release auth). */
-export function skillAdminOperatorHeaders(): Record<string, string> {
-  const id = readViteEnv('VITE_MINDATLAS_OPERATOR_ID')?.trim()
-  const role = readViteEnv('VITE_MINDATLAS_OPERATOR_ROLE')?.trim()
-  const headers: Record<string, string> = {}
-  if (id) headers['X-MindAtlas-Operator-Id'] = id
-  if (role) headers['X-MindAtlas-Operator-Role'] = role
-  return headers
-}
-
 export function newRequestId(prefix = 'ui'): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
     return `${prefix}-${crypto.randomUUID()}`
@@ -302,7 +298,7 @@ export function mapSkillPackageError(error: unknown): MappedSkillPackageError {
 // ---------------------------------------------------------------------------
 
 export function listSkillPackages(
-  params: ListSkillPackagesParams = {},
+  params: ListSkillPackagesParams = {}
 ): Promise<PageResult<SkillPackageSummary>> {
   return apiClient.get<PageResult<SkillPackageSummary>>(SKILL_PACKAGES_BASE, {
     query: {
@@ -325,14 +321,14 @@ export function createSkillPackage(body: CreateSkillPackageRequest): Promise<Ski
 
 export function saveSkillPackageDraft(
   packageId: string,
-  body: SaveSkillDraftRequest,
+  body: SaveSkillDraftRequest
 ): Promise<SkillVersionSummary> {
   return apiClient.put<SkillVersionSummary>(`${SKILL_PACKAGES_BASE}/${packageId}/draft`, { body })
 }
 
 export function listSkillPackageVersions(
   packageId: string,
-  params: ListSkillVersionsParams = {},
+  params: ListSkillVersionsParams = {}
 ): Promise<PageResult<SkillVersionSummary>> {
   return apiClient.get<PageResult<SkillVersionSummary>>(
     `${SKILL_PACKAGES_BASE}/${packageId}/versions`,
@@ -343,16 +339,16 @@ export function listSkillPackageVersions(
         limit: params.limit ?? 50,
         offset: params.offset ?? 0,
       },
-    },
+    }
   )
 }
 
 export function getSkillPackageVersion(
   packageId: string,
-  versionId: string,
+  versionId: string
 ): Promise<SkillVersionDetail> {
   return apiClient.get<SkillVersionDetail>(
-    `${SKILL_PACKAGES_BASE}/${packageId}/versions/${versionId}`,
+    `${SKILL_PACKAGES_BASE}/${packageId}/versions/${versionId}`
   )
 }
 
@@ -363,7 +359,7 @@ export function publishSkillPackageVersion(
     expectedAggregateRevision: number
     gateId?: string | null
     requestId?: string | null
-  },
+  }
 ): Promise<SkillVersionSummary> {
   return apiClient.post<SkillVersionSummary>(`${SKILL_PACKAGES_BASE}/${packageId}/publish`, {
     body: {
@@ -378,7 +374,7 @@ export function publishSkillPackageVersion(
 export function skillPackageResourceUrl(
   packageId: string,
   versionId: string,
-  resourcePath: string,
+  resourcePath: string
 ): string {
   const encoded = resourcePath
     .split('/')
@@ -395,14 +391,17 @@ export function exportSkillPackageVersionUrl(packageId: string, versionId: strin
 export async function fetchSkillPackageResourceBlob(
   packageId: string,
   versionId: string,
-  resourcePath: string,
+  resourcePath: string
 ): Promise<Blob> {
   const path = skillPackageResourceUrl(packageId, versionId, resourcePath)
-  const response = await fetch(path, {
-    headers: { accept: '*/*' },
-    credentials: 'same-origin',
-  })
+  const response = await fetch(
+    path,
+    browserFetchInit({
+      headers: { accept: '*/*' },
+    }),
+  )
   if (!response.ok) {
+    reportBrowserSessionExpired(path, response.status)
     throw new ApiError({
       message: `Failed to fetch resource ${resourcePath}`,
       status: response.status,
@@ -413,88 +412,88 @@ export async function fetchSkillPackageResourceBlob(
 }
 
 // ---------------------------------------------------------------------------
-// Plan 09 admin APIs (trusted mount)
+// Plan 09 admin APIs (protected browser session)
 // ---------------------------------------------------------------------------
 
 export function patchSkillPackageMetadata(
   packageId: string,
-  body: MetadataPatchRequest,
+  body: MetadataPatchRequest
 ): Promise<SkillPackageDetail> {
   return apiClient.patch<SkillPackageDetail>(
     `${SKILL_ADMIN_BASE}/skill-packages/${packageId}/metadata`,
-    { body, headers: skillAdminOperatorHeaders() },
+    { body }
   )
 }
 
 export function archiveSkillPackage(
   packageId: string,
-  body: AggregateRevisionBody,
+  body: AggregateRevisionBody
 ): Promise<SkillPackageDetail> {
   return apiClient.post<SkillPackageDetail>(
     `${SKILL_ADMIN_BASE}/skill-packages/${packageId}/archive`,
-    { body, headers: skillAdminOperatorHeaders() },
+    { body }
   )
 }
 
 export function unarchiveSkillPackage(
   packageId: string,
-  body: AggregateRevisionBody,
+  body: AggregateRevisionBody
 ): Promise<SkillPackageDetail> {
   return apiClient.post<SkillPackageDetail>(
     `${SKILL_ADMIN_BASE}/skill-packages/${packageId}/unarchive`,
-    { body, headers: skillAdminOperatorHeaders() },
+    { body }
   )
 }
 
 export function enableSkillPackageCatalog(
   packageId: string,
-  body: CatalogEnableRequest,
+  body: CatalogEnableRequest
 ): Promise<SkillPackageDetail> {
   return apiClient.post<SkillPackageDetail>(
     `${SKILL_ADMIN_BASE}/skill-packages/${packageId}/catalog/enable`,
-    { body, headers: skillAdminOperatorHeaders() },
+    { body }
   )
 }
 
 export function disableSkillPackageCatalog(
   packageId: string,
-  body: AggregateRevisionBody,
+  body: AggregateRevisionBody
 ): Promise<SkillPackageDetail> {
   return apiClient.post<SkillPackageDetail>(
     `${SKILL_ADMIN_BASE}/skill-packages/${packageId}/catalog/disable`,
-    { body, headers: skillAdminOperatorHeaders() },
+    { body }
   )
 }
 
 export function addSkillPackageAlias(
   packageId: string,
-  body: AddAliasRequest,
+  body: AddAliasRequest
 ): Promise<SkillPackageDetail> {
   return apiClient.post<SkillPackageDetail>(
     `${SKILL_ADMIN_BASE}/skill-packages/${packageId}/aliases`,
-    { body, headers: skillAdminOperatorHeaders() },
+    { body }
   )
 }
 
 export function disableSkillPackageAlias(
   packageId: string,
   aliasId: string,
-  body: AggregateRevisionBody,
+  body: AggregateRevisionBody
 ): Promise<SkillPackageDetail> {
   return apiClient.post<SkillPackageDetail>(
     `${SKILL_ADMIN_BASE}/skill-packages/${packageId}/aliases/${aliasId}/disable`,
-    { body, headers: skillAdminOperatorHeaders() },
+    { body }
   )
 }
 
 export function restoreSkillPackageVersionAsDraft(
   packageId: string,
   versionId: string,
-  body: AggregateRevisionBody,
+  body: AggregateRevisionBody
 ): Promise<SkillPackageDetail> {
   return apiClient.post<SkillPackageDetail>(
     `${SKILL_ADMIN_BASE}/skill-packages/${packageId}/versions/${versionId}/restore-draft`,
-    { body, headers: skillAdminOperatorHeaders() },
+    { body }
   )
 }
 
@@ -515,7 +514,6 @@ export async function previewSkillPackageImport(params: {
   if (params.forkCanonicalName) form.append('forkCanonicalName', params.forkCanonicalName)
   return apiClient.post<ImportPreviewResult>(`${SKILL_ADMIN_BASE}/skill-packages/import/preview`, {
     body: form,
-    headers: skillAdminOperatorHeaders(),
   })
 }
 
@@ -525,7 +523,6 @@ export function applySkillPackageImport(body: {
 }): Promise<ImportApplyResult> {
   return apiClient.post<ImportApplyResult>(`${SKILL_ADMIN_BASE}/skill-packages/import/apply`, {
     body,
-    headers: skillAdminOperatorHeaders(),
   })
 }
 
@@ -534,7 +531,7 @@ export function applySkillPackageImport(body: {
  *
  * Plan 09 route gate requires BOTH:
  * - admin router mounted, and
- * - trusted principal authorized (probe succeeds as 2xx/404-for-missing-entity/409/422).
+ * - session principal authorized (probe succeeds as 2xx/404-for-missing-entity/409/422).
  *
  * 401/403 means principal missing/unauthorized → available=false (fail closed).
  * 404/405/5xx on the admin probe path → unmounted or unavailable → available=false.
@@ -563,7 +560,6 @@ export async function probeSkillAdminSurface(): Promise<SkillAdminSurfaceProbe> 
   try {
     await apiClient.get(
       `${SKILL_ADMIN_BASE}/skill-packages/00000000-0000-4000-8000-000000000000/versions/00000000-0000-4000-8000-000000000001/diff/00000000-0000-4000-8000-000000000002`,
-      { headers: skillAdminOperatorHeaders() },
     )
     // Unexpected success still means the router is mounted and principal passed.
     adminMounted = true
@@ -738,10 +734,9 @@ export async function listPublishedCapabilityIdentities(): Promise<CapabilityReg
 export function diffSkillPackageVersions(
   packageId: string,
   leftVersionId: string,
-  rightVersionId: string,
+  rightVersionId: string
 ): Promise<Record<string, unknown>> {
   return apiClient.get<Record<string, unknown>>(
     `${SKILL_ADMIN_BASE}/skill-packages/${packageId}/versions/${leftVersionId}/diff/${rightVersionId}`,
-    { headers: skillAdminOperatorHeaders() },
   )
 }

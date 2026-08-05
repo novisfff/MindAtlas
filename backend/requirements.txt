@@ -1,4 +1,7 @@
-fastapi
+# Pin FastAPI: unpinned CI floated to 0.140+ which nests include_router under
+# _IncludedRouter (route inventory and any top-level APIRoute walks break).
+# Lower bound keeps current local stacks; upper bound excludes untested majors.
+fastapi>=0.115,<0.141
 uvicorn
 sqlalchemy
 alembic
@@ -8,6 +11,7 @@ psycopg2-binary
 python-multipart
 minio
 cryptography
+argon2-cffi
 langchain>=0.3.0
 langchain-openai>=0.2.0
 langchain-core>=0.3.0,<1.0

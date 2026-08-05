@@ -23,3 +23,12 @@ class ApiResponse(BaseModel):
         data: Any = None,
     ) -> "ApiResponse":
         return cls(success=False, code=code, message=message, data=data)
+
+    def as_json_dict(self) -> dict[str, Any]:
+        """Serialize the envelope for JSONResponse content (JSON-safe)."""
+        return self.model_dump(mode="json")
+
+
+def ok_json_content(data: Any = None, message: str = "OK") -> dict[str, Any]:
+    """JSON-safe success envelope for status-bearing public routes (e.g. /ready)."""
+    return ApiResponse.ok(data, message=message).as_json_dict()

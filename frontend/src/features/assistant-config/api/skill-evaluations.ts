@@ -1,12 +1,11 @@
 /**
  * Skill evaluation + publish gate API client (Plan 09 Task 9).
- * Mounted only under trusted Plan 09 guard with skill-admin.
+ * Mounted under the protected browser session with skill-admin.
  * Client never authors digests — server resolves all pins.
  */
-import { apiClient } from '@/lib/api/client'
+import { apiClient, browserFetchInit, reportBrowserSessionExpired } from '@/lib/api/client'
 import { withMindAtlasLocale } from '@/lib/api/locale'
 import { SSEParser } from '@/lib/sse/SSEParser'
-import { skillAdminOperatorHeaders } from './skill-packages'
 
 export const SKILL_EVAL_BASE = '/api/assistant-config/skill-eval'
 
@@ -212,8 +211,7 @@ export interface GateUiState {
 
 export function gateUiStateFromResponse(
   result: CreateGateResponse,
-  action: PublishGateAction,
-): GateUiState {
+  action: PublishGateAction): GateUiState {
   return {
     gateId: result.gate.id,
     action: (result.gate.action as PublishGateAction | undefined) ?? action,
@@ -316,72 +314,60 @@ export function buildCreateEvalRunBody(request: CreateEvalRunRequest): CreateEva
 }
 
 export function listEvalDatasets(): Promise<{ items: DatasetSummary[]; total: number }> {
-  return apiClient.get(`${SKILL_EVAL_BASE}/datasets`, { headers: skillAdminOperatorHeaders() })
+  return apiClient.get(`${SKILL_EVAL_BASE}/datasets`)
 }
 
 export function listDatasetVersions(
-  datasetId: string,
-): Promise<{ items: DatasetVersionSummary[]; total: number }> {
-  return apiClient.get(`${SKILL_EVAL_BASE}/datasets/${datasetId}/versions`, {
-    headers: skillAdminOperatorHeaders(),
-  })
+  datasetId: string): Promise<{ items: DatasetVersionSummary[]; total: number }> {
+  return apiClient.get(`${SKILL_EVAL_BASE}/datasets/${datasetId}/versions`)
 }
 
 export function createEvalRun(body: CreateEvalRunRequest): Promise<EvalRunSummary> {
   const safe = buildCreateEvalRunBody(body)
   return apiClient.post(`${SKILL_EVAL_BASE}/runs`, {
     body: safe,
-    headers: skillAdminOperatorHeaders(),
   })
 }
 
 export function getEvalRun(runId: string): Promise<EvalRunSummary> {
-  return apiClient.get(`${SKILL_EVAL_BASE}/runs/${runId}`, { headers: skillAdminOperatorHeaders() })
+  return apiClient.get(`${SKILL_EVAL_BASE}/runs/${runId}`)
 }
 
 export function listEvalRunEvents(
   runId: string,
-  params?: { afterSequence?: number; limit?: number },
-): Promise<{ items: EvalEventSummary[]; afterSequence: number; nextSequence: number }> {
+  params?: { afterSequence?: number; limit?: number }): Promise<{ items: EvalEventSummary[]; afterSequence: number; nextSequence: number }> {
   return apiClient.get(`${SKILL_EVAL_BASE}/runs/${runId}/events`, {
     query: {
       afterSequence: params?.afterSequence ?? 0,
       limit: params?.limit ?? 100,
     },
-    headers: skillAdminOperatorHeaders(),
   })
 }
 
 export function cancelEvalRun(
   runId: string,
-  body: { requestId: string; expectedStateRevision: number },
-): Promise<EvalRunSummary> {
+  body: { requestId: string; expectedStateRevision: number }): Promise<EvalRunSummary> {
   return apiClient.post(`${SKILL_EVAL_BASE}/runs/${runId}/cancel`, {
     body: {
       requestId: body.requestId,
       expectedStateRevision: body.expectedStateRevision,
     },
-    headers: skillAdminOperatorHeaders(),
   })
 }
 
 export function listEvalRunCaseResults(
   runId: string,
-  params?: { limit?: number },
-): Promise<{ items: CaseResultSummary[]; total: number }> {
+  params?: { limit?: number }): Promise<{ items: CaseResultSummary[]; total: number }> {
   return apiClient.get(`${SKILL_EVAL_BASE}/runs/${runId}/case-results`, {
     query: { limit: params?.limit ?? 200 },
-    headers: skillAdminOperatorHeaders(),
   })
 }
 
 export function listEvalRunEvidence(
   runId: string,
-  params?: { limit?: number },
-): Promise<EvalRunEvidence> {
+  params?: { limit?: number }): Promise<EvalRunEvidence> {
   return apiClient.get(`${SKILL_EVAL_BASE}/runs/${runId}/evidence`, {
     query: { limit: params?.limit ?? 200 },
-    headers: skillAdminOperatorHeaders(),
   })
 }
 
@@ -398,7 +384,6 @@ export function listQualifyingEvidence(params?: {
       subjectVersionId: params?.subjectVersionId,
       limit: params?.limit ?? 50,
     },
-    headers: skillAdminOperatorHeaders(),
   })
 }
 
@@ -409,20 +394,22 @@ export function listQualifyingEvidence(params?: {
  */
 export async function streamEvalRunEvents(
   runId: string,
-  options: StreamEvalRunEventsOptions = {},
-): Promise<EvalStreamTerminalReason> {
+  options: StreamEvalRunEventsOptions = {}): Promise<EvalStreamTerminalReason> {
   const afterSequence = options.afterSequence ?? 0
   const url = `${SKILL_EVAL_BASE}/runs/${runId}/events/stream?afterSequence=${afterSequence}`
-  const headers = withMindAtlasLocale(skillAdminOperatorHeaders())
+  const headers = withMindAtlasLocale()
   headers.set('accept', 'text/event-stream')
 
   let response: Response
   try {
-    response = await fetch(url, {
-      method: 'GET',
-      headers,
-      signal: options.signal,
-    })
+    response = await fetch(
+      url,
+      browserFetchInit({
+        method: 'GET',
+        headers,
+        signal: options.signal,
+      }),
+    )
   } catch (error) {
     if (options.signal?.aborted) return 'aborted'
     options.onError?.(error instanceof Error ? error : new Error(String(error)))
@@ -430,6 +417,7 @@ export async function streamEvalRunEvents(
   }
 
   if (!response.ok || !response.body) {
+    reportBrowserSessionExpired(url, response.status)
     const message = `SSE transport failed: HTTP ${response.status}`
     options.onError?.(new Error(message))
     return 'transport_failure'
@@ -461,8 +449,7 @@ export async function streamEvalRunEvents(
         if (evt.event === 'error') {
           const data = (evt.data || {}) as Record<string, unknown>
           options.onError?.(
-            new Error(typeof data.message === 'string' ? data.message : 'SSE stream error'),
-          )
+            new Error(typeof data.message === 'string' ? data.message : 'SSE stream error'))
           return 'transport_failure'
         }
         const data = (evt.data || {}) as Record<string, unknown>
@@ -521,7 +508,6 @@ export function createPublishGate(body: {
   }
   return apiClient.post(`${SKILL_EVAL_BASE}/gates`, {
     body: safe,
-    headers: skillAdminOperatorHeaders(),
   })
 }
 
@@ -530,7 +516,5 @@ export function getPublishGate(gateId: string): Promise<{
   assertionSnapshot: Record<string, unknown>
   metricSnapshot: Record<string, unknown>
 }> {
-  return apiClient.get(`${SKILL_EVAL_BASE}/gates/${gateId}`, {
-    headers: skillAdminOperatorHeaders(),
-  })
+  return apiClient.get(`${SKILL_EVAL_BASE}/gates/${gateId}`)
 }

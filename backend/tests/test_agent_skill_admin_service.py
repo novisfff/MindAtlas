@@ -79,16 +79,16 @@ def _parse(
     return parse_skill_directory_files(files, expected_root_name=None)
 
 
-def _operator(principal_id: str = "op-1") -> "OperatorPrincipal":
-    from app.assistant.skills.principal import OperatorPrincipal
+def _operator(principal_id: str = "op-1"):
+    from tests.operator_session_helpers import make_service_principal
 
-    return OperatorPrincipal(principal_id=principal_id, role="operator")
+    return make_service_principal(principal_id, role="operator")
 
 
-def _viewer(principal_id: str = "viewer-1") -> "OperatorPrincipal":
-    from app.assistant.skills.principal import OperatorPrincipal
+def _viewer(principal_id: str = "viewer-1"):
+    from tests.operator_session_helpers import make_service_principal
 
-    return OperatorPrincipal(principal_id=principal_id, role="viewer")
+    return make_service_principal(principal_id, role="viewer")
 
 
 def _passing_gate_metrics() -> dict:

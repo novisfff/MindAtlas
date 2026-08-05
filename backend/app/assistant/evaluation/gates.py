@@ -70,7 +70,7 @@ from app.assistant.evaluation.repository import (
 from app.assistant.main_agent.evaluation import RELEASE_THRESHOLDS
 from app.common.exceptions import ApiException
 from app.common.time import utcnow
-from app.config import get_settings
+import app.config as app_config
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +126,9 @@ class GateEnvironmentPins:
 def current_build_revision() -> str:
     """Read APP_BUILD_REVISION / settings.app_build_revision (default development)."""
     try:
-        settings = get_settings()
+        # Resolve via module attribute so test pin/restore of app.config.get_settings
+        # is visible (a bare ``from app.config import get_settings`` freezes the ref).
+        settings = app_config.get_settings()
         return str(getattr(settings, "app_build_revision", None) or "development")
     except Exception:  # noqa: BLE001 — fail closed to development
         return "development"
@@ -308,7 +310,8 @@ class GateConsumeResult:
 def publish_gate_mode() -> PublishGateMode:
     """Read ASSISTANT_SKILL_PUBLISH_GATE_MODE (default observe at introduce)."""
     try:
-        settings = get_settings()
+        # Module-attribute lookup — see current_build_revision.
+        settings = app_config.get_settings()
         mode = str(
             getattr(settings, "assistant_skill_publish_gate_mode", "observe") or "observe"
         ).strip().lower()

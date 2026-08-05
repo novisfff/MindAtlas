@@ -63,6 +63,38 @@ def _is_ip_blocked(
     return any(normalized in net for net in BLOCKED_NETWORKS)
 
 
+def _is_test_provider_host_allowed(hostname: str) -> bool:
+    """Allow one exact DNS label under APP_ENV=test for Compose provider stub.
+
+    Never matches IP literals, wildcards, empty config, or non-test APP_ENV.
+    """
+    try:
+        from app.config import get_settings
+
+        settings = get_settings()
+    except Exception:
+        return False
+    if (settings.app_env or "").strip().lower() != "test":
+        return False
+    allowed = (settings.mindatlas_test_provider_host or "").strip().lower()
+    if not allowed:
+        return False
+    # Configured allowlist value must itself be a hostname label, never an IP.
+    try:
+        ipaddress.ip_address(allowed)
+    except ValueError:
+        pass
+    else:
+        return False
+    try:
+        ipaddress.ip_address(hostname)
+    except ValueError:
+        pass
+    else:
+        return False
+    return hostname.lower() == allowed
+
+
 def validate_url_ssrf(url: str, *, raise_api_exception: bool = False) -> None:
     """Validate URL to prevent SSRF attacks.
 
@@ -112,6 +144,10 @@ def validate_url_ssrf(url: str, *, raise_api_exception: bool = False) -> None:
                 from app.common.exceptions import ApiException
                 raise ApiException(status_code=400, code=40024, message=msg)
             raise SSRFError(msg)
+        return
+
+    # Test-only Compose provider stub: skip private-IP DNS block for one label.
+    if _is_test_provider_host_allowed(hostname):
         return
 
     # Resolve hostname and check all IPs

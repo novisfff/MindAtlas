@@ -22,14 +22,17 @@ import { cn } from '@/lib/utils'
 
 import {
   assertNoSingleTargetFields,
+  createDefaultProfileSnapshotV2,
   disableProtectedDefaultMainAgentRuntime,
   enableProtectedDefaultMainAgentRuntime,
   getProtectedDefaultMainAgentProfile,
   getProtectedDefaultMainAgentVersion,
+  isProfileSnapshotV1,
   listProtectedDefaultMainAgentVersions,
   publishProtectedDefaultMainAgent,
   saveProtectedDefaultMainAgentDraft,
-  type MainAgentProfileSnapshot,
+  type MainAgentProfileSnapshotV2,
+  type ReadableMainAgentProfileSnapshot,
   type MainAgentProfileSummary,
   type MainAgentProfileVersionSummary,
 } from '../api/main-agent-profiles'
@@ -44,44 +47,7 @@ import { SkillPublishGateDialog } from '../components/SkillPublishGateDialog'
 import { SkillTestWorkbench } from '../components/SkillTestWorkbench'
 import { useSkillTestRunStore } from '../stores/skill-test-run-store'
 
-const DEFAULT_SNAPSHOT: MainAgentProfileSnapshot = {
-  schemaVersion: 1,
-  basePrompt:
-    'You are the MindAtlas main assistant. Answer directly when no specialized Skill is required.',
-  responseStyle: {},
-  supportedEntrypoints: ['assistant_chat'],
-  modelRequirements: {
-    toolCalling: true,
-    streaming: true,
-    multiToolCalls: true,
-    jsonSchema: true,
-  },
-  controlCapabilityKeys: [],
-  skillCatalogScope: { mode: 'all_published', packageIds: [] },
-  contextBudget: {
-    maxPromptCharacters: 72000,
-    maxActiveSkills: 4,
-    maxSkillInstructionCharacters: 24000,
-    maxSingleSkillInstructionCharacters: 12000,
-    maxHistoryCharacters: 24000,
-    maxToolSummaryCharacters: 24000,
-    maxResourceBytesPerCall: 65536,
-  },
-  outputBudget: {
-    maxCompletionTokens: 4096,
-    maxProviderRounds: 8,
-    maxOuterAgentRounds: 8,
-    maxTotalCapabilityCalls: 16,
-    maxParallelCalls: 4,
-    maxCapabilityDepth: 4,
-    maxAgentDepth: 2,
-    maxSameReadSignature: 3,
-    maxCompletionFollowupRounds: 2,
-    maxWallTimeMs: 120000,
-  },
-  globalSafetyPolicy: { denyByDefault: true },
-  fallbackPolicy: { legacyRuntimeAllowed: true, beforeSideEffectsOnly: true },
-}
+const DEFAULT_SNAPSHOT: MainAgentProfileSnapshotV2 = createDefaultProfileSnapshotV2()
 
 type MutationKind = 'draft' | 'publish' | 'enable' | 'disable' | null
 type GateDialogMode = 'publish' | 'promotion' | null
@@ -103,7 +69,7 @@ function ProfileEditorBody() {
   const navigate = useNavigate()
   const [profile, setProfile] = useState<MainAgentProfileSummary | null>(null)
   const [versions, setVersions] = useState<MainAgentProfileVersionSummary[]>([])
-  const [snapshot, setSnapshot] = useState<MainAgentProfileSnapshot>(DEFAULT_SNAPSHOT)
+  const [snapshot, setSnapshot] = useState<ReadableMainAgentProfileSnapshot>(DEFAULT_SNAPSHOT)
   const [controlKeysText, setControlKeysText] = useState('')
   const [dirty, setDirty] = useState(false)
   const [busy, setBusy] = useState<MutationKind>(null)
@@ -125,6 +91,8 @@ function ProfileEditorBody() {
   const draftVersionId = profile?.draftVersion?.id ?? null
   const aggregateRevision = profile?.aggregateRevision ?? 0
   const profileId = profile?.id ?? null
+  const isHistoricalV1 = isProfileSnapshotV1(snapshot)
+  const readOnly = isHistoricalV1
 
   const dualPointer = Boolean(draftVersionId && publishedVersionId)
   const workbenchSubjectKind:
@@ -211,22 +179,42 @@ function ProfileEditorBody() {
     const versionId = summary.draftVersion?.id || summary.publishedVersion?.id
     if (versionId) {
       const detail = await getProtectedDefaultMainAgentVersion(versionId)
-      const snap = detail.snapshot as MainAgentProfileSnapshot
+      const snap = detail.snapshot as ReadableMainAgentProfileSnapshot
       if (snap && typeof snap === 'object' && snap.basePrompt) {
-        setSnapshot({
-          ...DEFAULT_SNAPSHOT,
-          ...snap,
-          schemaVersion: 1,
-          controlCapabilityKeys: snap.controlCapabilityKeys || [],
-          skillCatalogScope: snap.skillCatalogScope || DEFAULT_SNAPSHOT.skillCatalogScope,
-          modelRequirements: snap.modelRequirements || DEFAULT_SNAPSHOT.modelRequirements,
-          contextBudget: snap.contextBudget || DEFAULT_SNAPSHOT.contextBudget,
-          outputBudget: snap.outputBudget || DEFAULT_SNAPSHOT.outputBudget,
-          globalSafetyPolicy: snap.globalSafetyPolicy || DEFAULT_SNAPSHOT.globalSafetyPolicy,
-          fallbackPolicy: snap.fallbackPolicy || DEFAULT_SNAPSHOT.fallbackPolicy,
-          responseStyle: snap.responseStyle || {},
-          supportedEntrypoints: snap.supportedEntrypoints || ['assistant_chat'],
-        })
+        if (isProfileSnapshotV1(snap)) {
+          // Historical V1 is display-only; preserve fallbackPolicy for read-only inspection.
+          setSnapshot({
+            ...snap,
+            schemaVersion: 1,
+            controlCapabilityKeys: snap.controlCapabilityKeys || [],
+            skillCatalogScope: snap.skillCatalogScope || DEFAULT_SNAPSHOT.skillCatalogScope,
+            modelRequirements: snap.modelRequirements || DEFAULT_SNAPSHOT.modelRequirements,
+            contextBudget: snap.contextBudget || DEFAULT_SNAPSHOT.contextBudget,
+            outputBudget: snap.outputBudget || DEFAULT_SNAPSHOT.outputBudget,
+            globalSafetyPolicy: snap.globalSafetyPolicy || { denyByDefault: true },
+            fallbackPolicy: snap.fallbackPolicy || {
+              legacyRuntimeAllowed: false,
+              beforeSideEffectsOnly: true,
+            },
+            responseStyle: snap.responseStyle || {},
+            supportedEntrypoints: snap.supportedEntrypoints || ['assistant_chat'],
+          })
+        } else {
+          setSnapshot(
+            createDefaultProfileSnapshotV2({
+              ...snap,
+              schemaVersion: 2,
+              controlCapabilityKeys: snap.controlCapabilityKeys || [],
+              skillCatalogScope: snap.skillCatalogScope || DEFAULT_SNAPSHOT.skillCatalogScope,
+              modelRequirements: snap.modelRequirements || DEFAULT_SNAPSHOT.modelRequirements,
+              contextBudget: snap.contextBudget || DEFAULT_SNAPSHOT.contextBudget,
+              outputBudget: snap.outputBudget || DEFAULT_SNAPSHOT.outputBudget,
+              globalSafetyPolicy: snap.globalSafetyPolicy || { denyByDefault: true },
+              responseStyle: snap.responseStyle || {},
+              supportedEntrypoints: snap.supportedEntrypoints || ['assistant_chat'],
+            }),
+          )
+        }
         setControlKeysText((snap.controlCapabilityKeys || []).join(', '))
         setDirty(false)
       }
@@ -285,6 +273,11 @@ function ProfileEditorBody() {
   async function handleSaveDraft() {
     // Draft save is isolated: only mutates draft content; never sends enable/disable.
     // Live runtimeEnabled / published pointer come only from server reload.
+    // New drafts are always V2 with fixed runtime policy — V1 is never authored.
+    if (isHistoricalV1) {
+      setError(t('settings.universalSkills.profileV1ReadOnly'))
+      return
+    }
     setBusy('draft')
     setError(null)
     setMessage(null)
@@ -293,10 +286,11 @@ function ProfileEditorBody() {
         .split(/[\s,]+/)
         .map((k) => k.trim())
         .filter(Boolean)
-      const next: MainAgentProfileSnapshot = {
-        ...snapshot,
+      const next: MainAgentProfileSnapshotV2 = createDefaultProfileSnapshotV2({
+        ...(snapshot as MainAgentProfileSnapshotV2),
         controlCapabilityKeys: keys,
-      }
+        schemaVersion: 2,
+      })
       if (assertNoSingleTargetFields(next as unknown as Record<string, unknown>).length) {
         throw new Error(t('settings.universalSkills.profileNoSingleTarget'))
       }
@@ -319,6 +313,10 @@ function ProfileEditorBody() {
   }
 
   async function handlePublish() {
+    if (isHistoricalV1) {
+      setError(t('settings.universalSkills.profileV1ReadOnly'))
+      return
+    }
     if (!draftVersionId) {
       setError(t('settings.universalSkills.noDraftVersion'))
       return
@@ -424,7 +422,35 @@ function ProfileEditorBody() {
           </div>
         ) : null}
 
+        {isHistoricalV1 ? (
+          <div
+            role="status"
+            data-testid="profile-v1-readonly-banner"
+            className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950"
+          >
+            {t(
+              'settings.universalSkills.profileV1ReadOnlyBanner',
+              'Historical Profile V1 — read only. Draft, publish, and prepare require Profile V2.',
+            )}
+          </div>
+        ) : (
+          <div
+            data-testid="profile-v2-runtime-policy"
+            className="rounded-md border border-slate-200 bg-slate-50 p-3 text-xs text-slate-700"
+          >
+            <div className="font-medium">
+              {t('settings.universalSkills.profileRuntimePolicy', 'Runtime policy')}
+            </div>
+            <div className="mt-1 font-mono">
+              runtimeKind=main_agent · recoveryScope=same_run_only
+            </div>
+          </div>
+        )}
+
         <div className="flex flex-wrap gap-2 text-xs">
+          <span className="rounded-full border px-2 py-0.5">
+            schema=v{snapshot.schemaVersion}
+          </span>
           <span className="rounded-full border px-2 py-0.5">
             runtime={runtimeEnabled ? 'enabled' : 'disabled'}
           </span>
@@ -449,8 +475,10 @@ function ProfileEditorBody() {
           <textarea
             className={cn(uiField.textarea, 'min-h-[180px] font-mono text-xs')}
             value={snapshot.basePrompt}
+            disabled={readOnly}
             onChange={(e) => {
-              setSnapshot((s) => ({ ...s, basePrompt: e.target.value }))
+              if (readOnly) return
+              setSnapshot((s) => ({ ...s, basePrompt: e.target.value }) as ReadableMainAgentProfileSnapshot)
               setDirty(true)
             }}
           />
@@ -461,7 +489,9 @@ function ProfileEditorBody() {
           <input
             className={uiField.input}
             value={controlKeysText}
+            disabled={readOnly}
             onChange={(e) => {
+              if (readOnly) return
               setControlKeysText(e.target.value)
               setDirty(true)
             }}
@@ -474,14 +504,16 @@ function ProfileEditorBody() {
           <select
             className={uiField.select}
             value={snapshot.skillCatalogScope.mode}
+            disabled={readOnly}
             onChange={(e) => {
+              if (readOnly) return
               setSnapshot((s) => ({
                 ...s,
                 skillCatalogScope: {
                   ...s.skillCatalogScope,
                   mode: e.target.value as 'all_published' | 'allowlist',
                 },
-              }))
+              }) as ReadableMainAgentProfileSnapshot)
               setDirty(true)
             }}
           >
@@ -490,14 +522,33 @@ function ProfileEditorBody() {
           </select>
         </label>
 
+        {isHistoricalV1 && 'fallbackPolicy' in snapshot ? (
+          <div
+            data-testid="profile-v1-fallback-readonly"
+            className="rounded-md border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600"
+          >
+            <div className="font-medium">
+              {t('settings.universalSkills.profileV1FallbackReadonly', 'Historical fallback policy (read only)')}
+            </div>
+            <div className="mt-1 font-mono">
+              legacyRuntimeAllowed={String(snapshot.fallbackPolicy.legacyRuntimeAllowed)} ·
+              beforeSideEffectsOnly={String(snapshot.fallbackPolicy.beforeSideEffectsOnly)}
+            </div>
+          </div>
+        ) : null}
+
         <div className="flex flex-wrap gap-2">
-          <Button type="button" disabled={busy !== null || !dirty} onClick={() => void handleSaveDraft()}>
+          <Button
+            type="button"
+            disabled={readOnly || busy !== null || !dirty}
+            onClick={() => void handleSaveDraft()}
+          >
             {busy === 'draft' ? t('messages.loading') : t('settings.universalSkills.saveDraft')}
           </Button>
           <Button
             type="button"
             variant="outline"
-            disabled={!draftVersionId || busy !== null}
+            disabled={readOnly || !draftVersionId || busy !== null}
             onClick={() => setGateDialogMode('publish')}
           >
             {t('settings.universalSkills.openGateDialog')}
@@ -505,7 +556,7 @@ function ProfileEditorBody() {
           <Button
             type="button"
             variant="outline"
-            disabled={!publishedVersionId || busy !== null}
+            disabled={readOnly || !publishedVersionId || busy !== null}
             onClick={() => setGateDialogMode('promotion')}
           >
             {t('settings.universalSkills.openPromotionGateDialog')}
@@ -513,7 +564,7 @@ function ProfileEditorBody() {
           <Button
             type="button"
             variant="outline"
-            disabled={busy !== null || !publishGateValid}
+            disabled={readOnly || busy !== null || !publishGateValid}
             onClick={() => void handlePublish()}
           >
             {busy === 'publish' ? t('messages.loading') : t('settings.universalSkills.publishProfile')}
@@ -521,7 +572,7 @@ function ProfileEditorBody() {
           <Button
             type="button"
             variant="outline"
-            disabled={!canEnableRuntime}
+            disabled={readOnly || !canEnableRuntime}
             onClick={() => void handleEnableRuntime()}
           >
             {busy === 'enable' ? t('messages.loading') : t('settings.universalSkills.enableRuntime')}
@@ -529,7 +580,7 @@ function ProfileEditorBody() {
           <Button
             type="button"
             variant="destructive"
-            disabled={busy !== null || !runtimeEnabled}
+            disabled={readOnly || busy !== null || !runtimeEnabled}
             onClick={() => void handleDisableRuntime()}
           >
             {busy === 'disable' ? t('messages.loading') : t('settings.universalSkills.disableRuntime')}

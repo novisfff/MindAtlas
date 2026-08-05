@@ -19,6 +19,10 @@ import { toast } from 'sonner'
 import { Logo } from '@/components/Logo'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
+import {
+  AssistantRuntimeActivationCard,
+  useAssistantReadinessDiagnosticsQuery,
+} from '@/features/assistant-runtime'
 import { initializationKeys, useInitializationDefaultsQuery, useInitializationStatusQuery, useInitializeSystemMutation } from '../queries'
 import {
   setPersistedInitializationStatus,
@@ -666,15 +670,26 @@ export function SystemInitializationPage() {
   const [discoveredModels, setDiscoveredModels] = useState<string[]>([])
   const [discoveredEmbeddingModels, setDiscoveredEmbeddingModels] = useState<string[]>([])
   const [discoverError, setDiscoverError] = useState<string | null>(null)
+  // Setup token + operator password stay in component state only — never storage/Zustand/URL.
+  const [setupToken, setSetupToken] = useState('')
+  const [operatorPassword, setOperatorPassword] = useState('')
   const [rerankMode, setRerankMode] = useState<'enabled' | 'disabled'>(() => {
     return resolveRerankMode(useInitializationWizardStore.getState().runtimeConfigDraft.knowledgeGraph)
   })
+  // Post-init activation state lives in component state only (never storage).
+  const [pendingActivation, setPendingActivation] = useState<{
+    preparedRolloutRevisionId: string
+    rolloutControlRevision: number
+  } | null>(null)
+  const diagnosticsQuery = useAssistantReadinessDiagnosticsQuery(Boolean(pendingActivation))
 
   useEffect(() => {
-    if (statusQuery.data?.initialized) {
+    // Only auto-leave when already initialized AND we are not holding a local
+    // pending activation card from this session's successful initialize call.
+    if (statusQuery.data?.initialized && !pendingActivation) {
       navigate('/dashboard', { replace: true })
     }
-  }, [navigate, statusQuery.data])
+  }, [navigate, pendingActivation, statusQuery.data])
 
   useEffect(() => {
     if (!defaultsQuery.data) return
@@ -822,6 +837,22 @@ export function SystemInitializationPage() {
       }
     }
 
+    // Exact Unicode password: no trim; minimum 12 code points.
+    if ([...operatorPassword].length < 12) {
+      return {
+        step: 5,
+        message: t('initialization.validation.operatorPassword'),
+      }
+    }
+
+    // Setup token: exact value, at least 32 UTF-8 bytes, never trimmed for transport.
+    if (new TextEncoder().encode(setupToken).length < 32) {
+      return {
+        step: 5,
+        message: t('initialization.validation.setupToken'),
+      }
+    }
+
     return null
   }
 
@@ -846,30 +877,39 @@ export function SystemInitializationPage() {
       return
     }
 
+    // Capture secrets into locals so finally can clear component state even on failure.
+    const setupTokenForRequest = setupToken
+    const operatorPasswordForRequest = operatorPassword
+
     try {
       const storeState = useInitializationWizardStore.getState()
       const result = await initializeMutation.mutateAsync({
-        locale,
-        aiCredential: {
-          name: aiCredential.name.trim(),
-          baseUrl: aiCredential.baseUrl.trim(),
-          apiKey: aiCredential.apiKey.trim(),
+        payload: {
+          locale,
+          // Exact password — never trim or normalize.
+          operatorPassword: operatorPasswordForRequest,
+          aiCredential: {
+            name: aiCredential.name.trim(),
+            baseUrl: aiCredential.baseUrl.trim(),
+            apiKey: aiCredential.apiKey.trim(),
+          },
+          llmModel: {
+            name: llmModelName.trim(),
+          },
+          entryTypes: entryTypes.map((item) => ({
+            code: item.origin === 'default' ? item.code : undefined,
+            name: item.name.trim(),
+            description: item.description?.trim() || undefined,
+            color: item.color?.trim() || undefined,
+            icon: item.icon?.trim() || undefined,
+            graphEnabled: true,
+            aiEnabled: true,
+            enabled: true,
+            origin: item.origin,
+          })),
+          runtimeConfig: buildRuntimeConfigPayload(storeState, locale),
         },
-        llmModel: {
-          name: llmModelName.trim(),
-        },
-        entryTypes: entryTypes.map((item) => ({
-          code: item.origin === 'default' ? item.code : undefined,
-          name: item.name.trim(),
-          description: item.description?.trim() || undefined,
-          color: item.color?.trim() || undefined,
-          icon: item.icon?.trim() || undefined,
-          graphEnabled: true,
-          aiEnabled: true,
-          enabled: true,
-          origin: item.origin,
-        })),
-        runtimeConfig: buildRuntimeConfigPayload(storeState, locale),
+        setupToken: setupTokenForRequest,
       })
 
       resetDraft(result.locale)
@@ -881,14 +921,31 @@ export function SystemInitializationPage() {
       })
       queryClient.setQueryData(initializationKeys.status, {
         initialized: true,
-        legacyAutoCompleted: false,
         locale: result.locale,
       })
+      // Initialization response sets session cookies; refresh session probe for OperatorGate.
       await queryClient.invalidateQueries({ queryKey: initializationKeys.status })
+      await queryClient.invalidateQueries({ queryKey: ['operator-session'] })
       toast.success(t('initialization.success'))
-      navigate('/dashboard', { replace: true })
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : t('initialization.submitError'))
+
+      // Initialization prepares a rollout but never activates it. Keep the Plan 1
+      // session and show the explicit activation card with returned IDs in state only.
+      if (result.preparedRolloutRevisionId) {
+        setPendingActivation({
+          preparedRolloutRevisionId: result.preparedRolloutRevisionId,
+          rolloutControlRevision: result.rolloutControlRevision ?? 0,
+        })
+      } else {
+        navigate('/dashboard', { replace: true })
+      }
+    } catch {
+      // Never echo server/error text that might reflect secret material.
+      toast.error(t('initialization.submitError'))
+    } finally {
+      // Always clear secrets from component state and RQ mutation variables after an attempt.
+      setSetupToken('')
+      setOperatorPassword('')
+      initializeMutation.reset()
     }
   }
 
@@ -1573,10 +1630,103 @@ export function SystemInitializationPage() {
             {t('initialization.review.automationNote')}
           </p>
         </div>
+
+        <div className="rounded-[24px] border border-slate-200 bg-white p-5 shadow-sm">
+          <p className="text-sm font-semibold text-slate-900">
+            {t('initialization.review.operatorAccessTitle')}
+          </p>
+          <p className="mt-2 text-sm leading-6 text-slate-600">
+            {t('initialization.review.operatorAccessDescription')}
+          </p>
+          <div className="mt-5 grid gap-5">
+            <div className="space-y-2">
+              <Label>{t('initialization.review.fields.setupToken')}</Label>
+              <input
+                type="password"
+                autoComplete="off"
+                value={setupToken}
+                onChange={(event) => setSetupToken(event.target.value)}
+                className={FIELD_CLASSNAME}
+                placeholder={t('initialization.review.placeholders.setupToken')}
+                disabled={initializeMutation.isPending}
+              />
+              <p className="text-xs leading-5 text-slate-500">
+                {t('initialization.review.hints.setupToken')}
+              </p>
+            </div>
+            <div className="space-y-2">
+              <Label>{t('initialization.review.fields.operatorPassword')}</Label>
+              <input
+                type="password"
+                autoComplete="new-password"
+                value={operatorPassword}
+                onChange={(event) => setOperatorPassword(event.target.value)}
+                className={FIELD_CLASSNAME}
+                placeholder={t('initialization.review.placeholders.operatorPassword')}
+                disabled={initializeMutation.isPending}
+              />
+              <p className="text-xs leading-5 text-slate-500">
+                {t('initialization.review.hints.operatorPassword')}
+              </p>
+            </div>
+          </div>
+        </div>
       </div>
     )
   }
   const stepLabel = t(`initialization.steps.${STEP_KEYS[step]}.label`)
+
+  if (pendingActivation) {
+    return (
+      <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(59,130,246,0.18),_transparent_32%),radial-gradient(circle_at_top_right,_rgba(15,23,42,0.08),_transparent_28%),linear-gradient(180deg,_#f8fbff,_#f5f7fb_45%,_#eef2f9)] px-4 py-6 sm:px-6 lg:px-8">
+        <div className="mx-auto max-w-3xl space-y-6">
+          <div className="overflow-hidden rounded-[32px] border border-white/70 bg-white/88 p-6 shadow-[0_40px_120px_rgba(15,23,42,0.14)] backdrop-blur-xl sm:p-8">
+            <div className="mb-6 flex items-center gap-3">
+              <div className="rounded-2xl bg-slate-900 p-3 text-white">
+                <Logo className="h-7 w-7" />
+              </div>
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+                  {t('initialization.eyebrow')}
+                </p>
+                <h1 className="text-xl font-semibold text-slate-900">
+                  {t('initialization.activationTitle', 'Activate assistant runtime')}
+                </h1>
+                <p className="text-sm text-slate-600">
+                  {t(
+                    'initialization.activationDescription',
+                    'Initialization prepared a Main Agent rollout. Activate it after a compatible worker is online.',
+                  )}
+                </p>
+              </div>
+            </div>
+            <AssistantRuntimeActivationCard
+              preparedRolloutRevisionId={pendingActivation.preparedRolloutRevisionId}
+              rolloutControlRevision={pendingActivation.rolloutControlRevision}
+              diagnostics={diagnosticsQuery.data ?? null}
+              onActivated={() => {
+                setPendingActivation(null)
+                navigate('/dashboard', { replace: true })
+              }}
+            />
+            <div className="mt-4 flex justify-end">
+              <Button
+                type="button"
+                variant="outline"
+                className="rounded-2xl"
+                onClick={() => {
+                  setPendingActivation(null)
+                  navigate('/dashboard', { replace: true })
+                }}
+              >
+                {t('initialization.activationSkip', 'Continue without activating')}
+              </Button>
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(59,130,246,0.18),_transparent_32%),radial-gradient(circle_at_top_right,_rgba(15,23,42,0.08),_transparent_28%),linear-gradient(180deg,_#f8fbff,_#f5f7fb_45%,_#eef2f9)] px-4 py-6 sm:px-6 lg:px-8">

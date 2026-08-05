@@ -8,22 +8,44 @@ convergence, and gap-free sequence allocation under real row locks.
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 import threading
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Iterator
 
 import pytest
 from sqlalchemy import create_engine, text
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from tests._bootstrap import bootstrap_backend_imports, reset_caches
+from tests.postgres_destructive_guard import reset_disposable_public_schema
 
 bootstrap_backend_imports()
 reset_caches()
 
 _POSTGRES_URL = os.environ.get("MINDATLAS_TEST_POSTGRES_URL", "").strip()
+_REQUIRE_POSTGRES = os.environ.get("MINDATLAS_REQUIRE_POSTGRES", "").strip() in {
+    "1",
+    "true",
+    "TRUE",
+    "yes",
+    "YES",
+}
+
+PLAN2_HEAD = "b6e2d4f8a901"
+_BACKEND_DIR = Path(__file__).resolve().parents[1]
+
+if not _POSTGRES_URL and _REQUIRE_POSTGRES:
+    pytest.fail(
+        "MINDATLAS_TEST_POSTGRES_URL not set while MINDATLAS_REQUIRE_POSTGRES=1; "
+        "durable Run event PostgreSQL gate must hard-fail instead of skip",
+        pytrace=False,
+    )
 
 pytestmark = pytest.mark.skipif(
     not _POSTGRES_URL,
@@ -44,10 +66,34 @@ def _as_sqlalchemy_url(url: str) -> str:
     return url
 
 
+def _configure_database_env(url: str) -> None:
+    os.environ["DATABASE_URL"] = url
+    os.environ.setdefault("APP_ENV", "test")
+    os.environ.setdefault("MINDATLAS_PLAN10_B2_TEST_OVERRIDE", "1")
+    reset_caches()
+    try:
+        from app.config import get_settings
+
+        get_settings.cache_clear()
+    except Exception:
+        pass
+
+
+def _alembic_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env["DATABASE_URL"] = _POSTGRES_URL
+    env["APP_ENV"] = "test"
+    env["MINDATLAS_PLAN10_B2_TEST_OVERRIDE"] = "1"
+    return env
+
+
 @contextmanager
-def _engine():
+def _engine() -> Iterator[Engine]:
     assert _POSTGRES_URL
-    engine = create_engine(_as_sqlalchemy_url(_POSTGRES_URL), future=True, pool_pre_ping=True)
+    _configure_database_env(_POSTGRES_URL)
+    engine = create_engine(
+        _as_sqlalchemy_url(_POSTGRES_URL), future=True, pool_pre_ping=True
+    )
     try:
         yield engine
     finally:
@@ -64,33 +110,69 @@ def _session(engine) -> Iterator[Session]:
         session.close()
 
 
-def _ensure_schema(engine) -> None:
-    """Create durable tables if missing (CI may already have migrated)."""
-    from app.database import Base
-    import app.assistant.models  # noqa: F401
-    import app.assistant.durable.models  # noqa: F401
+def _drop_public_schema(engine: Engine) -> None:
+    reset_disposable_public_schema(engine)
 
-    Base.metadata.create_all(bind=engine)
+
+def _upgrade_to_plan2_head() -> None:
+    completed = subprocess.run(
+        [sys.executable, "-m", "alembic", "upgrade", PLAN2_HEAD],
+        cwd=str(_BACKEND_DIR),
+        env=_alembic_env(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise AssertionError(
+            f"alembic upgrade {PLAN2_HEAD} failed:\n"
+            f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
+        )
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _current_plan2_schema() -> Iterator[None]:
+    with _engine() as engine:
+        _drop_public_schema(engine)
+    _upgrade_to_plan2_head()
+    yield
 
 
 def _make_run(session: Session, *, status: str = "queued", **kwargs):
-    from app.assistant.models import AssistantChatRun, Conversation
+    import app.assistant.runtime.models  # noqa: F401
+    from app.assistant.models import AssistantChatRun
+    from tests.main_agent_postgres_support import insert_complete_main_agent_run
 
-    conv = Conversation(title=f"pg-{uuid.uuid4().hex[:10]}")
-    session.add(conv)
-    session.flush()
-    run = AssistantChatRun(
-        conversation_id=conv.id,
+    engine = session.get_bind()
+    assert isinstance(engine, Engine)
+    run_id = insert_complete_main_agent_run(
+        engine,
         status=status,
-        runtime_kind="main_agent",
-        runtime_contract_version=1,
-        required_app_build_revision="build-pg-1",
         state_revision=int(kwargs.pop("state_revision", 0)),
         last_event_seq=int(kwargs.pop("last_event_seq", 0)),
-        memory_commit_status=kwargs.pop("memory_commit_status", "pending"),
-        **kwargs,
+        checkpoint_seq=int(kwargs.pop("checkpoint_seq", 0)),
+        runtime_contract_version=int(kwargs.pop("runtime_contract_version", 1)),
+        required_checkpoint_codec_version=int(
+            kwargs.pop("required_checkpoint_codec_version", 3)
+        ),
+        required_capability_feature_digest=str(
+            kwargs.pop("required_capability_feature_digest", "f" * 64)
+        ),
+        required_app_build_revision=str(
+            kwargs.pop("required_app_build_revision", "build-pg-1")
+        ),
+        runtime_closure_digest=str(
+            kwargs.pop("runtime_closure_digest", "9" * 64)
+        ),
+        capability_ledger_mode=str(
+            kwargs.pop("capability_ledger_mode", "enforced")
+        ),
+        memory_commit_status=str(kwargs.pop("memory_commit_status", "pending")),
     )
-    session.add(run)
+    run = session.get(AssistantChatRun, run_id)
+    assert run is not None
+    for field, value in kwargs.items():
+        setattr(run, field, value)
     session.commit()
     session.refresh(run)
     return run
@@ -119,7 +201,6 @@ def test_two_session_claim_race_one_winner():
     )
 
     with _engine() as engine:
-        _ensure_schema(engine)
         with _session(engine) as s0:
             run = _make_run(s0, status="queued")
             run_id = run.id
@@ -183,7 +264,6 @@ def test_two_session_stop_vs_result_one_legal_terminal():
     )
 
     with _engine() as engine:
-        _ensure_schema(engine)
         with _session(engine) as s0:
             run = _seed_running(s0)
             run_id = run.id
@@ -290,7 +370,6 @@ def test_two_session_stop_vs_ready_for_memory():
     )
 
     with _engine() as engine:
-        _ensure_schema(engine)
         with _session(engine) as s0:
             run = _seed_running(s0)
             run_id = run.id
@@ -425,7 +504,6 @@ def test_two_session_event_key_identical_and_conflict():
     from app.assistant.models import AssistantChatRun, AssistantChatRunEvent
 
     with _engine() as engine:
-        _ensure_schema(engine)
         with _session(engine) as s0:
             run = _seed_running(s0)
             run_id = run.id
@@ -515,7 +593,6 @@ def test_two_session_concurrent_different_event_keys_gap_free():
     from app.assistant.models import AssistantChatRun, AssistantChatRunEvent
 
     with _engine() as engine:
-        _ensure_schema(engine)
         with _session(engine) as s0:
             run = _seed_running(s0)
             run_id = run.id
@@ -598,7 +675,6 @@ def test_two_session_duplicate_cancel_finalizer():
     )
 
     with _engine() as engine:
-        _ensure_schema(engine)
         with _session(engine) as s0:
             now = datetime.now(timezone.utc)
             run = _make_run(
@@ -681,7 +757,6 @@ def test_child_append_rollback_no_seq_gap():
     from app.assistant.models import AssistantChatRun, AssistantChatRunEvent
 
     with _engine() as engine:
-        _ensure_schema(engine)
         with _session(engine) as s0:
             run = _seed_running(s0)
             run_id = run.id
@@ -741,7 +816,6 @@ def test_terminal_immutability_postgres():
     )
 
     with _engine() as engine:
-        _ensure_schema(engine)
         with _session(engine) as s0:
             run = _make_run(s0, status="failed", state_revision=9)
             run_id = run.id

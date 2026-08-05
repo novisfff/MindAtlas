@@ -53,10 +53,11 @@ from app.assistant.skills.schemas import (
     CreateSkillPackageCommand,
     DEFAULT_MAIN_AGENT_DISPLAY_NAME,
     DEFAULT_MAIN_AGENT_PROFILE_KEY,
-    MainAgentProfileSnapshotV1,
+    MainAgentProfileSnapshotV2,
     MainAgentProfileSummary,
     MainAgentProfileVersionDetail,
     MainAgentProfileVersionSummary,
+    ProfileSchemaNotPublishable,
     PublishMainAgentProfileCommand,
     PublishSkillVersionCommand,
     SaveMainAgentProfileDraftCommand,
@@ -67,7 +68,9 @@ from app.assistant.skills.schemas import (
     SkillResourceMetadata,
     SkillVersionDetail,
     SkillVersionSummary,
-    default_main_agent_profile_snapshot,
+    default_main_agent_profile_snapshot_v2,
+    parse_main_agent_profile_snapshot_for_read,
+    require_production_profile_v2,
 )
 from app.common.exceptions import ApiException
 
@@ -1951,7 +1954,7 @@ class MainAgentProfileService:
         if existing is not None:
             return self._profile_summary(existing)
 
-        snapshot = default_main_agent_profile_snapshot()
+        snapshot = default_main_agent_profile_snapshot_v2()
         payload = snapshot.normalized_payload()
         digest = snapshot.content_digest()
 
@@ -2061,7 +2064,13 @@ class MainAgentProfileService:
             payload = snapshot.normalized_payload()
             digest = snapshot.content_digest()
             version_name = command.version_name or "draft"
-            origin = command.origin
+            # Command-level origin is api|system_bootstrap. Persist only values
+            # allowed by ck_assistant_main_agent_profile_version_origin
+            # (bootstrap|api|legacy). Map system_bootstrap → bootstrap at write.
+            command_origin = command.origin
+            durable_origin = (
+                "bootstrap" if command_origin == "system_bootstrap" else command_origin
+            )
             source_ref = command.source_ref
             request_id = (command.request_id or "").strip()
             if not request_id:
@@ -2076,7 +2085,7 @@ class MainAgentProfileService:
             cas_payload = {
                 "profile_id": str(profile_id),
                 "version_name": version_name,
-                "origin": origin,
+                "origin": durable_origin,
                 "content_digest": digest,
                 "expected_aggregate_revision": int(
                     command.expected_aggregate_revision
@@ -2129,13 +2138,10 @@ class MainAgentProfileService:
                 )
 
             # Migration ownership:
-            # - origin=legacy keeps/sets migration_state=shadow (bootstrap→shadow)
-            # - origin=api promotes bootstrap|shadow → native (administrator ownership)
+            # - command origin=system_bootstrap keeps bootstrap state for seed/init
+            # - command origin=api promotes bootstrap|shadow → native (admin ownership)
             # - never demote native/cutover via either path
-            if origin == "legacy":
-                if profile.migration_state == "bootstrap":
-                    profile.migration_state = "shadow"
-            elif origin == "api":
+            if command_origin == "api":
                 if profile.migration_state in {"bootstrap", "shadow"}:
                     profile.migration_state = "native"
 
@@ -2162,7 +2168,7 @@ class MainAgentProfileService:
                 sequence_no=next_seq,
                 version_name=version_name,
                 version_source="save",
-                origin=origin,
+                origin=durable_origin,
                 source_draft_version_id=None,
                 snapshot=payload,
                 content_digest=digest,
@@ -2300,7 +2306,8 @@ class MainAgentProfileService:
                 )
 
             # Re-validate the whole snapshot inside the transaction.
-            snapshot = self._validate_snapshot(draft.snapshot)
+            # Production publish is V2-only; historical V1 drafts fail closed.
+            snapshot = self._production_snapshot_from_version(draft)
             self._assert_publishable_control_keys(snapshot.control_capability_keys)
 
             payload = snapshot.normalized_payload()
@@ -2523,7 +2530,7 @@ class MainAgentProfileService:
                         code=40993,
                         message="published profile content digest drifted during enable",
                     )
-                snapshot = self._validate_snapshot(version.snapshot)
+                snapshot = self._production_snapshot_from_version(version)
                 self._assert_publishable_control_keys(snapshot.control_capability_keys)
                 if "assistant_chat" not in set(snapshot.supported_entrypoints):
                     raise ApiException(
@@ -2657,16 +2664,50 @@ class MainAgentProfileService:
             )
 
     def _validate_snapshot(
-        self, snapshot: MainAgentProfileSnapshotV1 | dict[str, Any]
-    ) -> MainAgentProfileSnapshotV1:
+        self, snapshot: MainAgentProfileSnapshotV2 | dict[str, Any]
+    ) -> MainAgentProfileSnapshotV2:
+        """Validate a draft/command snapshot. Production mutations are V2-only."""
         try:
-            if isinstance(snapshot, MainAgentProfileSnapshotV1):
+            if isinstance(snapshot, MainAgentProfileSnapshotV2):
                 # Re-parse through model_validate to enforce invariants on copies.
-                return MainAgentProfileSnapshotV1.model_validate(
+                return MainAgentProfileSnapshotV2.model_validate(
                     snapshot.model_dump(by_alias=True)
                 )
-            return MainAgentProfileSnapshotV1.model_validate(snapshot)
+            if isinstance(snapshot, dict):
+                parsed = parse_main_agent_profile_snapshot_for_read(snapshot)
+                return require_production_profile_v2(parsed)
+            raise TypeError("snapshot must be MainAgentProfileSnapshotV2 or dict")
+        except ProfileSchemaNotPublishable as exc:
+            raise ApiException(
+                status_code=422,
+                code=42294,
+                message="Profile schema V2 is required for production operations",
+                details={"reasonCode": exc.reason_code},
+            ) from exc
         except Exception as exc:  # pydantic ValidationError + ValueError
+            raise ApiException(
+                status_code=422,
+                code=42294,
+                message=f"invalid main agent profile snapshot: {exc}",
+            ) from exc
+
+    def _production_snapshot_from_version(
+        self, version: AssistantMainAgentProfileVersion
+    ) -> MainAgentProfileSnapshotV2:
+        """Parse a stored version for production ops; V1 fails with unsupported schema."""
+        try:
+            parsed = parse_main_agent_profile_snapshot_for_read(
+                dict(version.snapshot or {})
+            )
+            return require_production_profile_v2(parsed)
+        except ProfileSchemaNotPublishable as exc:
+            raise ApiException(
+                status_code=422,
+                code=42294,
+                message="Profile schema V2 is required for production operations",
+                details={"reasonCode": exc.reason_code},
+            ) from exc
+        except Exception as exc:
             raise ApiException(
                 status_code=422,
                 code=42294,

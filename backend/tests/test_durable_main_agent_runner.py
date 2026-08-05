@@ -51,27 +51,31 @@ def _register_worker(db, *, worker_id: str = "worker-1", build: str = BUILD):
     return identity
 
 
-def _make_legacy_run(db, *, status: str = "queued", **kwargs: Any):
-    from app.assistant.models import AssistantChatRun, Conversation, Message
+def _make_main_agent_run(db, *, status: str = "queued", **kwargs: Any):
+    from app.assistant.models import Conversation, Message
+    from tests.assistant_runtime_support import make_main_agent_run
 
-    conv = Conversation(title=f"t-{uuid.uuid4().hex[:8]}")
-    db.add(conv)
-    db.flush()
-    user = Message(conversation_id=conv.id, role="user", content="hi")
-    assistant = Message(conversation_id=conv.id, role="assistant", content="")
-    db.add_all([user, assistant])
-    db.flush()
-    run = AssistantChatRun(
-        conversation_id=conv.id,
-        user_message_id=user.id,
-        assistant_message_id=assistant.id,
+    conv = kwargs.pop("conversation", None)
+    user = kwargs.pop("user_message", None)
+    assistant = kwargs.pop("assistant_message", None)
+    if conv is None:
+        conv = Conversation(title=f"t-{uuid.uuid4().hex[:8]}")
+        db.add(conv)
+        db.flush()
+    if user is None or assistant is None:
+        user = Message(conversation_id=conv.id, role="user", content="hi")
+        assistant = Message(conversation_id=conv.id, role="assistant", content="")
+        db.add_all([user, assistant])
+        db.flush()
+    run = make_main_agent_run(
+        db,
         status=status,
-        runtime_kind=kwargs.pop("runtime_kind", "legacy"),
+        build_revision=BUILD,
+        conversation=conv,
+        user_message=user,
+        assistant_message=assistant,
         **kwargs,
     )
-    db.add(run)
-    db.commit()
-    db.refresh(run)
     return run, conv, user, assistant
 
 
@@ -88,6 +92,7 @@ class DurableMainAgentAdmissionTests(unittest.TestCase):
     def test_create_run_accepts_immutable_runtime_kind_main_agent(self) -> None:
         from app.assistant.models import Conversation, Message
         from app.assistant.run_service import AssistantChatRunService
+        from tests.assistant_runtime_support import seed_main_agent_runtime
 
         conv = Conversation(title="admit")
         self.db.add(conv)
@@ -97,15 +102,13 @@ class DurableMainAgentAdmissionTests(unittest.TestCase):
         self.db.add_all([user, assistant])
         self.db.commit()
 
+        seeded = seed_main_agent_runtime(self.db, build_revision=BUILD)
         svc = AssistantChatRunService(self.db)
         run = svc.create_run(
             conversation=conv,
             user_message=user,
             assistant_message=assistant,
-            runtime_kind="main_agent",
-            runtime_contract_version=1,
-            required_app_build_revision=BUILD,
-            memory_commit_status="pending",
+            **seeded.as_create_run_kwargs(),
         )
         self.assertEqual(run.runtime_kind, "main_agent")
         self.assertEqual(run.runtime_contract_version, 1)
@@ -113,11 +116,12 @@ class DurableMainAgentAdmissionTests(unittest.TestCase):
         self.assertEqual(run.status, "queued")
         self.assertEqual(run.memory_commit_status, "pending")
 
-    def test_create_run_legacy_default_unchanged(self) -> None:
+    def test_create_run_requires_frozen_runtime_fields(self) -> None:
+        """create_run no longer defaults to legacy; missing frozen fields fail."""
         from app.assistant.models import Conversation, Message
         from app.assistant.run_service import AssistantChatRunService
 
-        conv = Conversation(title="legacy")
+        conv = Conversation(title="no-legacy-default")
         self.db.add(conv)
         self.db.flush()
         user = Message(conversation_id=conv.id, role="user", content="hi")
@@ -126,41 +130,38 @@ class DurableMainAgentAdmissionTests(unittest.TestCase):
         self.db.commit()
 
         svc = AssistantChatRunService(self.db)
-        run = svc.create_run(
-            conversation=conv,
-            user_message=user,
-            assistant_message=assistant,
-        )
-        self.assertEqual(run.runtime_kind, "legacy")
-        self.assertIsNone(run.runtime_contract_version)
-        self.assertIsNone(run.required_app_build_revision)
+        with self.assertRaises(TypeError):
+            svc.create_run(
+                conversation=conv,
+                user_message=user,
+                assistant_message=assistant,
+            )
 
     def test_fallback_impossible_after_durable_run_exists(self) -> None:
         """Once a main_agent Run is inserted, Legacy fallback path is forbidden."""
         from app.assistant.durable.runner import assert_no_legacy_fallback
 
-        run, _, _, _ = _make_legacy_run(
+        run, _, _, _ = _make_main_agent_run(
             self.db,
-            runtime_kind="main_agent",
-            runtime_contract_version=1,
-            required_app_build_revision=BUILD,
             memory_commit_status="pending",
         )
         with self.assertRaises(RuntimeError) as ctx:
             assert_no_legacy_fallback(run)
         self.assertIn("main_agent", str(ctx.exception).lower())
 
-    def test_legacy_run_allows_legacy_path(self) -> None:
-        from app.assistant.durable.runner import assert_no_legacy_fallback
+    def test_non_main_agent_executor_rejected(self) -> None:
+        from app.assistant.durable.runner import require_main_agent_run
+        from types import SimpleNamespace
 
-        run, _, _, _ = _make_legacy_run(self.db, runtime_kind="legacy")
-        # Does not raise for legacy.
-        assert_no_legacy_fallback(run)
+        fake = SimpleNamespace(runtime_kind="legacy", id=uuid.uuid4())
+        with self.assertRaises(RuntimeError):
+            require_main_agent_run(fake)
 
     def test_api_queues_main_agent_without_background_thread(self) -> None:
-        """chat_stream admission selects main_agent and never starts daemon thread."""
+        """chat_stream admission never starts daemon thread; uses runtime admission."""
         from app.assistant.models import Conversation
         from app.assistant.service import AssistantService
+        from app.assistant.runtime.admission import AssistantAdmissionError
 
         _register_worker(self.db)
         conv = Conversation(title="queue-ma")
@@ -173,50 +174,23 @@ class DurableMainAgentAdmissionTests(unittest.TestCase):
         def _capture_start(**kwargs: Any) -> None:
             started.append(kwargs)
 
-        with (
-            patch.object(svc, "_start_background_run", side_effect=_capture_start),
-            patch(
-                "app.assistant.service.get_settings",
-            ) as gs,
-        ):
-            settings = MagicMock()
-            settings.assistant_runtime_mode = "main_agent"
-            settings.app_build_revision = BUILD
-            settings.assistant_worker_registration_ttl_sec = 20
-            gs.return_value = settings
-
-            # Force durable admission path to choose main_agent without full profile.
-            with patch(
-                "app.assistant.durable.admission.admit_and_select_runtime",
-                return_value=(
-                    "main_agent",
-                    None,
-                    {
-                        "runtime_kind": "main_agent",
-                        "runtime_contract_version": 1,
-                        "required_app_build_revision": BUILD,
-                        "memory_commit_status": "pending",
-                    },
-                ),
-            ):
-                # Drain generator until first yield attempt — may fail on stream,
-                # but create_run + start decision must complete first.
-                try:
-                    gen = svc.chat_stream(conv.id, "hello", stream_output=False)
-                    # Consume first event or until error.
-                    next(gen, None)
-                except Exception:
-                    pass
+        with patch.object(svc, "_start_background_run", side_effect=_capture_start):
+            try:
+                gen = svc.chat_stream(conv.id, "hello", stream_output=False)
+                next(gen, None)
+            except Exception:
+                pass
 
         # Main Agent must not invoke background daemon start.
         self.assertEqual(started, [])
 
     def test_rejected_admission_leaves_no_orphan_messages_or_run(self) -> None:
         from app.assistant.models import AssistantChatRun, Conversation, Message
+        from app.assistant.runtime.admission import AssistantAdmissionError
         from app.assistant.service import AssistantService
         from app.common.exceptions import ApiException
 
-        conv = Conversation(title="queue-legacy")
+        conv = Conversation(title="queue-fail")
         self.db.add(conv)
         self.db.commit()
 
@@ -229,8 +203,8 @@ class DurableMainAgentAdmissionTests(unittest.TestCase):
         with (
             patch.object(svc, "_start_background_run", side_effect=_capture_start),
             patch(
-                "app.assistant.durable.admission.admit_and_select_runtime",
-                return_value=("legacy", "rollout_assigned_legacy", {}),
+                "app.assistant.runtime.admission.AssistantChatAdmissionService.admit_and_create",
+                side_effect=AssistantAdmissionError("runtime_not_ready"),
             ),
         ):
             with self.assertRaises(ApiException) as ctx:
@@ -283,20 +257,15 @@ class DurableMaterializeBaseTests(unittest.TestCase):
         assistant = Message(conversation_id=conv.id, role="assistant", content="")
         self.db.add_all([user, assistant])
         self.db.flush()
-        run = AssistantChatRun(
-            conversation_id=conv.id,
-            user_message_id=user.id,
-            assistant_message_id=assistant.id,
+        run = _make_main_agent_run(
+            self.db,
             status="queued",
-            runtime_kind="main_agent",
-            runtime_contract_version=1,
-            required_app_build_revision=BUILD,
-            memory_commit_status="pending",
+            conversation=conv,
+            user_message=user,
+            assistant_message=assistant,
             state_revision=0,
-        )
-        self.db.add(run)
-        self.db.commit()
-        self.db.refresh(run)
+            memory_commit_status="pending",
+        )[0]
 
         # Claim to running first.
         repo = DurableRunRepository(self.db)
@@ -397,20 +366,15 @@ class DurableExecutionBoundaryTests(unittest.TestCase):
         assistant = Message(conversation_id=conv.id, role="assistant", content="")
         self.db.add_all([user, assistant])
         self.db.flush()
-        run = AssistantChatRun(
-            conversation_id=conv.id,
-            user_message_id=user.id,
-            assistant_message_id=assistant.id,
+        run = _make_main_agent_run(
+            self.db,
             status="queued",
-            runtime_kind="main_agent",
-            runtime_contract_version=1,
-            required_app_build_revision=BUILD,
-            memory_commit_status="pending",
+            conversation=conv,
+            user_message=user,
+            assistant_message=assistant,
             state_revision=0,
-        )
-        self.db.add(run)
-        self.db.commit()
-        self.db.refresh(run)
+            memory_commit_status="pending",
+        )[0]
 
         repo = DurableRunRepository(self.db)
         claimed = repo.claim_queued(
@@ -445,11 +409,13 @@ class DurableExecutionBoundaryTests(unittest.TestCase):
     def test_fresh_enforced_claim_uses_real_main_agent_service_path(self) -> None:
         from types import SimpleNamespace
 
+        from app.assistant.durable.materialize import materialize_base_run_state
         from app.assistant.durable.recovery import RecoveryDecision
         from app.assistant.durable.leases import ClaimedLease
         from app.assistant.durable.repository import DurableRunRepository, LeaseToken
         from app.assistant.durable.runner import MainAgentRunExecutor
         from app.assistant.models import AssistantChatRun, Conversation, Message
+        from app.assistant.provider_loop.messages import ProviderUserMessage
 
         conv = Conversation(title="enforced")
         self.db.add(conv)
@@ -458,287 +424,16 @@ class DurableExecutionBoundaryTests(unittest.TestCase):
         assistant = Message(conversation_id=conv.id, role="assistant", content="")
         self.db.add_all([user, assistant])
         self.db.flush()
-        run = AssistantChatRun(
-            conversation_id=conv.id,
-            user_message_id=user.id,
-            assistant_message_id=assistant.id,
+        run = _make_main_agent_run(
+            self.db,
             status="queued",
-            runtime_kind="main_agent",
-            runtime_contract_version=1,
-            required_app_build_revision=BUILD,
-            memory_commit_status="pending",
-            capability_ledger_mode="enforced",
+            conversation=conv,
+            user_message=user,
+            assistant_message=assistant,
             state_revision=0,
-        )
-        self.db.add(run)
-        self.db.commit()
-        claim_result = DurableRunRepository(self.db).claim_queued(
-            run_id=run.id,
-            expected_revision=0,
-            worker_id=self.identity.worker_id,
-            lease_ttl=timedelta(seconds=30),
-        )
-        claimed = ClaimedLease(
-            run=claim_result.run,
-            lease=LeaseToken(
-                run_id=run.id,
-                worker_id=self.identity.worker_id,
-                lease_generation=int(claim_result.run.lease_generation),
-            ),
-            kind="queued",
-            state_revision=claim_result.state_revision,
-            status="running",
-        )
-
-        def _wait(_request):
-            row = self.db.get(AssistantChatRun, run.id)
-            row.status = "waiting_approval"
-            row.state_revision = int(row.state_revision) + 1
-            self.db.commit()
-            return SimpleNamespace(status="failed", reason_code="waiting")
-
-        with patch("app.assistant.main_agent.service.MainAgentService") as service:
-            service.return_value.run.side_effect = _wait
-            MainAgentRunExecutor(provider_factory=None).execute(
-                claimed=claimed,
-                decision=RecoveryDecision(
-                    kind="continue",
-                    reason_code="fresh_claim",
-                    allow_provider_io=True,
-                    allow_capability_io=True,
-                ),
-                heartbeat=lambda: True,
-                session_factory=lambda: self.db,
-            )
-
-        self.db.refresh(run)
-        self.assertEqual(run.status, "waiting_approval")
-        self.assertIsNone(run.current_checkpoint_id)
-        service.return_value.run.assert_called_once()
-
-    def test_prepare_then_started_before_provider_io(self) -> None:
-        from app.assistant.durable.checkpoints import (
-            commit_prepared_unit,
-            commit_started_unit,
-            commit_unit_result,
-        )
-        from app.assistant.durable.contracts import DurableExecutionUnitV1
-        from app.assistant.durable.models import AssistantRunCheckpoint
-
-        run, lease, rev, repo = self._seed_running_with_base()
-
-        prepared_unit = DurableExecutionUnitV1(
-            logical_unit_id="provider:round:0",
-            kind="provider_round",
-            state="prepared",
-            provider_round=0,
-            call_ids=(),
-            attempt=1,
-            reserved_budget_revision=0,
-            started_budget_revision=None,
-        )
-        prep = commit_prepared_unit(
-            self.db,
-            run_id=run.id,
-            lease=lease,
-            expected_revision=rev,
-            unit=prepared_unit,
-            phase="ready_for_provider",
-            next_action_kind="continue_provider",
-        )
-        self.assertEqual(prep.status, "running")
-        self.db.refresh(run)
-        ck = self.db.get(AssistantRunCheckpoint, run.current_checkpoint_id)
-        self.assertIsNotNone(ck)
-        # Payload must carry prepared unit without started revision.
-        from app.assistant.durable.codec import decode_checkpoint
-
-        decoded = decode_checkpoint(ck.state_payload)
-        self.assertEqual(decoded.inflight_unit.state, "prepared")
-        self.assertIsNone(decoded.inflight_unit.started_budget_revision)
-
-        started_unit = DurableExecutionUnitV1(
-            logical_unit_id="provider:round:0",
-            kind="provider_round",
-            state="started",
-            provider_round=0,
-            call_ids=(),
-            attempt=1,
-            reserved_budget_revision=0,
-            started_budget_revision=1,
-        )
-        # New budget revision for started accounting.
-        start = commit_started_unit(
-            self.db,
-            run_id=run.id,
-            lease=lease,
-            expected_revision=prep.state_revision,
-            unit=started_unit,
-            phase="ready_for_provider",
-            next_action_kind="continue_provider",
-            budget_payload={"schemaVersion": 1, "revision": 1, "providerRoundsStarted": 1},
-            budget_digest=DIGEST_B,
-            budget_revision_number=2,
-        )
-        self.db.refresh(run)
-        ck2 = self.db.get(AssistantRunCheckpoint, run.current_checkpoint_id)
-        decoded2 = decode_checkpoint(ck2.state_payload)
-        self.assertEqual(decoded2.inflight_unit.state, "started")
-        self.assertEqual(decoded2.inflight_unit.started_budget_revision, 1)
-
-        # Result clears inflight and advances phase.
-        from app.assistant.provider_loop.messages import ProviderAssistantMessage
-
-        result = commit_unit_result(
-            self.db,
-            run_id=run.id,
-            lease=lease,
-            expected_revision=start.state_revision,
-            phase="dispatching_calls",
-            next_action_kind="dispatch_calls",
-            clear_inflight=True,
-            provider_messages=(
-                ProviderAssistantMessage(role="assistant", content="ok", tool_calls=()),
-            ),
-        )
-        self.db.refresh(run)
-        ck3 = self.db.get(AssistantRunCheckpoint, run.current_checkpoint_id)
-        decoded3 = decode_checkpoint(ck3.state_payload)
-        self.assertIsNone(decoded3.inflight_unit)
-        self.assertEqual(decoded3.phase, "dispatching_calls")
-        self.assertEqual(result.status, "running")
-
-    def test_capability_not_started_before_mark_started(self) -> None:
-        """Capability group prepared has no started charge; started requires mark_started."""
-        from app.assistant.durable.checkpoints import commit_prepared_unit
-        from app.assistant.durable.contracts import DurableExecutionUnitV1
-        from app.assistant.durable.codec import decode_checkpoint
-        from app.assistant.durable.models import AssistantRunCheckpoint
-        from app.assistant.policy.recursion import build_capability_call_frame
-
-        run, lease, rev, _repo = self._seed_running_with_base()
-
-        frame = build_capability_call_frame(
-            call_id="call-1",
-            capability_type="tool",
-            domain_key="tools.search",
-            target_identity="remote-tool:search",
-            target_version_id=None,
-            binding_contract_digest=DIGEST_A,
-            owner_kind="main_agent",
-            owner_version_id=uuid.UUID(int=42),
-            capability_depth=1,
-            agent_depth=1,
-        )
-        unit = DurableExecutionUnitV1(
-            logical_unit_id="cap:group:1",
-            kind="capability_group",
-            state="prepared",
-            provider_round=0,
-            call_ids=("call-1",),
-            attempt=1,
-            reserved_budget_revision=0,
-            started_budget_revision=None,
-        )
-        prep = commit_prepared_unit(
-            self.db,
-            run_id=run.id,
-            lease=lease,
-            expected_revision=rev,
-            unit=unit,
-            phase="dispatching_calls",
-            next_action_kind="dispatch_calls",
-            capability_frames=(frame,),
-        )
-        self.db.refresh(run)
-        ck = self.db.get(AssistantRunCheckpoint, run.current_checkpoint_id)
-        decoded = decode_checkpoint(ck.state_payload)
-        self.assertEqual(decoded.inflight_unit.state, "prepared")
-        self.assertIsNone(decoded.inflight_unit.started_budget_revision)
-        self.assertEqual(decoded.capability_frames[0].call_id, "call-1")
-        self.assertEqual(prep.status, "running")
-
-    def test_completion_and_memory_units(self) -> None:
-        from app.assistant.durable.checkpoints import (
-            commit_prepared_unit,
-            commit_unit_result,
-        )
-        from app.assistant.durable.contracts import DurableExecutionUnitV1
-        from app.assistant.durable.codec import decode_checkpoint
-        from app.assistant.durable.models import AssistantRunCheckpoint
-
-        run, lease, rev, _repo = self._seed_running_with_base()
-
-        unit = DurableExecutionUnitV1(
-            logical_unit_id="completion:1",
-            kind="completion",
-            state="prepared",
-            provider_round=None,
-            call_ids=(),
-            attempt=1,
-            reserved_budget_revision=0,
-            started_budget_revision=None,
-        )
-        prep = commit_prepared_unit(
-            self.db,
-            run_id=run.id,
-            lease=lease,
-            expected_revision=rev,
-            unit=unit,
-            phase="ready_for_completion",
-            next_action_kind="complete",
-        )
-        result = commit_unit_result(
-            self.db,
-            run_id=run.id,
-            lease=lease,
-            expected_revision=prep.state_revision,
-            phase="ready_for_memory",
-            next_action_kind="memory",
-            clear_inflight=True,
-            enter_ready_for_memory=True,
-        )
-        self.db.refresh(run)
-        ck = self.db.get(AssistantRunCheckpoint, run.current_checkpoint_id)
-        decoded = decode_checkpoint(ck.state_payload)
-        self.assertEqual(decoded.phase, "ready_for_memory")
-        self.assertEqual(decoded.next_action.kind, "memory")
-        self.assertEqual(result.status, "running")
-
-    def test_scripted_runner_provider_round_end_to_end(self) -> None:
-        """MainAgentRunExecutor drives one scripted provider round via checkpoints."""
-        from app.assistant.durable.leases import ClaimedLease
-        from app.assistant.durable.materialize import materialize_base_run_state
-        from app.assistant.durable.recovery import RecoveryDecision
-        from app.assistant.durable.repository import DurableRunRepository, LeaseToken
-        from app.assistant.durable.runner import MainAgentRunExecutor
-        from app.assistant.models import AssistantChatRun, Conversation, Message
-        from app.assistant.provider_loop.messages import (
-            ProviderAssistantMessage,
-            ProviderUserMessage,
-        )
-
-        conv = Conversation(title="runner-e2e")
-        self.db.add(conv)
-        self.db.flush()
-        user = Message(conversation_id=conv.id, role="user", content="hi")
-        assistant = Message(conversation_id=conv.id, role="assistant", content="")
-        self.db.add_all([user, assistant])
-        self.db.flush()
-        run = AssistantChatRun(
-            conversation_id=conv.id,
-            user_message_id=user.id,
-            assistant_message_id=assistant.id,
-            status="queued",
-            runtime_kind="main_agent",
-            runtime_contract_version=1,
-            required_app_build_revision=BUILD,
             memory_commit_status="pending",
-            state_revision=0,
-        )
-        self.db.add(run)
-        self.db.commit()
-        self.db.refresh(run)
+            lease_generation=0,
+        )[0]
 
         repo = DurableRunRepository(self.db)
         claimed = repo.claim_queued(
@@ -959,20 +654,15 @@ class DurableSkillActivationTests(unittest.TestCase):
         assistant = Message(conversation_id=conv.id, role="assistant", content="")
         self.db.add_all([user, assistant])
         self.db.flush()
-        run = AssistantChatRun(
-            conversation_id=conv.id,
-            user_message_id=user.id,
-            assistant_message_id=assistant.id,
+        run = _make_main_agent_run(
+            self.db,
             status="queued",
-            runtime_kind="main_agent",
-            runtime_contract_version=1,
-            required_app_build_revision=BUILD,
-            memory_commit_status="pending",
+            conversation=conv,
+            user_message=user,
+            assistant_message=assistant,
             state_revision=0,
-        )
-        self.db.add(run)
-        self.db.commit()
-        self.db.refresh(run)
+            memory_commit_status="pending",
+        )[0]
         repo = DurableRunRepository(self.db)
         claimed = repo.claim_queued(
             run_id=run.id,

@@ -62,6 +62,12 @@ from app.assistant.provider_loop.messages import (
 MAX_CODEC_JSON_DEPTH: Final[int] = 64
 MAX_CODEC_JSON_BYTES: Final[int] = 256 * 1024
 SUPPORTED_CHECKPOINT_SCHEMA_VERSIONS: Final[frozenset[int]] = frozenset({1, 2, 3})
+# Release codec for Main-Agent durable CapabilityCall settlement / reconciliation.
+# Do not derive this from process configuration.
+CURRENT_CHECKPOINT_CODEC_VERSION: Final[int] = 3
+
+if CURRENT_CHECKPOINT_CODEC_VERSION not in SUPPORTED_CHECKPOINT_SCHEMA_VERSIONS:
+    raise RuntimeError("current checkpoint codec must be supported")
 
 # Exact keys (case-insensitive) that must never appear in durable JSON.
 # Intentionally exact — do not substring-match legitimate fields like
@@ -1019,6 +1025,7 @@ def checkpoint_state_digest(checkpoint: AnyCheckpoint) -> str:
 
 
 __all__ = [
+    "CURRENT_CHECKPOINT_CODEC_VERSION",
     "MAX_CODEC_JSON_BYTES",
     "MAX_CODEC_JSON_DEPTH",
     "SUPPORTED_CHECKPOINT_SCHEMA_VERSIONS",

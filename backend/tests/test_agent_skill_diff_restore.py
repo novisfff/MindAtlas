@@ -85,9 +85,9 @@ def _parse(
 
 
 def _operator(principal_id: str = "op-1"):
-    from app.assistant.skills.principal import OperatorPrincipal
+    from tests.operator_session_helpers import make_service_principal
 
-    return OperatorPrincipal(principal_id=principal_id, role="operator")
+    return make_service_principal(principal_id, role="operator")
 
 
 class SkillDiffRestoreTests(unittest.TestCase):

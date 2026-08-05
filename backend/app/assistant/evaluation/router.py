@@ -1,7 +1,7 @@
 """Plan 09 evaluation / publish-gate HTTP surface.
 
-Mounted under the same trusted-dev guard as skill admin. Production/staging
-keep this router unmounted until a real principal dependency exists.
+Mounted under the protected browser parent. Endpoints resolve the durable
+password session via ``require_viewer_principal`` / ``require_operator_principal``.
 """
 
 from __future__ import annotations
@@ -58,10 +58,6 @@ from app.assistant.evaluation.schemas import (
     PutDatasetDraftBody,
     QualifyingEvidenceSummary,
 )
-from app.assistant.skills.admin_router import (
-    get_trusted_operator_principal,
-    should_mount_skill_admin_router,
-)
 from app.assistant.skills.candidate_closure import (
     CandidateClosureError,
     resolve_skill_candidate_closure,
@@ -71,6 +67,10 @@ from app.assistant.skills.principal import OperatorPrincipal
 from app.common.exceptions import ApiException
 from app.common.responses import ApiResponse
 from app.database import get_db
+from app.operator_auth.dependencies import (
+    require_operator_principal,
+    require_viewer_principal,
+)
 
 PLAN09_EVAL_PREFIX = "/api/assistant-config/skill-eval"
 
@@ -91,15 +91,6 @@ def _dto(model: Any) -> Any:
     if hasattr(model, "model_dump"):
         return model.model_dump(by_alias=True, mode="json")
     return model
-
-
-def _require_operator(principal: OperatorPrincipal) -> None:
-    if not principal.is_operator:
-        raise ApiException(
-            status_code=403,
-            code=40391,
-            message="operator role is required for this transition",
-        )
 
 
 def _map_repo_error(exc: EvaluationRepositoryError) -> ApiException:
@@ -398,7 +389,7 @@ def _admission_isolation_digest(
 @skill_eval_router.get("/datasets")
 def list_eval_datasets(
     db: Session = Depends(get_db),
-    principal: OperatorPrincipal = Depends(get_trusted_operator_principal),
+    principal: OperatorPrincipal = Depends(require_viewer_principal),
 ) -> ApiResponse:
     _ = principal
     repo = EvaluationRepository(db)
@@ -420,9 +411,8 @@ def list_eval_datasets(
 def create_eval_dataset(
     body: CreateDatasetBody,
     db: Session = Depends(get_db),
-    principal: OperatorPrincipal = Depends(get_trusted_operator_principal),
+    principal: OperatorPrincipal = Depends(require_operator_principal),
 ) -> ApiResponse:
-    _require_operator(principal)
     if body.ownership == "system" and not principal.is_operator:
         raise ApiException(
             status_code=403,
@@ -443,13 +433,13 @@ def create_eval_dataset(
             display_name=body.display_name,
             description=body.description,
             ownership=body.ownership,
-            actor=principal.principal_id,
+            actor=principal.audit_actor(),
         )
         # Ensure a draft row exists for subsequent GET/PUT.
         draft = repo.get_or_create_draft(
             dataset_id=row.id,
             cases_snapshot=[],
-            actor=principal.principal_id,
+            actor=principal.audit_actor(),
         )
         db.commit()
     except EvaluationRepositoryError as exc:
@@ -462,7 +452,7 @@ def create_eval_dataset(
 def get_eval_dataset(
     dataset_id: UUID,
     db: Session = Depends(get_db),
-    principal: OperatorPrincipal = Depends(get_trusted_operator_principal),
+    principal: OperatorPrincipal = Depends(require_viewer_principal),
 ) -> ApiResponse:
     _ = principal
     repo = EvaluationRepository(db)
@@ -477,7 +467,7 @@ def get_eval_dataset(
 def get_eval_dataset_draft(
     dataset_id: UUID,
     db: Session = Depends(get_db),
-    principal: OperatorPrincipal = Depends(get_trusted_operator_principal),
+    principal: OperatorPrincipal = Depends(require_viewer_principal),
 ) -> ApiResponse:
     _ = principal
     repo = EvaluationRepository(db)
@@ -486,7 +476,7 @@ def get_eval_dataset_draft(
     draft = repo.get_draft(dataset_id)
     if draft is None:
         draft = repo.get_or_create_draft(
-            dataset_id=dataset_id, cases_snapshot=[], actor=principal.principal_id
+            dataset_id=dataset_id, cases_snapshot=[], actor=principal.audit_actor()
         )
         db.commit()
     return ApiResponse.ok(_dto(_draft_summary(draft)))
@@ -497,9 +487,8 @@ def put_eval_dataset_draft(
     dataset_id: UUID,
     body: PutDatasetDraftBody,
     db: Session = Depends(get_db),
-    principal: OperatorPrincipal = Depends(get_trusted_operator_principal),
+    principal: OperatorPrincipal = Depends(require_operator_principal),
 ) -> ApiResponse:
-    _require_operator(principal)
     repo = EvaluationRepository(db)
     if repo.get_dataset(dataset_id) is None:
         raise ApiException(status_code=404, code=40493, message="dataset not found")
@@ -509,7 +498,7 @@ def put_eval_dataset_draft(
             repo.get_or_create_draft(
                 dataset_id=dataset_id,
                 cases_snapshot=list(body.cases_snapshot or []),
-                actor=principal.principal_id,
+                actor=principal.audit_actor(),
             )
             if int(body.expected_draft_revision) != 0:
                 raise EvaluationRepositoryError(
@@ -530,14 +519,14 @@ def put_eval_dataset_draft(
                         dataset_id=dataset_id,
                         expected_draft_revision=0,
                         cases_snapshot=list(body.cases_snapshot or []),
-                        actor=principal.principal_id,
+                        actor=principal.audit_actor(),
                     )
         else:
             draft = repo.put_draft(
                 dataset_id=dataset_id,
                 expected_draft_revision=body.expected_draft_revision,
                 cases_snapshot=list(body.cases_snapshot or []),
-                actor=principal.principal_id,
+                actor=principal.audit_actor(),
             )
         db.commit()
     except EvaluationRepositoryError as exc:
@@ -551,15 +540,12 @@ def publish_eval_dataset(
     dataset_id: UUID,
     body: PublishDatasetBody,
     db: Session = Depends(get_db),
-    principal: OperatorPrincipal = Depends(get_trusted_operator_principal),
+    principal: OperatorPrincipal = Depends(require_operator_principal),
 ) -> ApiResponse:
-    _require_operator(principal)
     repo = EvaluationRepository(db)
     dataset = repo.get_dataset(dataset_id)
     if dataset is None:
         raise ApiException(status_code=404, code=40493, message="dataset not found")
-    if dataset.ownership == "system":
-        _require_operator(principal)
     try:
         published = repo.publish_dataset_version(
             dataset_id=dataset_id,
@@ -567,7 +553,7 @@ def publish_eval_dataset(
             expected_draft_revision=body.expected_draft_revision,
             version_name=body.version_name,
             source_fixture_revision=body.source_fixture_revision,
-            actor=principal.principal_id,
+            actor=principal.audit_actor(),
         )
         db.commit()
     except EvaluationRepositoryError as exc:
@@ -584,7 +570,7 @@ def publish_eval_dataset(
 def list_eval_dataset_versions(
     dataset_id: UUID,
     db: Session = Depends(get_db),
-    principal: OperatorPrincipal = Depends(get_trusted_operator_principal),
+    principal: OperatorPrincipal = Depends(require_viewer_principal),
 ) -> ApiResponse:
     _ = principal
     repo = EvaluationRepository(db)
@@ -607,7 +593,7 @@ def get_eval_dataset_version(
     dataset_id: UUID,
     version_id: UUID,
     db: Session = Depends(get_db),
-    principal: OperatorPrincipal = Depends(get_trusted_operator_principal),
+    principal: OperatorPrincipal = Depends(require_viewer_principal),
 ) -> ApiResponse:
     _ = principal
     repo = EvaluationRepository(db)
@@ -646,14 +632,13 @@ def get_eval_dataset_version(
 def create_eval_run(
     body: CreateEvalRunBody,
     db: Session = Depends(get_db),
-    principal: OperatorPrincipal = Depends(get_trusted_operator_principal),
+    principal: OperatorPrincipal = Depends(require_operator_principal),
 ) -> ApiResponse:
     """Admit an evaluation run with fully server-resolved digests and pins.
 
     Client digests/decisions/actor overrides are not accepted. Records
     ``principal.principal_id`` as the actor.
     """
-    _require_operator(principal)
     repo = EvaluationRepository(db)
 
     # Fail closed on unknown fixture pins before subject/dataset resolution so
@@ -751,7 +736,7 @@ def create_eval_run(
             provider_fixture_revision=fixture_rev,
             provider_fixture_digest=fixture_dig,
             provider_evidence_digest=provider_evidence_digest,
-            actor_principal=principal.principal_id,
+            actor_principal=principal.audit_actor(),
             request_id=body.request_id,
         )
         # Stash admission prompt/locale/profile for workers via aggregate_metrics.
@@ -778,7 +763,7 @@ def create_eval_run(
 def get_eval_run(
     run_id: UUID,
     db: Session = Depends(get_db),
-    principal: OperatorPrincipal = Depends(get_trusted_operator_principal),
+    principal: OperatorPrincipal = Depends(require_viewer_principal),
 ) -> ApiResponse:
     _ = principal
     repo = EvaluationRepository(db)
@@ -794,7 +779,7 @@ def list_eval_run_events(
     after_sequence: int = Query(0, alias="afterSequence", ge=0),
     limit: int = Query(100, ge=1, le=1000),
     db: Session = Depends(get_db),
-    principal: OperatorPrincipal = Depends(get_trusted_operator_principal),
+    principal: OperatorPrincipal = Depends(require_viewer_principal),
 ) -> ApiResponse:
     _ = principal
     repo = EvaluationRepository(db)
@@ -943,7 +928,7 @@ def stream_eval_run_events(
     request: Request,
     after_sequence: int = Query(0, alias="afterSequence", ge=0),
     db: Session = Depends(get_db),
-    principal: OperatorPrincipal = Depends(get_trusted_operator_principal),
+    principal: OperatorPrincipal = Depends(require_viewer_principal),
 ) -> StreamingResponse:
     _ = principal
     # Auth + existence check with the injected session, then stream with
@@ -977,7 +962,7 @@ def cancel_eval_run(
     run_id: UUID,
     body: CancelEvalRunBody,
     db: Session = Depends(get_db),
-    principal: OperatorPrincipal = Depends(get_trusted_operator_principal),
+    principal: OperatorPrincipal = Depends(require_operator_principal),
 ) -> ApiResponse:
     """Cancel requires CAS body: requestId + expectedStateRevision.
 
@@ -985,7 +970,6 @@ def cancel_eval_run(
     state-revision CAS. Identical retries (same requestId + same expected
     revision) return the stamped cancelling row without further bumps.
     """
-    _require_operator(principal)
     repo = EvaluationRepository(db)
     try:
         run = repo.request_cancel_run(
@@ -1005,7 +989,7 @@ def list_eval_run_case_results(
     run_id: UUID,
     limit: int = Query(200, ge=1, le=1000),
     db: Session = Depends(get_db),
-    principal: OperatorPrincipal = Depends(get_trusted_operator_principal),
+    principal: OperatorPrincipal = Depends(require_viewer_principal),
 ) -> ApiResponse:
     _ = principal
     repo = EvaluationRepository(db)
@@ -1046,7 +1030,7 @@ def list_eval_run_evidence(
     run_id: UUID,
     limit: int = Query(200, ge=1, le=1000),
     db: Session = Depends(get_db),
-    principal: OperatorPrincipal = Depends(get_trusted_operator_principal),
+    principal: OperatorPrincipal = Depends(require_viewer_principal),
 ) -> ApiResponse:
     """Bounded evidence: artifacts + capability calls (metadata only)."""
     _ = principal
@@ -1104,7 +1088,7 @@ def list_qualifying_evidence(
     subject_version_id: UUID | None = Query(None, alias="subjectVersionId"),
     limit: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
-    principal: OperatorPrincipal = Depends(get_trusted_operator_principal),
+    principal: OperatorPrincipal = Depends(require_viewer_principal),
 ) -> ApiResponse:
     _ = principal
     repo = EvaluationRepository(db)
@@ -1146,14 +1130,13 @@ def list_qualifying_evidence(
 def create_publish_gate(
     body: CreateGateBody,
     db: Session = Depends(get_db),
-    principal: OperatorPrincipal = Depends(get_trusted_operator_principal),
+    principal: OperatorPrincipal = Depends(require_operator_principal),
 ) -> ApiResponse:
-    _require_operator(principal)
     svc = PublishGateService(db)
     try:
         result = svc.create_gate(
             body.to_service_request(),
-            actor_principal=principal.principal_id,
+            actor_principal=principal.audit_actor(),
         )
         db.commit()
     except PublishGateError as exc:
@@ -1177,7 +1160,7 @@ def create_publish_gate(
 def get_publish_gate(
     gate_id: UUID,
     db: Session = Depends(get_db),
-    principal: OperatorPrincipal = Depends(get_trusted_operator_principal),
+    principal: OperatorPrincipal = Depends(require_viewer_principal),
 ) -> ApiResponse:
     _ = principal
     row = db.get(AssistantSkillPublishGate, gate_id)
@@ -1191,17 +1174,7 @@ def get_publish_gate(
         }
     )
 
-
-def mount_skill_eval_router(app: Any, *, app_env: str | None = None) -> bool:
-    """Conditionally mount Plan 09 evaluation router with the admin trusted guard."""
-    if not should_mount_skill_admin_router(app_env=app_env):
-        return False
-    app.include_router(skill_eval_router)
-    return True
-
-
 __all__ = [
     "PLAN09_EVAL_PREFIX",
-    "mount_skill_eval_router",
     "skill_eval_router",
 ]

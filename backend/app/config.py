@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Literal
 from uuid import UUID
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -31,8 +31,6 @@ ASSISTANT_INTERRUPT_COMMENT_MAX_CHARS_HARD_MAX = 4000
 
 AssistantCapabilityLedgerMode = Literal["legacy_read_only", "enforced"]
 AssistantMainAgentWriteMode = Literal["off", "golden"]
-# Plan 10 native runtime selection config.
-AssistantRuntimeMode = Literal["legacy", "main_agent"]
 
 
 def compute_artifact_orphan_grace_floor_sec(
@@ -86,15 +84,23 @@ class Settings(BaseSettings):
         alias="AI_MODEL_CAPABILITY_PROBE_ENABLED",
     )
 
-    # Plan 10 runtime mode (default legacy) and durable rollout revision label.
-    assistant_runtime_mode: AssistantRuntimeMode = Field(
-        default="legacy",
-        alias="ASSISTANT_RUNTIME_MODE",
+    # Emergency process ceiling. Durable rollout control must also allow new Runs.
+    assistant_new_runs_enabled: bool = Field(
+        default=True,
+        alias="ASSISTANT_NEW_RUNS_ENABLED",
     )
-    # Optional active durable rollout revision label (empty = none/default legacy).
-    assistant_runtime_rollout_revision: str = Field(
-        default="",
+    # Reject removed runtime selectors if they remain in process env or dotenv.
+    removed_assistant_runtime_mode: str | None = Field(
+        default=None,
+        alias="ASSISTANT_RUNTIME_MODE",
+        exclude=True,
+        repr=False,
+    )
+    removed_assistant_runtime_rollout_revision: str | None = Field(
+        default=None,
         alias="ASSISTANT_RUNTIME_ROLLOUT_REVISION",
+        exclude=True,
+        repr=False,
     )
     # Reject the removed Plan 04 switch if it remains in process env or dotenv.
     removed_assistant_main_agent_mode: str | None = Field(
@@ -297,8 +303,9 @@ class Settings(BaseSettings):
         default="",
         alias="ASSISTANT_MAIN_AGENT_WRITE_COHORT_DIGEST",
     )
-    # Guarded local reconciliation mutation path. Default-disabled; the actor
-    # identity is server-owned configuration, never request/CLI input.
+    # Reconciliation evidence issuance flag. Default-disabled. Mutations require
+    # an authenticated HTTP Operator session (Plan 4); the optional operator id
+    # field is retained only for env compatibility and is never authorization.
     assistant_capability_reconciliation_enabled: bool = Field(
         default=False,
         alias="ASSISTANT_CAPABILITY_RECONCILIATION_ENABLED",
@@ -311,6 +318,20 @@ class Settings(BaseSettings):
         default="",
         alias="ASSISTANT_CAPABILITY_RECONCILIATION_EVIDENCE_SECRET",
     )
+
+    @field_validator(
+        "assistant_capability_reconciliation_operator_id",
+        mode="before",
+    )
+    @classmethod
+    def _empty_uuid_as_none(cls, value: object) -> object:
+        # Compose injects ASSISTANT_CAPABILITY_RECONCILIATION_OPERATOR_ID="" when
+        # unset; treat blank as absent so Settings stays constructible.
+        if value is None:
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
     # Plan 09 evaluation: failed/unused gate evidence retention grace after expiry.
     assistant_skill_gate_evidence_grace_days: int = Field(
         default=30,
@@ -341,6 +362,26 @@ class Settings(BaseSettings):
     # CORS
     # Keep as string to support simple comma-separated values in `.env` without requiring JSON.
     cors_origins: str = Field(default="", alias="CORS_ORIGINS")
+
+    # Single-operator control plane (Plan 1). Secrets have no repository defaults;
+    # Settings remains constructible when they are absent so /health stays up.
+    # Missing secrets never generate ephemeral replacements.
+    initial_setup_token: SecretStr | None = Field(
+        default=None, alias="MINDATLAS_INITIAL_SETUP_TOKEN"
+    )
+    canonical_origin: str = Field(default="", alias="MINDATLAS_CANONICAL_ORIGIN")
+    session_hmac_active_key_id: str = Field(
+        default="", alias="MINDATLAS_SESSION_HMAC_ACTIVE_KEY_ID"
+    )
+    session_hmac_keys: SecretStr | None = Field(
+        default=None, alias="MINDATLAS_SESSION_HMAC_KEYS"
+    )
+    # Test-only Compose smoke provider hostname (exact DNS label).
+    # Honored only when APP_ENV=test inside validate_url_ssrf; never for IP literals.
+    mindatlas_test_provider_host: str = Field(
+        default="",
+        alias="MINDATLAS_TEST_PROVIDER_HOST",
+    )
 
     # Uploads
     upload_dir: str = Field(default="../uploads", alias="UPLOAD_DIR")
@@ -512,8 +553,18 @@ class Settings(BaseSettings):
             return None
         raise ValueError(
             "ASSISTANT_MAIN_AGENT_MODE has been removed; use "
-            "ASSISTANT_RUNTIME_MODE and ASSISTANT_RUNTIME_ROLLOUT_REVISION"
+            "ASSISTANT_NEW_RUNS_ENABLED for the emergency process ceiling"
         )
+
+    @model_validator(mode="after")
+    def reject_removed_runtime_selectors(self) -> Settings:
+        if self.removed_assistant_runtime_mode is not None:
+            raise ValueError("removed runtime selector: ASSISTANT_RUNTIME_MODE")
+        if self.removed_assistant_runtime_rollout_revision is not None:
+            raise ValueError(
+                "removed runtime selector: ASSISTANT_RUNTIME_ROLLOUT_REVISION"
+            )
+        return self
 
     @model_validator(mode="after")
     def validate_main_agent_cross_field_bounds(self) -> Settings:
@@ -628,14 +679,8 @@ class Settings(BaseSettings):
                     "assistant_capability_call_idempotency_secret must be at least "
                     "32 bytes when ledger mode is enforced or write mode is golden"
                 )
-        if (
-            self.assistant_capability_reconciliation_enabled
-            and self.assistant_capability_reconciliation_operator_id is None
-        ):
-            raise ValueError(
-                "assistant_capability_reconciliation_operator_id is required when "
-                "assistant_capability_reconciliation_enabled is true"
-            )
+        # operator_id is retained as a deprecated unused setting for env compat only;
+        # it is never an authorization source for CLI or HTTP mutations.
         if self.assistant_capability_reconciliation_enabled and len(
             self.assistant_capability_reconciliation_evidence_secret.encode("utf-8")
         ) < 32:
@@ -649,6 +694,39 @@ class Settings(BaseSettings):
                 "assistant_skill_publish_gate_mode must be 'observe' or 'enforce'"
             )
         self.assistant_skill_publish_gate_mode = gate_mode
+
+        # Single-operator auth: production/staging origin + credentialed CORS.
+        # Setup/session secrets may be absent (health stays up); never mint replacements.
+        # Normalize padded origin so require_json_same_origin compares the same value
+        # that production/staging HTTPS/CORS validation accepted.
+        origin = self.canonical_origin.strip()
+        self.canonical_origin = origin
+        cors = self.cors_origins_list()
+        if self.app_env in {"production", "staging"}:
+            if not origin.startswith("https://"):
+                raise ValueError("MINDATLAS_CANONICAL_ORIGIN must be HTTPS")
+            if "*" in cors or origin not in cors:
+                raise ValueError(
+                    "credentialed CORS must contain the exact canonical origin"
+                )
+        # Blank SecretStr from empty .env.example copies is not "configured".
+        if self.initial_setup_token is not None and not (
+            self.initial_setup_token.get_secret_value() or ""
+        ).strip():
+            self.initial_setup_token = None
+        if self.session_hmac_keys is not None and not (
+            self.session_hmac_keys.get_secret_value() or ""
+        ).strip():
+            self.session_hmac_keys = None
+        token = (
+            self.initial_setup_token.get_secret_value()
+            if self.initial_setup_token
+            else ""
+        )
+        if token and len(token.encode("utf-8")) < 32:
+            raise ValueError(
+                "MINDATLAS_INITIAL_SETUP_TOKEN must be at least 32 UTF-8 bytes"
+            )
         return self
 
     def cors_origins_list(self) -> list[str]:

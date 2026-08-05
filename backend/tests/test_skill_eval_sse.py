@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import unittest
 import uuid
 from dataclasses import dataclass
@@ -15,18 +14,16 @@ from tests._bootstrap import bootstrap_backend_imports, reset_caches
 bootstrap_backend_imports()
 reset_caches()
 
-from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app.assistant.evaluation.repository import EvaluationRepository  # noqa: E402
-from app.assistant.evaluation.router import (  # noqa: E402
-    PLAN09_EVAL_PREFIX,
-    mount_skill_eval_router,
-)
-from app.assistant.skills.admin_router import TRUSTED_MOUNT_ENV  # noqa: E402
-from app.common.exceptions import register_exception_handlers  # noqa: E402
-from app.database import get_db  # noqa: E402
+from app.assistant.evaluation.router import PLAN09_EVAL_PREFIX, skill_eval_router  # noqa: E402
 from tests._db import make_session  # noqa: E402
+from tests.operator_session_helpers import (  # noqa: E402
+    build_authenticated_skill_client,
+    restore_operator_settings,
+    origin_headers,
+)
 
 
 DIGEST_A = "a" * 64
@@ -83,31 +80,16 @@ def read_sse(client: TestClient, url: str, *, frame_count: int, headers: dict[st
 
 
 class SkillEvalSseTests(unittest.TestCase):
-    def tearDown(self) -> None:
-        os.environ.pop(TRUSTED_MOUNT_ENV, None)
-        os.environ.pop("APP_ENV", None)
-
-    def _client(self) -> tuple[TestClient, Any]:
-        app = FastAPI()
-        register_exception_handlers(app)
+    def _client(self) -> tuple[TestClient, Any, dict[str, str]]:
         session = make_session()
-
-        def _override_db():
-            try:
-                yield session
-            finally:
-                pass
-
-        app.dependency_overrides[get_db] = _override_db
-        os.environ[TRUSTED_MOUNT_ENV] = "1"
-        self.assertTrue(mount_skill_eval_router(app, app_env="development"))
-        return TestClient(app), session
-
-    def _headers(self) -> dict[str, str]:
-        return {
-            "X-MindAtlas-Operator-Id": "operator-sse",
-            "X-MindAtlas-Operator-Role": "operator",
-        }
+        client, headers, _settings = build_authenticated_skill_client(
+            db=session,
+            include_routers=[skill_eval_router],
+        )
+        self.addCleanup(session.close)
+        self.addCleanup(client.close)
+        self.addCleanup(restore_operator_settings)
+        return client, session, headers
 
     def _seed_run_with_events(self, session: Any, *, count: int = 3) -> UUID:
         repo = EvaluationRepository(session)
@@ -193,25 +175,26 @@ class SkillEvalSseTests(unittest.TestCase):
         return run.id
 
     def test_sse_replays_after_sequence_and_heartbeats(self) -> None:
-        client, session = self._client()
+        client, session, headers = self._client()
         run_id = self._seed_run_with_events(session, count=3)
         frames = read_sse(
             client,
             f"{PLAN09_EVAL_PREFIX}/runs/{run_id}/events/stream?afterSequence=1",
             frame_count=3,
-            headers=self._headers(),
+            headers=headers,
         )
         self.assertEqual([frame.id for frame in frames[:2]], ["2", "3"])
         self.assertEqual(frames[2].event, "heartbeat")
 
     def test_sse_requires_principal(self) -> None:
-        client, session = self._client()
+        client, session, _headers = self._client()
         run_id = self._seed_run_with_events(session, count=1)
-        r = client.get(f"{PLAN09_EVAL_PREFIX}/runs/{run_id}/events/stream?afterSequence=0")
+        bare = TestClient(client.app)
+        r = bare.get(f"{PLAN09_EVAL_PREFIX}/runs/{run_id}/events/stream?afterSequence=0")
         self.assertIn(r.status_code, {401, 403}, r.text)
 
     def test_dataset_publish_requires_revision_and_principal(self) -> None:
-        client, session = self._client()
+        client, session, _headers = self._client()
         repo = EvaluationRepository(session)
         dataset = repo.create_dataset(
             stable_key=f"pub-ds-{uuid.uuid4().hex[:8]}",
@@ -219,8 +202,10 @@ class SkillEvalSseTests(unittest.TestCase):
             ownership="custom",
         )
         session.commit()
-        response = client.post(
+        bare = TestClient(client.app)
+        response = bare.post(
             f"{PLAN09_EVAL_PREFIX}/datasets/{dataset.id}/publish",
+            headers=origin_headers(),
             json={"requestId": "ds-1", "expectedRevision": 0},
         )
         self.assertEqual(response.status_code, 401, response.text)

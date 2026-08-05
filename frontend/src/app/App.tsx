@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next'
 import { AppProviders } from './providers'
 import { AppLayout } from '@/components/layout'
 import { InitializationGate } from '@/features/initialization'
+import { OperatorGate, OperatorLoginPage } from '@/features/operator-auth'
 
 function lazyNamed<TModule extends Record<string, ComponentType<any>>, TKey extends keyof TModule>(
   loader: () => Promise<TModule>,
@@ -23,6 +24,10 @@ const GraphPage = lazyNamed(() => import('@/features/graph/GraphPage'), 'GraphPa
 const DashboardPage = lazyNamed(() => import('@/features/dashboard/DashboardPage'), 'DashboardPage')
 const CalendarPage = lazyNamed(() => import('@/features/calendar/CalendarPage'), 'CalendarPage')
 const SettingsPage = lazyNamed(() => import('@/features/settings/SettingsPage'), 'SettingsPage')
+const AssistantRuntimeSettingsPage = lazyNamed(
+  () => import('@/features/settings/pages/AssistantRuntimeSettings'),
+  'AssistantRuntimeSettingsPage',
+)
 const EntryTypeSettings = lazyNamed(() => import('@/features/settings/pages/EntryTypeSettings'), 'EntryTypeSettings')
 const TagSettings = lazyNamed(() => import('@/features/settings/pages/TagSettings'), 'TagSettings')
 const AiProviderSettings = lazyNamed(() => import('@/features/ai-providers/pages/AiProviderSettings'), 'AiProviderSettings')
@@ -92,8 +97,10 @@ export default function App() {
     <AppProviders>
       <BrowserRouter>
         <InitializationGate>
+          <OperatorGate>
           <Routes>
             <Route path="/initialize" element={withPageFallback(<SystemInitializationPage />)} />
+            <Route path="/login" element={withPageFallback(<OperatorLoginPage />)} />
             <Route path="/" element={<Navigate to="/dashboard" replace />} />
             <Route
               path="/settings/workflow-editor/:workflowId"
@@ -120,6 +127,10 @@ export default function App() {
               <Route path="/graph" element={withPageFallback(<GraphPage />)} />
               <Route path="/calendar" element={withPageFallback(<CalendarPage />)} />
               <Route path="/settings" element={withPageFallback(<SettingsPage />)} />
+              <Route
+                path="/settings/assistant-runtime"
+                element={withPageFallback(<AssistantRuntimeSettingsPage />)}
+              />
               <Route path="/settings/entry-types" element={withPageFallback(<EntryTypeSettings />)} />
               <Route path="/settings/tags" element={withPageFallback(<TagSettings />)} />
               <Route path="/settings/ai-providers" element={withPageFallback(<AiProviderSettings />)} />
@@ -171,6 +182,7 @@ export default function App() {
               <Route path="/assistant" element={withPageFallback(<AssistantPage />)} />
             </Route>
           </Routes>
+          </OperatorGate>
         </InitializationGate>
       </BrowserRouter>
     </AppProviders>

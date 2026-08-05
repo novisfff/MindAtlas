@@ -171,6 +171,7 @@ def make_session() -> Session:
     import app.ai_provider.models  # noqa: F401,E402
     import app.ai_registry.models  # noqa: F401,E402
     import app.assistant.models  # noqa: F401,E402
+    import app.assistant.runtime.models  # noqa: F401,E402
     import app.assistant.durable.models  # noqa: F401,E402
     import app.assistant.capability_calls.models  # noqa: F401,E402
     import app.assistant.skills.models  # noqa: F401,E402
@@ -186,6 +187,7 @@ def make_session() -> Session:
     import app.lightrag.models  # noqa: F401,E402
     import app.report.models  # noqa: F401,E402
     import app.system_settings.models  # noqa: F401,E402
+    import app.operator_auth.models  # noqa: F401,E402
 
     _normalize_report_tables_for_sqlite()
 

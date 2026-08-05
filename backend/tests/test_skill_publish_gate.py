@@ -916,9 +916,9 @@ class PublishLifecycleMatrixTests(unittest.TestCase):
         self.db.close()
 
     def _operator(self):
-        from app.assistant.skills.principal import OperatorPrincipal
+        from tests.operator_session_helpers import make_service_principal
 
-        return OperatorPrincipal(principal_id="op-gate", role="operator")
+        return make_service_principal("op-gate", role="operator")
 
     def _enable_catalog_digest(self, package, version) -> str:
         from app.assistant.evaluation.gates import skill_catalog_pin_digest

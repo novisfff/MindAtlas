@@ -23,6 +23,7 @@ import {
   shouldApplyEvent,
   type EventDedupeState,
 } from '../eventIdentity'
+import { browserFetchInit, reportBrowserSessionExpired } from '@/lib/api/client'
 import { withMindAtlasLocale } from '@/lib/api/locale'
 import { SSEParser } from '@/lib/sse/SSEParser'
 
@@ -224,15 +225,19 @@ export function useChat() {
     }
 
     try {
-      const response = await fetch(url, {
-        method,
-        headers: withMindAtlasLocale(
-          method === 'POST' ? { 'Content-Type': 'application/json' } : undefined,
-        ),
-        body: method === 'POST' ? body : undefined,
-        signal: abortRef.current.signal,
-      })
+      const response = await fetch(
+        url,
+        browserFetchInit({
+          method,
+          headers: withMindAtlasLocale(
+            method === 'POST' ? { 'Content-Type': 'application/json' } : undefined,
+          ),
+          body: method === 'POST' ? body : undefined,
+          signal: abortRef.current.signal,
+        }),
+      )
       if (!response.ok || !response.body) {
+        reportBrowserSessionExpired(url, response.status)
         throw new Error(`HTTP ${response.status}: ${response.statusText}`)
       }
 

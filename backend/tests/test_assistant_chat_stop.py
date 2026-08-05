@@ -9,6 +9,7 @@ from tests._db import make_session
 
 
 bootstrap_backend_imports()
+from tests.assistant_runtime_support import seed_main_agent_runtime  # noqa: E402
 reset_caches()
 
 
@@ -81,28 +82,27 @@ class AssistantChatStopTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.db.close()
 
-    def test_stop_run_marks_cancelling_and_emits_status_event_once(self) -> None:
+    def test_stop_run_marks_cancelled_for_queued_main_agent(self) -> None:
         from app.assistant.run_service import AssistantChatRunService  # noqa: E402
         _install_fastapi_stubs()
         from app.assistant.service import AssistantService  # noqa: E402
 
         run_svc = AssistantChatRunService(self.db)
+        seeded = seed_main_agent_runtime(self.db, build_revision="build-stop-chat")
         run = run_svc.create_run(
             conversation=self.conv,
             user_message=self.user_msg,
             assistant_message=self.assistant_msg,
+            **seeded.as_create_run_kwargs(),
         )
         svc = AssistantService(self.db)
 
+        # Queued Main-Agent stop is direct cancel (no Legacy cancelling path).
         payload = svc.stop_run(conversation_id=self.conv.id, run_id=run.id)
-        self.assertEqual(payload["status"], "cancelling")
+        self.assertEqual(payload["status"], "cancelled")
 
         payload_2 = svc.stop_run(conversation_id=self.conv.id, run_id=run.id)
-        self.assertEqual(payload_2["status"], "cancelling")
-
-        events = run_svc.list_events_after(run_id=run.id, after_seq=0, limit=20)
-        names = [item.event_name for item in events]
-        self.assertEqual(names.count("run_status"), 1)
+        self.assertEqual(payload_2["status"], "cancelled")
 
 
 if __name__ == "__main__":

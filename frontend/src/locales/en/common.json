@@ -149,7 +149,9 @@
       "step2": "Please review the system introduction before continuing.",
       "step3": "Please finish the AI provider and model setup first.",
       "step4": "Keep at least one entry type and give every entry type a name.",
-      "step5": "Please complete the previous steps first."
+      "step5": "Please complete the previous steps first.",
+      "operatorPassword": "Set an operator password with at least 12 characters before finishing setup.",
+      "setupToken": "Enter the one-time setup token configured for this deployment."
     },
     "steps": {
       "language": {
@@ -352,8 +354,25 @@
       "capabilitiesTitle": "Capability summary",
       "capabilitiesDescription": "Each capability can use app config, keep an environment default, or stay skipped for now.",
       "noteTitle": "Deployment services are already wired in",
-      "noteDescription": "In Docker Compose deployments, object storage, the knowledge graph, document parsing, and the background scheduler all start with built-in defaults. Initialization only needs your language, model, and entry types."
-    }
+      "noteDescription": "In Docker Compose deployments, object storage, the knowledge graph, document parsing, and the background scheduler all start with built-in defaults. Initialization only needs your language, model, and entry types.",
+      "operatorAccessTitle": "Operator access",
+      "operatorAccessDescription": "Create the single operator password and confirm the one-time setup token. Both values stay in memory only for this request.",
+      "fields": {
+        "setupToken": "Setup token",
+        "operatorPassword": "Operator password"
+      },
+      "placeholders": {
+        "setupToken": "Paste the deployment setup token",
+        "operatorPassword": "At least 12 characters, exact value kept as typed"
+      },
+      "hints": {
+        "setupToken": "Sent only in the Authorization header for this one-time request and never stored in the browser.",
+        "operatorPassword": "Exact Unicode string. No trimming. This becomes the only operator login secret."
+      }
+    },
+    "activationTitle": "Activate assistant runtime",
+    "activationDescription": "Initialization prepared a Main Agent rollout. Activate it after a compatible worker is online.",
+    "activationSkip": "Continue without activating"
   },
   "systemSetup": {
     "eyebrow": "System overview",
@@ -998,6 +1017,8 @@
       "aiSectionDesc": "Configure models, system tools, the skill library, workflows, agents, and built-in system AI behaviors in one place.",
       "runtimeSection": "Runtime Capabilities",
       "runtimeSectionDesc": "Review deployment-managed services and separately maintain runtime settings such as LightRAG, Docling, and automation.",
+      "assistantRuntime": "Assistant Runtime",
+      "assistantRuntimeDesc": "Resume prepared Main Agent rollout activation and control whether new chats are admitted.",
       "entryTypes": "Entry Types",
       "entryTypesDesc": "Manage content types, icons, and properties",
       "tags": "Tags",
@@ -2175,7 +2196,11 @@
       "profileRuntimeDisabled": "Profile runtime disabled",
       "profileNeedsPublished": "Publish a profile version before enabling runtime.",
       "profileNeedsPromotionGate": "A promotion gate is required to enable runtime.",
-      "profileDisableConfirm": "Disable Main Agent Profile runtime? This is an explicit live-state change and does not alter draft or published content."
+      "profileDisableConfirm": "Disable Main Agent Profile runtime? This is an explicit live-state change and does not alter draft or published content.",
+      "profileV1ReadOnlyBanner": "Historical Profile V1 — read only. Draft, publish, and prepare require Profile V2.",
+      "profileV1ReadOnly": "Historical Profile V1 is read only.",
+      "profileRuntimePolicy": "Runtime policy",
+      "profileV1FallbackReadonly": "Historical fallback policy (read only)"
     }
   },
   "aiProvider": {
@@ -2448,5 +2473,89 @@
       "indexFailed": "Index failed"
     },
     "retry": "Retry"
+  },
+  "operatorAuth": {
+    "login": {
+      "title": "Operator login",
+      "description": "Enter the operator password to open this control plane.",
+      "passwordLabel": "Password",
+      "submit": "Login",
+      "submitting": "Signing in…",
+      "errors": {
+        "invalid": "Invalid credentials.",
+        "locked": "Login is temporarily locked. Try again later.",
+        "unavailable": "Authentication is temporarily unavailable.",
+        "generic": "Unable to sign in. Please try again."
+      }
+    },
+    "gate": {
+      "loadingTitle": "Checking operator session",
+      "loadingDescription": "Confirming whether this browser is already signed in.",
+      "sessionExpired": "Your session expired. Please sign in again."
+    }
+  },
+  "assistantRuntime": {
+    "activation": {
+      "title": "Activate Main Agent runtime",
+      "description": "Initialization prepared a rollout. Activate only after a compatible worker is online.",
+      "waitingWorker": "Waiting for a compatible worker",
+      "activate": "Activate",
+      "activating": "Activating…",
+      "ready": "Runtime activated",
+      "conflict": "Control revision changed. Refreshing diagnostics — review and try again.",
+      "error": "Activation failed. Review readiness and retry.",
+      "pendingBootstrap": "Assistant bootstrap: pending worker"
+    },
+    "readiness": {
+      "loadingTitle": "Checking assistant readiness",
+      "loadingDescription": "Confirming the active Main Agent runtime can admit new chats.",
+      "unavailableTitle": "Assistant is not ready",
+      "unavailableDescription": "New chats are blocked until readiness clears. Existing conversation history may still be visible."
+    },
+    "settings": {
+      "title": "Assistant runtime",
+      "description": "Resume prepared rollout activation and review durable Main Agent runtime control.",
+      "loading": "Loading runtime control…",
+      "loadError": "Could not load runtime control.",
+      "rollout": {
+        "build": "Build {{build}}"
+      },
+      "prepared": {
+        "title": "Prepared rollout",
+        "description": "This server-side rollout remains available after leaving the initialization wizard.",
+        "badge": "Prepared",
+        "empty": "No prepared rollout is available."
+      },
+      "active": {
+        "title": "Active rollout",
+        "description": "The active immutable revision is used for new Main Agent chat runs.",
+        "badge": "Active",
+        "inactiveBadge": "Inactive",
+        "empty": "No rollout is active."
+      },
+      "newRuns": {
+        "title": "New chat runs",
+        "description": "Durably control admission for future Main Agent chats without changing existing runs.",
+        "switchLabel": "Accept new chat runs",
+        "enabled": "New chat runs are enabled.",
+        "disabled": "New chat runs are disabled.",
+        "hint": "This switch only affects future chat runs. Existing durable runs continue unchanged.",
+        "error": "Could not change new chat setting.",
+        "conflict": "Control changed. The latest state was refreshed."
+      }
+    },
+    "reasons": {
+      "system_not_initialized": "The system has not completed initialization.",
+      "operator_missing": "No operator account is available yet.",
+      "operator_auth_unavailable": "Operator authentication is unavailable.",
+      "system_seed_invalid": "System seed integrity failed. Stop and inspect deployment integrity; do not bypass.",
+      "profile_unpublished": "The Main Agent Profile is not published.",
+      "model_unbound": "No model is bound for the Main Agent runtime.",
+      "rollout_inactive": "No active Main Agent rollout is selected yet.",
+      "runtime_closure_drift": "Runtime closure drifted from the prepared revision. Stop and inspect deployment integrity; do not bypass.",
+      "worker_unavailable": "No compatible worker is online for this build, contract, and codec.",
+      "schema_incompatible": "Schema is incompatible with this Main Agent runtime. Stop and inspect deployment integrity; do not bypass.",
+      "new_runs_disabled": "New chat runs are disabled by the operator switch."
+    }
   }
 }

@@ -8,7 +8,6 @@ import type {
 
 export interface InitializationStatusResponse {
   initialized: boolean
-  legacyAutoCompleted: boolean
   locale: Locale
 }
 
@@ -33,6 +32,7 @@ export interface InitializationDefaultsResponse {
 
 export interface InitializeSystemRequest {
   locale: Locale
+  operatorPassword: string
   aiCredential: {
     name: string
     baseUrl: string
@@ -58,6 +58,10 @@ export interface InitializeSystemRequest {
 export interface InitializationCompletionResponse {
   initialized: boolean
   locale: Locale
+  /** Always pending_worker after successful initialization — activation is a separate step. */
+  assistantBootstrap?: 'pending_worker'
+  preparedRolloutRevisionId?: string | null
+  rolloutControlRevision?: number | null
 }
 
 export function getInitializationStatus() {
@@ -70,8 +74,12 @@ export function getInitializationDefaults(locale: Locale) {
   })
 }
 
-export function initializeSystem(payload: InitializeSystemRequest) {
+export function initializeSystem(
+  payload: InitializeSystemRequest,
+  setupToken: string,
+): Promise<InitializationCompletionResponse> {
   return apiClient.post<InitializationCompletionResponse>('/api/system-settings/initialize', {
     body: payload,
+    headers: { Authorization: 'Setup ' + setupToken },
   })
 }

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import unittest
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -33,6 +34,11 @@ from app.system_settings.schemas import InitializeSystemRequest  # noqa: E402
 class OpenClawIntegrationTests(unittest.TestCase):
     def setUp(self) -> None:
         reset_caches()
+        # Clean-only init encrypts the AI credential; tests must supply a Fernet key.
+        os.environ.setdefault(
+            "AI_PROVIDER_FERNET_KEY",
+            "07v02gVBdreNrXjLJZkIMdohHtgy6aDFKBHxakHjbrQ=",
+        )
         self.db = make_session()
 
         app = FastAPI()
@@ -53,6 +59,8 @@ class OpenClawIntegrationTests(unittest.TestCase):
         return InitializeSystemRequest.model_validate(
             {
                 "locale": locale,
+                # Exact Operator password (Task 6 clean-only init); never log/echo.
+                "operatorPassword": "correct horse battery",
                 "aiCredential": {
                     "name": "OpenAI",
                     "baseUrl": "https://api.openai.com/v1",

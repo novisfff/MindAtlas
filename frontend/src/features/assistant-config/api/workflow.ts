@@ -1,4 +1,4 @@
-import { apiClient } from '@/lib/api/client'
+import { apiClient, browserFetchInit, reportBrowserSessionExpired } from '@/lib/api/client'
 import { withMindAtlasLocale } from '@/lib/api/locale'
 import { SSEParser } from '@/lib/sse/SSEParser'
 
@@ -740,16 +740,20 @@ export const runWorkflowTestStream = async (
   if (!targetPath) {
     throw new Error('runWorkflowTestStream requires options.path (standalone workflow test-run)')
   }
-  const response = await fetch(targetPath, {
-    method: 'POST',
-    headers: withMindAtlasLocale({
-      'Content-Type': 'application/json',
+  const response = await fetch(
+    targetPath,
+    browserFetchInit({
+      method: 'POST',
+      headers: withMindAtlasLocale({
+        'Content-Type': 'application/json',
+      }),
+      body: JSON.stringify(payload),
+      signal: options.signal,
     }),
-    body: JSON.stringify(payload),
-    signal: options.signal,
-  })
+  )
 
   if (!response.ok || !response.body) {
+    reportBrowserSessionExpired(targetPath, response.status)
     const text = await response.text()
     let message = `HTTP ${response.status}: ${response.statusText}`
     try {

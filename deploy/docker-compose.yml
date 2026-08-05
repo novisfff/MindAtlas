@@ -123,9 +123,9 @@ services:
       APP_BUILD_REVISION: ${APP_BUILD_REVISION:?Set APP_BUILD_REVISION to a deployment-immutable value}
       # Plan 03 live model capability probe (paid Provider call). Default-disabled.
       AI_MODEL_CAPABILITY_PROBE_ENABLED: ${AI_MODEL_CAPABILITY_PROBE_ENABLED:-false}
-      # Plan 10 native runtime config; non-legacy labels must match the durable active revision.
-      ASSISTANT_RUNTIME_MODE: ${ASSISTANT_RUNTIME_MODE:-legacy}
-      ASSISTANT_RUNTIME_ROLLOUT_REVISION: ${ASSISTANT_RUNTIME_ROLLOUT_REVISION:-}
+      # Plan 2 emergency process ceiling. Durable control must also allow new Runs.
+      # Deployment acceptance uses GET /ready (not a depends_on condition).
+      ASSISTANT_NEW_RUNS_ENABLED: ${ASSISTANT_NEW_RUNS_ENABLED:-true}
       # Plan 08 CapabilityCall ledger / golden write (all default dark).
       ASSISTANT_CAPABILITY_LEDGER_MODE: ${ASSISTANT_CAPABILITY_LEDGER_MODE:-legacy_read_only}
       ASSISTANT_MAIN_AGENT_WRITE_MODE: ${ASSISTANT_MAIN_AGENT_WRITE_MODE:-off}
@@ -140,6 +140,15 @@ services:
       ASSISTANT_INTERRUPT_MAX_TTL_SEC: ${ASSISTANT_INTERRUPT_MAX_TTL_SEC:-604800}
       ASSISTANT_INTERRUPT_COMMENT_MAX_CHARS: ${ASSISTANT_INTERRUPT_COMMENT_MAX_CHARS:-4000}
       ASSISTANT_INTERRUPT_TOKEN_PEPPER: ${ASSISTANT_INTERRUPT_TOKEN_PEPPER:-}
+      # Single-operator control plane (Plan 1). No production defaults for secrets.
+      # Inject from a secret store / deploy .env. Local quick-start may leave these
+      # empty via docker-compose.override.yml; production/staging must supply them.
+      # CORS_ORIGINS must include the exact MINDATLAS_CANONICAL_ORIGIN (no wildcards).
+      MINDATLAS_CANONICAL_ORIGIN: ${MINDATLAS_CANONICAL_ORIGIN:-}
+      MINDATLAS_INITIAL_SETUP_TOKEN: ${MINDATLAS_INITIAL_SETUP_TOKEN:-}
+      MINDATLAS_SESSION_HMAC_ACTIVE_KEY_ID: ${MINDATLAS_SESSION_HMAC_ACTIVE_KEY_ID:-}
+      MINDATLAS_SESSION_HMAC_KEYS: ${MINDATLAS_SESSION_HMAC_KEYS:-}
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
       LIGHTRAG_ENABLED: "${LIGHTRAG_ENABLED:-true}"
       DOCLING_WORKER_ENABLED: "${DOCLING_WORKER_ENABLED:-true}"
       SCHEDULER_ENABLED: "${SCHEDULER_ENABLED:-true}"
@@ -262,8 +271,8 @@ services:
       AI_PROVIDER_FERNET_KEY: ${AI_PROVIDER_FERNET_KEY:-b98esSSrtceWc4IUOFGR-f_6I8FfnxtpjjYQZN51RCw=}
       APP_ENV: ${APP_ENV:-production}
       APP_BUILD_REVISION: ${APP_BUILD_REVISION:?Set APP_BUILD_REVISION to a deployment-immutable value}
-      ASSISTANT_RUNTIME_MODE: ${ASSISTANT_RUNTIME_MODE:-legacy}
-      ASSISTANT_RUNTIME_ROLLOUT_REVISION: ${ASSISTANT_RUNTIME_ROLLOUT_REVISION:-}
+      # Plan 2 emergency process ceiling (same as API). Selector env vars removed.
+      ASSISTANT_NEW_RUNS_ENABLED: ${ASSISTANT_NEW_RUNS_ENABLED:-true}
       # Plan 08 CapabilityCall ledger / golden write (all default dark).
       ASSISTANT_CAPABILITY_LEDGER_MODE: ${ASSISTANT_CAPABILITY_LEDGER_MODE:-legacy_read_only}
       ASSISTANT_MAIN_AGENT_WRITE_MODE: ${ASSISTANT_MAIN_AGENT_WRITE_MODE:-off}

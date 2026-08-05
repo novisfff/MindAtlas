@@ -8,32 +8,61 @@ and build/codec incompatibility under PostgreSQL row locks.
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 import threading
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Iterator
 
 import pytest
 from sqlalchemy import create_engine, text
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from tests._bootstrap import bootstrap_backend_imports, reset_caches
+from tests.postgres_destructive_guard import reset_disposable_public_schema
 
 bootstrap_backend_imports()
 reset_caches()
 
 _POSTGRES_URL = os.environ.get("MINDATLAS_TEST_POSTGRES_URL", "").strip()
+_REQUIRE_POSTGRES = os.environ.get("MINDATLAS_REQUIRE_POSTGRES", "").strip() in {
+    "1",
+    "true",
+    "TRUE",
+    "yes",
+    "YES",
+}
+
+PLAN2_HEAD = "b6e2d4f8a901"
+_BACKEND_DIR = Path(__file__).resolve().parents[1]
+
+if not _POSTGRES_URL and _REQUIRE_POSTGRES:
+    pytest.fail(
+        "MINDATLAS_TEST_POSTGRES_URL not set while MINDATLAS_REQUIRE_POSTGRES=1; "
+        "Plan 2 lease/claim PostgreSQL gate is release-critical and must hard-fail",
+        pytrace=False,
+    )
 
 pytestmark = pytest.mark.skipif(
     not _POSTGRES_URL,
     reason=(
         "MINDATLAS_TEST_POSTGRES_URL not set; PostgreSQL lease/SKIP LOCKED "
-        "tests skipped (SQLite cannot prove concurrent claim)"
+        "tests skipped (SQLite cannot prove concurrent claim). "
+        "Set MINDATLAS_REQUIRE_POSTGRES=1 to hard-fail instead of skip."
     ),
 )
 
 DIGEST = "a" * 64
+DIGEST_B = "b" * 64
+DIGEST_C = "c" * 64
+DIGEST_D = "d" * 64
+DIGEST_E = "e" * 64
+DIGEST_9 = "9" * 64
+CODEC = 3
 
 
 def _as_sqlalchemy_url(url: str) -> str:
@@ -42,9 +71,31 @@ def _as_sqlalchemy_url(url: str) -> str:
     return url
 
 
+def _configure_database_env(url: str) -> None:
+    os.environ["DATABASE_URL"] = url
+    os.environ.setdefault("APP_ENV", "test")
+    os.environ.setdefault("MINDATLAS_PLAN10_B2_TEST_OVERRIDE", "1")
+    reset_caches()
+    try:
+        from app.config import get_settings
+
+        get_settings.cache_clear()
+    except Exception:
+        pass
+
+
+def _alembic_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env["DATABASE_URL"] = _POSTGRES_URL
+    env["APP_ENV"] = "test"
+    env["MINDATLAS_PLAN10_B2_TEST_OVERRIDE"] = "1"
+    return env
+
+
 @contextmanager
 def _engine():
     assert _POSTGRES_URL
+    _configure_database_env(_POSTGRES_URL)
     engine = create_engine(_as_sqlalchemy_url(_POSTGRES_URL), future=True, pool_pre_ping=True)
     try:
         yield engine
@@ -62,23 +113,141 @@ def _session(engine) -> Iterator[Session]:
         session.close()
 
 
+def _drop_public_schema(engine: Engine) -> None:
+    reset_disposable_public_schema(engine)
+
+
+def _upgrade_to_plan2_head() -> None:
+    completed = subprocess.run(
+        [sys.executable, "-m", "alembic", "upgrade", PLAN2_HEAD],
+        cwd=str(_BACKEND_DIR),
+        env=_alembic_env(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise AssertionError(
+            f"alembic upgrade {PLAN2_HEAD} failed:\n"
+            f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
+        )
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _current_plan2_schema() -> Iterator[None]:
+    with _engine() as engine:
+        _drop_public_schema(engine)
+    _upgrade_to_plan2_head()
+    yield
+
+
 def _ensure_schema(engine) -> None:
     from app.database import Base
     import app.assistant.models  # noqa: F401
     import app.assistant.durable.models  # noqa: F401
+    import app.assistant.runtime.models  # noqa: F401
+    import app.assistant.skills.models  # noqa: F401
+    import app.ai_registry.models  # noqa: F401
+    import app.ai_provider.models  # noqa: F401
+    import app.operator_auth.models  # noqa: F401
+    import app.system_settings.models  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
 
 
-def _identity(worker_id: str, *, build: str = "build-pg-1"):
+def _seed_profile_version(session: Session):
+    from app.assistant.skills.models import (
+        AssistantMainAgentProfile,
+        AssistantMainAgentProfileVersion,
+    )
+
+    profile = AssistantMainAgentProfile(
+        profile_key=f"lease-{uuid.uuid4().hex[:8]}",
+        display_name="Main Agent",
+        is_default=False,
+        migration_state="native",
+        runtime_enabled=False,
+    )
+    session.add(profile)
+    session.flush()
+    version = AssistantMainAgentProfileVersion(
+        profile_id=profile.id,
+        sequence_no=1,
+        version_name="v1",
+        version_source="save",
+        origin="api",
+        snapshot={"schemaVersion": 2, "content": "test"},
+        content_digest=DIGEST,
+    )
+    session.add(version)
+    session.flush()
+    return profile, version
+
+
+def _seed_model(session: Session):
+    from tests.agent_skill_test_support import create_default_model_binding
+
+    _cred, model, _binding = create_default_model_binding(session)
+    return model
+
+
+def _fresh_build() -> str:
+    """Unique build so claim_next never collides with leftover rows."""
+    return f"build-pg-lease-{uuid.uuid4().hex[:12]}"
+
+
+def _prepared_revision(session: Session, **overrides):
+    from app.assistant.runtime.contracts import (
+        AssistantRuntimeSubject,
+        PreparedRolloutRevision,
+    )
+    from app.assistant.runtime.repository import AssistantRuntimeRepository
+
+    _, profile_version = _seed_profile_version(session)
+    model = _seed_model(session)
+    subject = AssistantRuntimeSubject(
+        profile_version_id=overrides.get("profile_version_id", profile_version.id),
+        profile_content_digest=overrides.get(
+            "profile_content_digest", profile_version.content_digest
+        ),
+        model_id=overrides.get("model_id", model.id),
+        model_identity_digest=overrides.get("model_identity_digest", DIGEST_B),
+        package_closure=overrides.get(
+            "package_closure", ({"packageId": str(uuid.uuid4()), "digest": DIGEST_C},)
+        ),
+        package_closure_digest=overrides.get("package_closure_digest", DIGEST_C),
+        capability_closure_digest=overrides.get("capability_closure_digest", DIGEST_D),
+        seed_manifest_digest=overrides.get("seed_manifest_digest", DIGEST_E),
+        build_revision=overrides.get("build_revision", _fresh_build()),
+        runtime_contract_version=overrides.get("runtime_contract_version", 1),
+        checkpoint_codec_version=overrides.get("checkpoint_codec_version", CODEC),
+        capability_feature_digest=overrides.get("capability_feature_digest", DIGEST),
+    )
+    prepared = PreparedRolloutRevision.from_subject(
+        subject=subject,
+        revision_id=overrides.get("revision_id", uuid.uuid4()),
+        prepared_by_operator_id=None,
+        prepared_reason="lease-pg-test",
+    )
+    return AssistantRuntimeRepository(session).create_prepared_revision(prepared)
+
+
+def _identity(
+    worker_id: str,
+    *,
+    build: str,
+    codec_versions: tuple[int, ...] = (1, 2, 3),
+    feature_digest: str = DIGEST,
+    runtime_contract_version: int = 1,
+):
     from app.assistant.durable.worker_registry import WorkerIdentity
 
     return WorkerIdentity(
         worker_id=worker_id,
         app_build_revision=build,
-        runtime_contract_version=1,
-        supported_checkpoint_codec_versions=(1,),
-        capability_feature_digest=DIGEST,
+        runtime_contract_version=runtime_contract_version,
+        supported_checkpoint_codec_versions=codec_versions,
+        capability_feature_digest=feature_digest,
         hostname_label="pg-test",
     )
 
@@ -86,6 +255,20 @@ def _identity(worker_id: str, *, build: str = "build-pg-1"):
 def _make_run(session: Session, *, status: str = "queued", **kwargs):
     from app.assistant.models import AssistantChatRun, Conversation
 
+    build = kwargs.pop("required_app_build_revision", None) or _fresh_build()
+    prepared = kwargs.pop("prepared", None)
+    if prepared is None:
+        prepared = _prepared_revision(
+            session,
+            build_revision=build,
+            runtime_contract_version=kwargs.get("runtime_contract_version", 1),
+            checkpoint_codec_version=kwargs.get(
+                "required_checkpoint_codec_version", CODEC
+            ),
+            capability_feature_digest=kwargs.get(
+                "required_capability_feature_digest", DIGEST
+            ),
+        )
     conv = Conversation(title=f"pg-lease-{uuid.uuid4().hex[:10]}")
     session.add(conv)
     session.flush()
@@ -93,8 +276,19 @@ def _make_run(session: Session, *, status: str = "queued", **kwargs):
         conversation_id=conv.id,
         status=status,
         runtime_kind="main_agent",
-        runtime_contract_version=1,
-        required_app_build_revision=kwargs.pop("required_app_build_revision", "build-pg-1"),
+        main_agent_rollout_revision_id=prepared.id,
+        main_agent_profile_version_id=prepared.profile_version_id,
+        resolved_model_id=prepared.model_id,
+        runtime_closure_digest=DIGEST_9,
+        runtime_contract_version=int(kwargs.pop("runtime_contract_version", 1)),
+        required_checkpoint_codec_version=int(
+            kwargs.pop("required_checkpoint_codec_version", CODEC)
+        ),
+        required_capability_feature_digest=str(
+            kwargs.pop("required_capability_feature_digest", DIGEST)
+        ),
+        required_app_build_revision=build,
+        capability_ledger_mode=kwargs.pop("capability_ledger_mode", "enforced"),
         state_revision=int(kwargs.pop("state_revision", 0)),
         last_event_seq=int(kwargs.pop("last_event_seq", 0)),
         memory_commit_status=kwargs.pop("memory_commit_status", "pending"),
@@ -114,6 +308,7 @@ def test_two_session_claim_skip_locked_one_winner():
         with _session(engine) as s0:
             run = _make_run(s0, status="queued")
             run_id = run.id
+            build = str(run.required_app_build_revision)
 
         barrier = threading.Barrier(2)
         outcomes: list[tuple[str, str | None]] = []
@@ -123,7 +318,7 @@ def test_two_session_claim_skip_locked_one_winner():
             with _session(engine) as s:
                 svc = RunLeaseService(
                     s,
-                    identity=_identity(name),
+                    identity=_identity(name, build=build),
                     lease_ttl=timedelta(seconds=30),
                 )
                 barrier.wait(timeout=10)
@@ -166,7 +361,8 @@ def test_heartbeat_extends_without_revision_bump_and_lost_lease_zero_rows():
         _ensure_schema(engine)
         with _session(engine) as s:
             run = _make_run(s, status="queued")
-            svc = RunLeaseService(s, identity=_identity("hb-worker"))
+            build = str(run.required_app_build_revision)
+            svc = RunLeaseService(s, identity=_identity("hb-worker", build=build))
             claimed = svc.claim_next()
             assert claimed is not None
             rev = claimed.state_revision
@@ -223,8 +419,9 @@ def test_takeover_expired_running_to_recovering():
                 started_at=past,
             )
             run_id = run.id
+            build = str(run.required_app_build_revision)
 
-            svc = RunLeaseService(s, identity=_identity("takeover-w"))
+            svc = RunLeaseService(s, identity=_identity("takeover-w", build=build))
             claimed = svc.claim_next()
             assert claimed is not None
             assert claimed.kind == "takeover_running"
@@ -258,7 +455,8 @@ def test_reclaim_expired_cancelling_cancellation_only():
                 heartbeat_at=past,
                 cancel_requested_at=past,
             )
-            svc = RunLeaseService(s, identity=_identity("cancel-w"))
+            build = str(run.required_app_build_revision)
+            svc = RunLeaseService(s, identity=_identity("cancel-w", build=build))
             claimed = svc.claim_next()
             assert claimed is not None
             assert claimed.kind == "reclaim_cancelling"
@@ -268,7 +466,7 @@ def test_reclaim_expired_cancelling_cancellation_only():
             decision = clf.classify(
                 run=claimed.run,
                 claim_kind=claimed.kind,
-                worker_app_build_revision="build-pg-1",
+                worker_app_build_revision=build,
             )
             assert decision.kind == "cancel_only"
             assert not decision.allow_provider_io
@@ -290,32 +488,33 @@ def test_build_mismatch_not_claimed():
     with _engine() as engine:
         _ensure_schema(engine)
         with _session(engine) as s:
+            run_build = f"build-other-{uuid.uuid4().hex[:8]}"
             _make_run(
                 s,
                 status="queued",
-                required_app_build_revision="build-other",
+                required_app_build_revision=run_build,
             )
-            svc = RunLeaseService(s, identity=_identity("w1", build="build-pg-1"))
+            svc = RunLeaseService(
+                s, identity=_identity("w1", build=f"mismatch-{uuid.uuid4().hex[:8]}")
+            )
             claimed = svc.claim_next()
             assert claimed is None
 
 
 def test_codec_incompatible_worker_never_claims():
-    """Worker without codec v1 support must not claim (registration filter)."""
+    """Worker without required codec support must not claim."""
     from app.assistant.durable.leases import RunLeaseService
-    from app.assistant.durable.worker_registry import WorkerIdentity
 
     with _engine() as engine:
         _ensure_schema(engine)
         with _session(engine) as s:
-            _make_run(s, status="queued")
-            # Construct identity that does not support codec 1.
-            identity = WorkerIdentity(
-                worker_id="codec-bad",
-                app_build_revision="build-pg-1",
-                runtime_contract_version=1,
-                supported_checkpoint_codec_versions=(99,),
-                capability_feature_digest=DIGEST,
+            run = _make_run(s, status="queued")
+            build = str(run.required_app_build_revision)
+            # Construct identity that does not support the Run's required codec.
+            identity = _identity(
+                "codec-bad",
+                build=build,
+                codec_versions=(99,),
             )
             svc = RunLeaseService(s, identity=identity)
             claimed = svc.claim_next()
@@ -330,9 +529,10 @@ def test_backoff_sets_next_attempt_and_clears_lease():
         _ensure_schema(engine)
         with _session(engine) as s:
             run = _make_run(s, status="queued")
+            build = str(run.required_app_build_revision)
             svc = RunLeaseService(
                 s,
-                identity=_identity("backoff-w"),
+                identity=_identity("backoff-w", build=build),
                 lease_ttl=timedelta(seconds=30),
                 retry_base_ms=500,
                 retry_max_ms=30000,
@@ -371,8 +571,9 @@ def test_draining_stops_claims():
     with _engine() as engine:
         _ensure_schema(engine)
         with _session(engine) as s:
-            _make_run(s, status="queued")
-            svc = RunLeaseService(s, identity=_identity("drain-w"))
+            run = _make_run(s, status="queued")
+            build = str(run.required_app_build_revision)
+            svc = RunLeaseService(s, identity=_identity("drain-w", build=build))
             claimed = svc.claim_next(draining=True)
             assert claimed is None
 
@@ -398,7 +599,8 @@ def test_database_time_used_for_expiry_check():
                 lease_expires_at=past,
                 heartbeat_at=past,
             )
-            svc = RunLeaseService(s, identity=_identity("dbtime-w"))
+            build = str(run.required_app_build_revision)
+            svc = RunLeaseService(s, identity=_identity("dbtime-w", build=build))
             claimed = svc.claim_next()
             assert claimed is not None
             assert claimed.run_id == run.id
@@ -413,7 +615,7 @@ def test_live_lease_not_taken_over():
         _ensure_schema(engine)
         with _session(engine) as s:
             future = utcnow() + timedelta(hours=1)
-            _make_run(
+            run = _make_run(
                 s,
                 status="running",
                 state_revision=1,
@@ -422,6 +624,7 @@ def test_live_lease_not_taken_over():
                 lease_expires_at=future,
                 heartbeat_at=utcnow(),
             )
-            svc = RunLeaseService(s, identity=_identity("other-w"))
+            build = str(run.required_app_build_revision)
+            svc = RunLeaseService(s, identity=_identity("other-w", build=build))
             claimed = svc.claim_next()
             assert claimed is None

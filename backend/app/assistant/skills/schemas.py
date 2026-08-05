@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Literal, Mapping
 from uuid import UUID
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
@@ -617,8 +617,83 @@ class FallbackPolicyV1(FrozenContract):
         return self
 
 
+def _validate_profile_base_prompt(value: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("basePrompt must be a non-empty string")
+    if len(value) > MAX_BASE_PROMPT_LEN:
+        raise ValueError(f"basePrompt exceeds {MAX_BASE_PROMPT_LEN} characters")
+    return value
+
+
+def _validate_profile_response_style(value: Any) -> dict[str, str]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("responseStyle must be a string-to-string map")
+    if len(value) > MAX_RESPONSE_STYLE_ENTRIES:
+        raise ValueError(
+            f"responseStyle exceeds {MAX_RESPONSE_STYLE_ENTRIES} entries"
+        )
+    out: dict[str, str] = {}
+    for key, item in value.items():
+        if not isinstance(key, str) or not isinstance(item, str):
+            raise ValueError("responseStyle keys and values must be strings")
+        if not key or len(key) > 128:
+            raise ValueError("responseStyle key length invalid")
+        if len(item) > MAX_RESPONSE_STYLE_VALUE_LEN:
+            raise ValueError("responseStyle value length invalid")
+        out[key] = item
+    return out
+
+
+def _validate_profile_entrypoints(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)) or not value:
+        raise ValueError("supportedEntrypoints must be a non-empty list")
+    known = set(KNOWN_MAIN_AGENT_ENTRYPOINTS)
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or item not in known:
+            raise ValueError(f"unknown entrypoint {item!r}")
+        if item in seen:
+            raise ValueError("supportedEntrypoints must be unique")
+        seen.add(item)
+        out.append(item)
+    ordered = tuple(sorted(out))
+    if ordered != tuple(out):
+        raise ValueError("supportedEntrypoints must be deterministically ordered")
+    return ordered
+
+
+def _validate_profile_control_keys(value: Any) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("controlCapabilityKeys must be a list of Domain Keys")
+    if len(value) > MAX_CONTROL_CAPABILITY_KEYS:
+        raise ValueError(
+            f"controlCapabilityKeys exceed {MAX_CONTROL_CAPABILITY_KEYS} items"
+        )
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        if (
+            not isinstance(item, str)
+            or not item
+            or len(item) > MAX_CAPABILITY_KEY_LEN
+        ):
+            raise ValueError(
+                f"control Capability key must be 1–{MAX_CAPABILITY_KEY_LEN} characters"
+            )
+        if item in seen:
+            raise ValueError("controlCapabilityKeys must be unique")
+        seen.add(item)
+        out.append(item)
+    return tuple(out)
+
+
 class MainAgentProfileSnapshotV1(FrozenContract):
-    """Immutable Main Agent Profile v1 snapshot (Decision 6)."""
+    """Immutable Main Agent Profile v1 snapshot (Decision 6). Historical read only."""
 
     schema_version: Literal[1]
     base_prompt: str
@@ -644,85 +719,22 @@ class MainAgentProfileSnapshotV1(FrozenContract):
     @field_validator("base_prompt")
     @classmethod
     def _validate_base_prompt(cls, value: str) -> str:
-        if not isinstance(value, str) or not value.strip():
-            raise ValueError("basePrompt must be a non-empty string")
-        if len(value) > MAX_BASE_PROMPT_LEN:
-            raise ValueError(
-                f"basePrompt exceeds {MAX_BASE_PROMPT_LEN} characters"
-            )
-        return value
+        return _validate_profile_base_prompt(value)
 
     @field_validator("response_style", mode="before")
     @classmethod
     def _validate_response_style(cls, value: Any) -> dict[str, str]:
-        if value is None:
-            return {}
-        if not isinstance(value, dict):
-            raise ValueError("responseStyle must be a string-to-string map")
-        if len(value) > MAX_RESPONSE_STYLE_ENTRIES:
-            raise ValueError(
-                f"responseStyle exceeds {MAX_RESPONSE_STYLE_ENTRIES} entries"
-            )
-        out: dict[str, str] = {}
-        for key, item in value.items():
-            if not isinstance(key, str) or not isinstance(item, str):
-                raise ValueError("responseStyle keys and values must be strings")
-            if not key or len(key) > 128:
-                raise ValueError("responseStyle key length invalid")
-            if len(item) > MAX_RESPONSE_STYLE_VALUE_LEN:
-                raise ValueError("responseStyle value length invalid")
-            out[key] = item
-        return out
+        return _validate_profile_response_style(value)
 
     @field_validator("supported_entrypoints", mode="before")
     @classmethod
     def _validate_entrypoints(cls, value: Any) -> tuple[str, ...]:
-        if not isinstance(value, (list, tuple)) or not value:
-            raise ValueError("supportedEntrypoints must be a non-empty list")
-        known = set(KNOWN_MAIN_AGENT_ENTRYPOINTS)
-        seen: set[str] = set()
-        out: list[str] = []
-        for item in value:
-            if not isinstance(item, str) or item not in known:
-                raise ValueError(f"unknown entrypoint {item!r}")
-            if item in seen:
-                raise ValueError("supportedEntrypoints must be unique")
-            seen.add(item)
-            out.append(item)
-        ordered = tuple(sorted(out))
-        if ordered != tuple(out):
-            raise ValueError(
-                "supportedEntrypoints must be deterministically ordered"
-            )
-        return ordered
+        return _validate_profile_entrypoints(value)
 
     @field_validator("control_capability_keys", mode="before")
     @classmethod
     def _validate_control_keys(cls, value: Any) -> tuple[str, ...]:
-        if value is None:
-            return ()
-        if not isinstance(value, (list, tuple)):
-            raise ValueError("controlCapabilityKeys must be a list of Domain Keys")
-        if len(value) > MAX_CONTROL_CAPABILITY_KEYS:
-            raise ValueError(
-                f"controlCapabilityKeys exceed {MAX_CONTROL_CAPABILITY_KEYS} items"
-            )
-        out: list[str] = []
-        seen: set[str] = set()
-        for item in value:
-            if (
-                not isinstance(item, str)
-                or not item
-                or len(item) > MAX_CAPABILITY_KEY_LEN
-            ):
-                raise ValueError(
-                    f"control Capability key must be 1–{MAX_CAPABILITY_KEY_LEN} characters"
-                )
-            if item in seen:
-                raise ValueError("controlCapabilityKeys must be unique")
-            seen.add(item)
-            out.append(item)
-        return tuple(out)
+        return _validate_profile_control_keys(value)
 
     def normalized_payload(self) -> dict[str, Any]:
         """Return the canonical camelCase JSON payload used for digests/storage."""
@@ -732,45 +744,145 @@ class MainAgentProfileSnapshotV1(FrozenContract):
         return sha256_canonical_json(self.normalized_payload())
 
 
+class MainAgentRuntimePolicyV2(FrozenContract):
+    runtime_kind: Literal["main_agent"] = "main_agent"
+    recovery_scope: Literal["same_run_only"] = "same_run_only"
+
+
+class MainAgentProfileSnapshotV2(FrozenContract):
+    """Immutable Main Agent Profile v2 snapshot (production exclusive)."""
+
+    schema_version: Literal[2]
+    base_prompt: str
+    response_style: dict[str, str] = Field(default_factory=dict)
+    supported_entrypoints: tuple[MainAgentEntrypoint, ...]
+    model_requirements: ModelRequirementsV1
+    control_capability_keys: tuple[str, ...] = ()
+    skill_catalog_scope: SkillCatalogScopeV1 = Field(
+        default_factory=SkillCatalogScopeV1
+    )
+    context_budget: ContextBudgetV1
+    output_budget: OutputBudgetV1
+    global_safety_policy: GlobalSafetyPolicyV1
+    runtime_policy: MainAgentRuntimePolicyV2 = Field(
+        default_factory=MainAgentRuntimePolicyV2
+    )
+
+    @field_validator("schema_version", mode="before")
+    @classmethod
+    def _validate_schema_version(cls, value: Any) -> int:
+        if value is not True and value == 2 and type(value) is int:
+            return 2
+        raise ValueError("schemaVersion must be exactly integer 2")
+
+    @field_validator("base_prompt")
+    @classmethod
+    def _validate_base_prompt(cls, value: str) -> str:
+        return _validate_profile_base_prompt(value)
+
+    @field_validator("response_style", mode="before")
+    @classmethod
+    def _validate_response_style(cls, value: Any) -> dict[str, str]:
+        return _validate_profile_response_style(value)
+
+    @field_validator("supported_entrypoints", mode="before")
+    @classmethod
+    def _validate_entrypoints(cls, value: Any) -> tuple[str, ...]:
+        return _validate_profile_entrypoints(value)
+
+    @field_validator("control_capability_keys", mode="before")
+    @classmethod
+    def _validate_control_keys(cls, value: Any) -> tuple[str, ...]:
+        return _validate_profile_control_keys(value)
+
+    def normalized_payload(self) -> dict[str, Any]:
+        return self.model_dump(by_alias=True, mode="json")
+
+    def content_digest(self) -> str:
+        return sha256_canonical_json(self.normalized_payload())
+
+
+ReadableMainAgentProfileSnapshot = (
+    MainAgentProfileSnapshotV1 | MainAgentProfileSnapshotV2
+)
+
+
+class ProfileSchemaNotPublishable(ValueError):
+    reason_code = "profile_schema_unsupported"
+
+
+def parse_main_agent_profile_snapshot_for_read(
+    payload: Mapping[str, Any],
+) -> ReadableMainAgentProfileSnapshot:
+    version = payload.get("schemaVersion", payload.get("schema_version"))
+    if version == 1 and type(version) is int:
+        return MainAgentProfileSnapshotV1.model_validate(payload)
+    if version == 2 and type(version) is int:
+        return MainAgentProfileSnapshotV2.model_validate(payload)
+    raise ValueError("unsupported Main Agent Profile schema version")
+
+
+def require_production_profile_v2(
+    snapshot: ReadableMainAgentProfileSnapshot,
+) -> MainAgentProfileSnapshotV2:
+    if not isinstance(snapshot, MainAgentProfileSnapshotV2):
+        raise ProfileSchemaNotPublishable(
+            "Profile schema V2 is required for production operations"
+        )
+    return snapshot
+
+
+def _default_model_requirements() -> ModelRequirementsV1:
+    return ModelRequirementsV1(
+        tool_calling=True,
+        streaming=True,
+        multi_tool_calls=True,
+        json_schema=True,
+    )
+
+
+def _default_context_budget() -> ContextBudgetV1:
+    return ContextBudgetV1(
+        max_prompt_characters=MAX_PROMPT_CHARACTERS,
+        max_active_skills=MAX_ACTIVE_SKILLS,
+        max_skill_instruction_characters=MAX_SKILL_INSTRUCTION_CHARACTERS,
+        max_single_skill_instruction_characters=MAX_SINGLE_SKILL_INSTRUCTION_CHARACTERS,
+        max_history_characters=MAX_HISTORY_CHARACTERS,
+        max_tool_summary_characters=MAX_TOOL_SUMMARY_CHARACTERS,
+        max_resource_bytes_per_call=MAX_RESOURCE_BYTES_PER_CALL,
+    )
+
+
+def _default_output_budget() -> OutputBudgetV1:
+    return OutputBudgetV1(
+        max_completion_tokens=MAX_COMPLETION_TOKENS,
+        max_provider_rounds=MAX_PROVIDER_ROUNDS,
+        max_outer_agent_rounds=MAX_OUTER_AGENT_ROUNDS,
+        max_total_capability_calls=MAX_TOTAL_CAPABILITY_CALLS,
+        max_parallel_calls=MAX_PARALLEL_CALLS,
+        max_capability_depth=MAX_CAPABILITY_DEPTH,
+        max_agent_depth=MAX_AGENT_DEPTH,
+        max_same_read_signature=MAX_SAME_READ_SIGNATURE,
+        max_completion_followup_rounds=MAX_COMPLETION_FOLLOWUP_ROUNDS,
+        max_wall_time_ms=MAX_WALL_TIME_MS,
+    )
+
+
 def default_main_agent_profile_snapshot() -> MainAgentProfileSnapshotV1:
-    """Conservative bootstrap default (Decision 6). Not an activated runtime."""
+    """Historical V1 bootstrap shape. Not publishable for production operations."""
     return MainAgentProfileSnapshotV1(
         schema_version=1,
         base_prompt=DEFAULT_BOOTSTRAP_BASE_PROMPT,
         response_style={},
         supported_entrypoints=("assistant_chat",),
-        model_requirements=ModelRequirementsV1(
-            tool_calling=True,
-            streaming=True,
-            multi_tool_calls=True,
-            json_schema=True,
-        ),
+        model_requirements=_default_model_requirements(),
         control_capability_keys=(),
         skill_catalog_scope=SkillCatalogScopeV1(
             mode="all_published",
             package_ids=(),
         ),
-        context_budget=ContextBudgetV1(
-            max_prompt_characters=MAX_PROMPT_CHARACTERS,
-            max_active_skills=MAX_ACTIVE_SKILLS,
-            max_skill_instruction_characters=MAX_SKILL_INSTRUCTION_CHARACTERS,
-            max_single_skill_instruction_characters=MAX_SINGLE_SKILL_INSTRUCTION_CHARACTERS,
-            max_history_characters=MAX_HISTORY_CHARACTERS,
-            max_tool_summary_characters=MAX_TOOL_SUMMARY_CHARACTERS,
-            max_resource_bytes_per_call=MAX_RESOURCE_BYTES_PER_CALL,
-        ),
-        output_budget=OutputBudgetV1(
-            max_completion_tokens=MAX_COMPLETION_TOKENS,
-            max_provider_rounds=MAX_PROVIDER_ROUNDS,
-            max_outer_agent_rounds=MAX_OUTER_AGENT_ROUNDS,
-            max_total_capability_calls=MAX_TOTAL_CAPABILITY_CALLS,
-            max_parallel_calls=MAX_PARALLEL_CALLS,
-            max_capability_depth=MAX_CAPABILITY_DEPTH,
-            max_agent_depth=MAX_AGENT_DEPTH,
-            max_same_read_signature=MAX_SAME_READ_SIGNATURE,
-            max_completion_followup_rounds=MAX_COMPLETION_FOLLOWUP_ROUNDS,
-            max_wall_time_ms=MAX_WALL_TIME_MS,
-        ),
+        context_budget=_default_context_budget(),
+        output_budget=_default_output_budget(),
         global_safety_policy=GlobalSafetyPolicyV1(deny_by_default=True),
         fallback_policy=FallbackPolicyV1(
             legacy_runtime_allowed=True,
@@ -779,16 +891,36 @@ def default_main_agent_profile_snapshot() -> MainAgentProfileSnapshotV1:
     )
 
 
+def default_main_agent_profile_snapshot_v2() -> MainAgentProfileSnapshotV2:
+    """Production bootstrap default (Profile schema V2). Not an activated runtime."""
+    return MainAgentProfileSnapshotV2(
+        schema_version=2,
+        base_prompt=DEFAULT_BOOTSTRAP_BASE_PROMPT,
+        response_style={},
+        supported_entrypoints=("assistant_chat",),
+        model_requirements=_default_model_requirements(),
+        control_capability_keys=(),
+        skill_catalog_scope=SkillCatalogScopeV1(
+            mode="all_published",
+            package_ids=(),
+        ),
+        context_budget=_default_context_budget(),
+        output_budget=_default_output_budget(),
+        global_safety_policy=GlobalSafetyPolicyV1(deny_by_default=True),
+        runtime_policy=MainAgentRuntimePolicyV2(),
+    )
+
+
 class SaveMainAgentProfileDraftCommand(CamelModel):
-    """Append or re-point a Main Agent Profile draft."""
+    """Append or re-point a Main Agent Profile draft (V2-only)."""
 
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
-    snapshot: MainAgentProfileSnapshotV1
+    snapshot: MainAgentProfileSnapshotV2
     expected_aggregate_revision: int = Field(ge=0)
     request_id: str = Field(min_length=1, max_length=128)
     version_name: str | None = None
-    origin: Literal["api", "legacy"] = "api"
+    origin: Literal["api", "system_bootstrap"] = "api"
     source_ref: dict[str, Any] | None = None
 
 
@@ -840,13 +972,17 @@ __all__ = [
     "KNOWN_MAIN_AGENT_ENTRYPOINTS",
     "MainAgentEntrypoint",
     "MainAgentProfileSnapshotV1",
+    "MainAgentProfileSnapshotV2",
     "MainAgentProfileSummary",
     "MainAgentProfileVersionDetail",
     "MainAgentProfileVersionSummary",
+    "MainAgentRuntimePolicyV2",
     "ModelRequirementsV1",
     "OutputBudgetV1",
+    "ProfileSchemaNotPublishable",
     "PublishMainAgentProfileCommand",
     "PublishSkillVersionCommand",
+    "ReadableMainAgentProfileSnapshot",
     "ResourceKind",
     "SaveMainAgentProfileDraftCommand",
     "SaveSkillDraftCommand",
@@ -864,4 +1000,7 @@ __all__ = [
     "SkillVersionSummary",
     "VersionSource",
     "default_main_agent_profile_snapshot",
+    "default_main_agent_profile_snapshot_v2",
+    "parse_main_agent_profile_snapshot_for_read",
+    "require_production_profile_v2",
 ]

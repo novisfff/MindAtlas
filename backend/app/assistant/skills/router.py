@@ -28,7 +28,7 @@ from app.assistant.skills.package_io import (
 )
 from app.assistant.skills.schemas import (
     CreateSkillPackageCommand,
-    MainAgentProfileSnapshotV1,
+    MainAgentProfileSnapshotV2,
     PublishMainAgentProfileCommand,
     PublishSkillVersionCommand,
     SaveMainAgentProfileDraftCommand,
@@ -76,11 +76,11 @@ class PublishDraftRequest(CamelModel):
 
 
 class MainAgentDraftSaveRequest(CamelModel):
-    """Router-facing Main Agent draft body."""
+    """Router-facing Main Agent draft body (V2-only HTTP boundary)."""
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-    snapshot: MainAgentProfileSnapshotV1
+    snapshot: MainAgentProfileSnapshotV2
     expected_aggregate_revision: int = Field(alias="expectedAggregateRevision", ge=0)
     request_id: str = Field(alias="requestId", min_length=1, max_length=128)
     version_name: str | None = Field(default=None, alias="versionName")

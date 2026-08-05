@@ -1,0 +1,305 @@
+"""Operator browser auth routes: login, session probe, logout, password, revoke-all.
+
+Routers are split by policy so ``main.py`` can mount each under the matching
+parent. Endpoint-level principal/CSRF checks remain on mutations as defense in
+depth; the protected parent stages the generic mutation audit.
+"""
+
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends, Response
+from fastapi.responses import JSONResponse
+from pydantic import ValidationError
+from sqlalchemy.orm import Session
+from starlette.requests import Request
+
+from app.common.exceptions import ApiException
+from app.common.responses import ApiResponse
+from app.config import Settings, get_settings
+from app.database import get_db
+from app.operator_auth.constants import SESSION_COOKIE_NAME
+from app.operator_auth.contracts import OperatorPrincipal
+from app.operator_auth.dependencies import (
+    CODE_AUTH_UNAVAILABLE,
+    CODE_INVALID_CREDENTIALS,
+    CODE_LOGIN_LOCKED,
+    build_operator_auth_service,
+    clear_session_cookies,
+    load_session_mac_key_ring,
+    request_security_context,
+    require_csrf,
+    require_operator_principal,
+    require_viewer_principal,
+    set_session_cookies,
+)
+from app.operator_auth.origin import require_json_same_origin
+from app.operator_auth.password import PasswordPolicyError
+from app.operator_auth.schemas import (
+    OperatorLoginRequest,
+    OperatorPasswordChangeRequest,
+    OperatorRevokeAllRequest,
+    OperatorSessionResponse,
+)
+from app.operator_auth.service import AuthRejected, LoginLocked
+
+# Split routers carry the full path prefix; main.py mounts each under a policy parent.
+# Aggregate ``router`` has no prefix so include_router does not double paths —
+# older tests still ``include_router(operator_auth_router)``.
+_AUTH_PREFIX = "/api/operator-auth"
+_AUTH_TAGS = ["operator-auth"]
+
+login_router = APIRouter(prefix=_AUTH_PREFIX, tags=_AUTH_TAGS)
+session_probe_router = APIRouter(prefix=_AUTH_PREFIX, tags=_AUTH_TAGS)
+protected_operator_auth_router = APIRouter(prefix=_AUTH_PREFIX, tags=_AUTH_TAGS)
+router = APIRouter(tags=_AUTH_TAGS)
+
+
+def _session_payload(
+    *,
+    authenticated: bool,
+    role: str | None = None,
+    idle_expires_at=None,
+    absolute_expires_at=None,
+) -> dict:
+    return OperatorSessionResponse(
+        authenticated=authenticated,
+        role=role,  # type: ignore[arg-type]
+        idle_expires_at=idle_expires_at,
+        absolute_expires_at=absolute_expires_at,
+    ).model_dump(by_alias=True)
+
+
+async def login(
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> ApiResponse | JSONResponse:
+    """Exchange the exact Operator password for host-only session cookies.
+
+    Origin / content-type gates run before any secret inspection and before
+    Pydantic body parsing so non-JSON clients receive 415, not 422.
+    """
+    require_json_same_origin(request, canonical_origin=settings.canonical_origin)
+
+    try:
+        raw_body = await request.json()
+    except Exception as exc:  # noqa: BLE001 - normalize malformed JSON
+        raise ApiException(
+            status_code=400,
+            code=40010,
+            message="invalid_json_body",
+        ) from exc
+    try:
+        body = OperatorLoginRequest.model_validate(raw_body)
+    except ValidationError as exc:
+        # Manual model_validate raises raw Pydantic ValidationError (not
+        # RequestValidationError). Return a generic 422 without echoing input
+        # values (password) into logs or the response body.
+        raise ApiException(
+            status_code=422,
+            code=42210,
+            message="login_request_invalid",
+        ) from exc
+
+    if load_session_mac_key_ring(settings) is None:
+        raise ApiException(
+            status_code=503,
+            code=CODE_AUTH_UNAVAILABLE,
+            message="operator_auth_unavailable",
+        )
+
+    service = build_operator_auth_service(db, settings)
+    context = request_security_context(request, settings)
+    try:
+        issued = service.login(body.password, context)
+    except LoginLocked as exc:
+        return JSONResponse(
+            status_code=429,
+            content=ApiResponse.fail(
+                code=CODE_LOGIN_LOCKED,
+                message="login_locked",
+                data={"retryAfterSeconds": exc.retry_after_seconds},
+            ).model_dump(),
+            headers={
+                "Retry-After": str(exc.retry_after_seconds),
+                "Cache-Control": "no-store",
+            },
+        )
+    except AuthRejected as exc:
+        raise ApiException(
+            status_code=401,
+            code=CODE_INVALID_CREDENTIALS,
+            message="invalid_credentials",
+        ) from exc
+    except PasswordPolicyError as exc:
+        # Login body only carries the existing secret; policy errors are generic.
+        raise ApiException(
+            status_code=401,
+            code=CODE_INVALID_CREDENTIALS,
+            message="invalid_credentials",
+        ) from exc
+
+    set_session_cookies(
+        response,
+        session_cookie_value=issued.session_cookie_value,
+        csrf_cookie_value=issued.csrf_cookie_value,
+        settings=settings,
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return ApiResponse.ok(
+        _session_payload(
+            authenticated=True,
+            role=issued.principal.role,
+            idle_expires_at=issued.idle_expires_at,
+            absolute_expires_at=issued.absolute_expires_at,
+        )
+    )
+
+
+def get_session(
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> ApiResponse:
+    """Optional session probe — never raises 401; clears invalid cookies."""
+    value = request.cookies.get(SESSION_COOKIE_NAME)
+    if not value:
+        response.headers["Cache-Control"] = "no-store"
+        return ApiResponse.ok(_session_payload(authenticated=False))
+
+    if load_session_mac_key_ring(settings) is None:
+        clear_session_cookies(response, settings=settings)
+        response.headers["Cache-Control"] = "no-store"
+        return ApiResponse.ok(_session_payload(authenticated=False))
+
+    service = build_operator_auth_service(db, settings)
+    context = request_security_context(request, settings)
+    # GET probe: session only — no CSRF rotation on this request.
+    resolved = service.resolve_session(value, context)
+    if resolved is None:
+        clear_session_cookies(response, settings=settings)
+        response.headers["Cache-Control"] = "no-store"
+        return ApiResponse.ok(_session_payload(authenticated=False))
+
+    if resolved.rotated_cookie is not None:
+        session_value, csrf_value = resolved.rotated_cookie
+        set_session_cookies(
+            response,
+            session_cookie_value=session_value,
+            csrf_cookie_value=csrf_value,
+            settings=settings,
+        )
+
+    response.headers["Cache-Control"] = "no-store"
+    return ApiResponse.ok(
+        _session_payload(
+            authenticated=True,
+            role=resolved.principal.role,
+            idle_expires_at=resolved.idle_expires_at,
+            absolute_expires_at=resolved.absolute_expires_at,
+        )
+    )
+
+
+def logout(
+    request: Request,
+    response: Response,
+    principal: OperatorPrincipal = Depends(require_viewer_principal),
+    _: None = Depends(require_csrf),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> ApiResponse:
+    """Revoke the current session and expire browser cookies."""
+    service = build_operator_auth_service(db, settings)
+    context = request_security_context(request, settings)
+    service.revoke_current(principal=principal, context=context)
+    clear_session_cookies(response, settings=settings)
+    response.headers["Cache-Control"] = "no-store"
+    return ApiResponse.ok(_session_payload(authenticated=False))
+
+
+def change_password(
+    body: OperatorPasswordChangeRequest,
+    request: Request,
+    response: Response,
+    principal: OperatorPrincipal = Depends(require_operator_principal),
+    _: None = Depends(require_csrf),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> ApiResponse:
+    """Change the Operator password, revoke every session, and clear cookies."""
+    service = build_operator_auth_service(db, settings)
+    context = request_security_context(request, settings)
+    try:
+        service.change_password(
+            principal=principal,
+            current_password=body.current_password,
+            new_password=body.new_password,
+            context=context,
+        )
+    except AuthRejected as exc:
+        raise ApiException(
+            status_code=401,
+            code=CODE_INVALID_CREDENTIALS,
+            message="invalid_credentials",
+        ) from exc
+    except PasswordPolicyError as exc:
+        raise ApiException(
+            status_code=400,
+            code=40010,
+            message="password_policy_rejected",
+        ) from exc
+
+    clear_session_cookies(response, settings=settings)
+    response.headers["Cache-Control"] = "no-store"
+    return ApiResponse.ok(_session_payload(authenticated=False))
+
+
+def revoke_all_sessions(
+    body: OperatorRevokeAllRequest,
+    request: Request,
+    response: Response,
+    principal: OperatorPrincipal = Depends(require_operator_principal),
+    _: None = Depends(require_csrf),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> ApiResponse:
+    """Revoke every active session for the Operator and clear cookies."""
+    service = build_operator_auth_service(db, settings)
+    context = request_security_context(request, settings)
+    service.revoke_all(
+        principal=principal,
+        context=context,
+        reason=body.reason,
+    )
+    clear_session_cookies(response, settings=settings)
+    response.headers["Cache-Control"] = "no-store"
+    return ApiResponse.ok(_session_payload(authenticated=False))
+
+
+# Register on split routers (policy parents mount these).
+login_router.add_api_route(
+    "/login", login, methods=["POST"], response_model=ApiResponse
+)
+session_probe_router.add_api_route(
+    "/session", get_session, methods=["GET"], response_model=ApiResponse
+)
+protected_operator_auth_router.add_api_route(
+    "/logout", logout, methods=["POST"], response_model=ApiResponse
+)
+protected_operator_auth_router.add_api_route(
+    "/password", change_password, methods=["POST"], response_model=ApiResponse
+)
+protected_operator_auth_router.add_api_route(
+    "/sessions/revoke-all",
+    revoke_all_sessions,
+    methods=["POST"],
+    response_model=ApiResponse,
+)
+
+# Aggregate for tests that still import ``router``.
+router.include_router(login_router)
+router.include_router(session_probe_router)
+router.include_router(protected_operator_auth_router)

@@ -142,8 +142,9 @@ def _material(plan: Any, *, configs: dict | None = None) -> Any:
 def _seed_running_with_base(db, *, deadline_at: datetime | None = None):
     from app.assistant.durable.materialize import materialize_base_run_state
     from app.assistant.durable.repository import DurableRunRepository, LeaseToken
-    from app.assistant.models import AssistantChatRun, Conversation, Message
+    from app.assistant.models import Conversation, Message
     from app.assistant.provider_loop.messages import ProviderUserMessage
+    from tests.assistant_runtime_support import make_main_agent_run
 
     _register_worker(db)
     conv = Conversation(title=f"t-{uuid.uuid4().hex[:8]}")
@@ -153,21 +154,18 @@ def _seed_running_with_base(db, *, deadline_at: datetime | None = None):
     assistant = Message(conversation_id=conv.id, role="assistant", content="")
     db.add_all([user, assistant])
     db.flush()
-    run = AssistantChatRun(
-        conversation_id=conv.id,
-        user_message_id=user.id,
-        assistant_message_id=assistant.id,
+    run = make_main_agent_run(
+        db,
+        conversation=conv,
+        user_message=user,
+        assistant_message=assistant,
         status="queued",
-        runtime_kind="main_agent",
+        build_revision=BUILD,
         runtime_contract_version=1,
-        required_app_build_revision=BUILD,
         state_revision=0,
         deadline_at=deadline_at
         or (datetime.now(timezone.utc) + timedelta(minutes=30)),
     )
-    db.add(run)
-    db.commit()
-    db.refresh(run)
 
     repo = DurableRunRepository(db)
     claimed = repo.claim_queued(
@@ -802,7 +800,7 @@ class TestDurableBlockingRuntimeForbidden:
         self.db.close()
 
     def test_main_agent_create_and_wait_forbidden_before_row(self) -> None:
-        from app.assistant.models import AssistantChatRun, Conversation
+        from app.assistant.models import Conversation
         from app.assistant.workflow.human_approval_runtime import (
             DurableBlockingRuntimeForbidden,
             HumanLoopContext,
@@ -813,17 +811,16 @@ class TestDurableBlockingRuntimeForbidden:
         conv = Conversation(title="guard")
         self.db.add(conv)
         self.db.flush()
-        run = AssistantChatRun(
-            conversation_id=conv.id,
+        from tests.assistant_runtime_support import make_main_agent_run
+
+        run = make_main_agent_run(
+            self.db,
+            conversation=conv,
             status="running",
-            runtime_kind="main_agent",
+            build_revision=BUILD,
             runtime_contract_version=1,
-            required_app_build_revision=BUILD,
             state_revision=1,
         )
-        self.db.add(run)
-        self.db.commit()
-        self.db.refresh(run)
 
         factory = sessionmaker(bind=self.db.get_bind())
         # Bind factory to same engine; for tests, wrap current session engine.

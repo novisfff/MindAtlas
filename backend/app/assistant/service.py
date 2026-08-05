@@ -402,126 +402,47 @@ class AssistantService:
         self.db.commit()
 
     def chat_stream(self, conversation_id: UUID, user_message: str, *, stream_output: bool = True) -> Iterator[bytes]:
-        """SSE 聊天入口：创建 run、后台执行、附着回放流。"""
+        """SSE chat entry: atomic Main-Agent admission, then attach to the Run stream.
+
+        Plan 2 Task 8: Message + Run + initial event are created only after locked
+        readiness/closure/worker gates succeed. No runtime selector and no Legacy
+        daemon spawn. ``stream_output`` is retained for call-site compatibility.
+        """
+        _ = stream_output
+        # Ensure the conversation exists before admission (404, not 503).
         conversation = self.get_conversation_basic(conversation_id)
-        locale = resolve_system_locale(self.db)
-        run_svc = AssistantChatRunService(self.db)
-        active = run_svc.get_active_run(conversation_id=conversation.id)
-        if active is not None:
+        from app.assistant.runtime.admission import (
+            ADMISSION_HTTP_REASON,
+            AssistantAdmissionError,
+            AssistantChatAdmissionService,
+            ConcurrentChatAdmission,
+        )
+
+        try:
+            run = AssistantChatAdmissionService(self.db).admit_and_create(
+                conversation_id=conversation.id,
+                user_message=user_message,
+            )
+        except AssistantAdmissionError as exc:
+            raise ApiException(
+                status_code=503,
+                code=50310,
+                message="Assistant is not ready to accept a new Run.",
+                details={
+                    "admissionReason": ADMISSION_HTTP_REASON.get(
+                        exc.reason_code, exc.reason_code
+                    )
+                },
+            ) from exc
+        except ConcurrentChatAdmission as exc:
             raise ApiException(
                 status_code=409,
                 code=42260,
-                message="Conversation already has an active run. Stop it before sending a new message.",
-            )
-
-        user_msg = Message(
-            conversation_id=conversation.id,
-            role="user",
-            content=user_message,
-        )
-        self.db.add(user_msg)
-        conversation.last_message_at = utcnow()
-        self.db.flush()
-
-        assistant_msg = Message(
-            conversation_id=conversation.id,
-            role="assistant",
-            content="",
-        )
-        self.db.add(assistant_msg)
-        self.db.flush()
-
-        # Plan 06 Task 6 / Plan 10 Task 9 (Deploy B1): admit + select immutable
-        # runtime_kind immediately before Run insertion. New production chat is
-        # Main Agent only — do not create or daemon-spawn legacy Supervisor runs.
-        # Pre-insert Legacy fallback is fail-closed for new traffic; in-flight
-        # legacy recovery (if any rows already exist) stays on the drain path.
-        from app.assistant.durable.admission import (
-            RuntimeAdmissionError,
-            admit_and_select_runtime,
-        )
-
-        try:
-            runtime_kind, admit_reason, create_kwargs = admit_and_select_runtime(
-                self.db,
-                execution_kind="production",
-                conversation_id=conversation.id,
-            )
-        except RuntimeAdmissionError as exc:
-            self.db.rollback()
-            raise ApiException(
-                status_code=503,
-                code=50310,
-                message="Main Agent runtime admission is temporarily unavailable.",
-                details={
-                    "admissionReason": exc.reason_code,
-                    "legacyRuntimeDisabled": True,
-                },
+                message="Conversation already has an active Run.",
             ) from exc
-        # Strip internal Plan 10 metadata before create_run kwargs.
-        preinsert_fallback = create_kwargs.pop("_preinsert_fallback", None)
-        create_kwargs.pop("_rollout_decision", None)
-        selected_kind = str(create_kwargs.get("runtime_kind") or runtime_kind or "")
-        if selected_kind != "main_agent" or preinsert_fallback is not None:
-            try:
-                self.db.rollback()
-            except Exception:  # noqa: BLE001
-                pass
-            raise ApiException(
-                status_code=503,
-                code=50310,
-                message=(
-                    "Main Agent runtime is required for new chat. "
-                    "Legacy assistant runtime (IntentRouter/Supervisor) is disabled."
-                ),
-                details={
-                    "runtimeKind": selected_kind or "legacy",
-                    "admissionReason": admit_reason,
-                    "legacyRuntimeDisabled": True,
-                },
-            )
-        try:
-            # Main Agent: create Run + initial public event in ONE transaction so a
-            # worker cannot claim a half-initialized queued row (Plan 06 §3/§9).
-            run = run_svc.create_run(
-                conversation=conversation,
-                user_message=user_msg,
-                assistant_message=assistant_msg,
-                commit=False,
-                **create_kwargs,
-            )
-            run_svc.append_event(
-                run_id=run.id,
-                event_name="run_status",
-                event_key=f"run.status:queued:{run.id}",
-                payload={
-                    "status": "queued",
-                    "runtimeKind": str(run.runtime_kind or runtime_kind),
-                    **({"admissionReason": admit_reason} if admit_reason else {}),
-                },
-                commit=False,
-            )
-            self.db.commit()
-            self.db.refresh(run)
-        except ValueError as exc:
-            try:
-                self.db.rollback()
-            except Exception:  # noqa: BLE001
-                pass
-            raise ApiException(status_code=409, code=42260, message=str(exc)) from exc
-        # Deploy B1: never spawn the Legacy IntentRouter/Supervisor daemon for new
-        # chat. Main Agent Runs are claimed exclusively by the durable worker.
-        if str(run.runtime_kind or "") != "main_agent":
-            raise ApiException(
-                status_code=503,
-                code=50310,
-                message=(
-                    "Main Agent runtime is required for new chat. "
-                    "Legacy assistant runtime is disabled."
-                ),
-                details={"runtimeKind": str(run.runtime_kind or "legacy")},
-            )
-        yield from self.stream_run(conversation.id, run_id=run.id, after_seq=0)
+        yield from self.stream_run(
+            conversation.id, run_id=run.id, after_seq=0
+        )
 
     def stream_run(self, conversation_id: UUID, *, run_id: UUID, after_seq: int = 0) -> Iterator[bytes]:
         """Replay committed public events after ``afterSeq``.
@@ -553,14 +474,15 @@ class AssistantService:
                 )
             if run is None:
                 raise ApiException(status_code=404, code=40400, message=f"Run not found: {run_id}")
-            runtime_kind = str(getattr(run, "runtime_kind", None) or "legacy")
+            if run.runtime_kind != "main_agent":
+                from app.assistant.durable.leases import RuntimeInvariantViolation
+
+                raise RuntimeInvariantViolation(
+                    "live schema contains non-main-agent Run"
+                )
         run_key = str(run_id)
         last_seq = max(0, int(after_seq or 0))
         terminal_poll_confirmed = False
-        # Attachment bookkeeping is Legacy-only; Main Agent never consults it.
-        track_attachment = runtime_kind != "main_agent"
-        if track_attachment:
-            self._mark_run_stream_attached(run_key)
         try:
             while True:
                 # Use a fresh read session per poll so updates committed by
@@ -601,9 +523,6 @@ class AssistantService:
             # Disconnect closes only this reader Session — Run continues.
             logger.info("assistant run stream disconnected conversation_id=%s run_id=%s", conversation_id, run_id)
             raise
-        finally:
-            if track_attachment:
-                self._mark_run_stream_detached(run_key)
 
     def _start_background_run(self, *, run_id: UUID, stream_output: bool, locale: str) -> None:
         """Legacy chat daemon entry — removed (Plan 10)."""

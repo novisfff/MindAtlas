@@ -18,6 +18,8 @@ from tests._db import session_scope
 bootstrap_backend_imports()
 reset_caches()
 
+from tests.assistant_runtime_support import make_main_agent_run  # noqa: E402
+
 
 BUCKET = "mindatlas-assistant-artifacts"
 
@@ -45,25 +47,21 @@ def _settings(**overrides):
 
 
 def _make_run(session, *, status: str = "running", **kwargs):
-    from app.assistant.models import AssistantChatRun, Conversation
+    from app.assistant.models import Conversation
 
     conv = Conversation(title=f"art-{uuid.uuid4().hex[:8]}")
     session.add(conv)
     session.flush()
-    run = AssistantChatRun(
-        conversation_id=conv.id,
+    run = make_main_agent_run(
+        session,
         status=status,
-        runtime_kind="main_agent",
-        runtime_contract_version=1,
-        required_app_build_revision="build-art-1",
+        build_revision="build-art-1",
+        conversation=conv,
         state_revision=int(kwargs.pop("state_revision", 0)),
         last_event_seq=int(kwargs.pop("last_event_seq", 0)),
         memory_commit_status=kwargs.pop("memory_commit_status", "pending"),
         **kwargs,
     )
-    session.add(run)
-    session.commit()
-    session.refresh(run)
     return run, conv
 
 

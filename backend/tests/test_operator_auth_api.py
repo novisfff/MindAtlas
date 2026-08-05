@@ -1,0 +1,1104 @@
+"""HTTP boundary tests for operator cookie sessions, CSRF, and account ops."""
+
+from __future__ import annotations
+
+import base64
+import json
+from collections.abc import Iterator
+from typing import Any
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from sqlalchemy import select
+from sqlalchemy.orm import Session, sessionmaker
+
+from tests._bootstrap import bootstrap_backend_imports, reset_caches
+
+bootstrap_backend_imports()
+reset_caches()
+
+from app.common.exceptions import register_exception_handlers  # noqa: E402
+from app.common.request_context import (  # noqa: E402
+    normalize_request_id,
+    reset_request_id,
+    set_request_id,
+)
+from app.config import Settings, get_settings  # noqa: E402
+from app.database import get_db  # noqa: E402
+from app.operator_auth.constants import (  # noqa: E402
+    CSRF_COOKIE_NAME,
+    CSRF_HEADER_NAME,
+    LOGIN_FAILURE_LIMIT,
+    SESSION_COOKIE_NAME,
+)
+from app.operator_auth.models import OperatorAuditEvent  # noqa: E402
+from app.operator_auth.repository import OperatorRepository  # noqa: E402
+from app.operator_auth.router import router as operator_auth_router  # noqa: E402
+from app.system_settings.router import router as system_settings_router  # noqa: E402
+
+
+_PASSWORD = "correct horse battery"
+_ORIGIN = "http://localhost:5173"
+_KEY_ID = "k1"
+_KEY_BYTES = bytes([31]) * 32
+
+
+def _encoded_keys(active: str = _KEY_ID, material: bytes = _KEY_BYTES) -> str:
+    return json.dumps({active: base64.b64encode(material).decode("ascii")})
+
+
+def _origin_headers(**extra: str) -> dict[str, str]:
+    headers = {
+        "Origin": _ORIGIN,
+        "Sec-Fetch-Site": "same-origin",
+        "Content-Type": "application/json",
+    }
+    headers.update(extra)
+    return headers
+
+
+@pytest.fixture
+def auth_settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
+    """Isolated Settings with local HTTP cookie policy + session MAC key."""
+    reset_caches()
+    monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.setenv("MINDATLAS_CANONICAL_ORIGIN", _ORIGIN)
+    monkeypatch.setenv("CORS_ORIGINS", _ORIGIN)
+    monkeypatch.setenv("MINDATLAS_SESSION_HMAC_ACTIVE_KEY_ID", _KEY_ID)
+    monkeypatch.setenv("MINDATLAS_SESSION_HMAC_KEYS", _encoded_keys())
+    # Avoid .env noise: construct explicitly and pin get_settings.
+    settings = Settings(
+        APP_ENV="development",
+        MINDATLAS_CANONICAL_ORIGIN=_ORIGIN,
+        CORS_ORIGINS=_ORIGIN,
+        MINDATLAS_SESSION_HMAC_ACTIVE_KEY_ID=_KEY_ID,
+        MINDATLAS_SESSION_HMAC_KEYS=_encoded_keys(),
+    )
+    get_settings.cache_clear()
+    monkeypatch.setattr("app.config.get_settings", lambda: settings)
+    monkeypatch.setattr("app.operator_auth.dependencies.get_settings", lambda: settings)
+    monkeypatch.setattr("app.operator_auth.router.get_settings", lambda: settings)
+    return settings
+
+
+@pytest.fixture
+def session_factory() -> Iterator[sessionmaker]:
+    import tempfile
+    from pathlib import Path
+
+    from sqlalchemy import create_engine, event
+
+    import tests._db  # noqa: F401 — JSONB→JSON for SQLite
+    # system_settings.router → initialization_service imports RelationType, which
+    # registers Relation with an Entry relationship. Import Entry so mapper config
+    # can resolve before OperatorAccount is first constructed.
+    import app.entry.models  # noqa: F401
+    from app.operator_auth.models import (  # noqa: E402
+        OperatorAccount,
+        OperatorAuditEvent,
+        OperatorSession,
+    )
+    from app.system_settings.models import AppSetting  # noqa: E402
+
+    tmp = tempfile.NamedTemporaryFile(
+        prefix="mindatlas-opauth-api-", suffix=".sqlite", delete=False
+    )
+    tmp_path = Path(tmp.name)
+    tmp.close()
+    engine = create_engine(
+        f"sqlite+pysqlite:///{tmp_path}",
+        connect_args={"check_same_thread": False},
+        future=True,
+    )
+
+    @event.listens_for(engine, "connect")
+    def _fk(dbapi_connection, _connection_record):  # noqa: ANN001
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+    # Only the tables this API surface needs — full Base.metadata pulls Entry FKs.
+    tables = [
+        OperatorAccount.__table__,
+        OperatorSession.__table__,
+        OperatorAuditEvent.__table__,
+        AppSetting.__table__,
+    ]
+    from app.database import Base  # noqa: E402
+
+    Base.metadata.create_all(engine, tables=tables)
+    factory = sessionmaker(
+        bind=engine,
+        autoflush=False,
+        autocommit=False,
+        expire_on_commit=False,
+        future=True,
+    )
+    try:
+        yield factory
+    finally:
+        engine.dispose()
+        try:
+            tmp_path.unlink(missing_ok=True)  # type: ignore[call-arg]
+        except TypeError:
+            if tmp_path.exists():
+                tmp_path.unlink()
+
+
+@pytest.fixture
+def initialized_operator(session_factory: sessionmaker) -> None:
+    db = session_factory()
+    try:
+        OperatorRepository(db).seed_account(password=_PASSWORD, role="operator")
+        db.commit()
+    finally:
+        db.close()
+
+
+@pytest.fixture
+def app(
+    auth_settings: Settings,
+    session_factory: sessionmaker,
+    initialized_operator: None,
+) -> Iterator[FastAPI]:
+    application = FastAPI()
+    register_exception_handlers(application)
+
+    @application.middleware("http")
+    async def _request_id_middleware(request, call_next):  # noqa: ANN001
+        request_id = normalize_request_id(request.headers.get("x-request-id"))
+        request.state.request_id = request_id
+        token = set_request_id(request_id)
+        try:
+            response = await call_next(request)
+        finally:
+            reset_request_id(token)
+        response.headers["x-request-id"] = request_id
+        return response
+
+    def _override_db() -> Iterator[Session]:
+        db = session_factory()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    application.dependency_overrides[get_db] = _override_db
+    application.dependency_overrides[get_settings] = lambda: auth_settings
+    application.include_router(operator_auth_router)
+    application.include_router(system_settings_router)
+    try:
+        yield application
+    finally:
+        application.dependency_overrides.clear()
+
+
+@pytest.fixture
+def client(app: FastAPI) -> Iterator[TestClient]:
+    with TestClient(app) as test_client:
+        try:
+            yield test_client
+        finally:
+            # Defensive: never leave overrides on a shared module-level app.
+            test_client.app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def origin_headers() -> dict[str, str]:
+    return _origin_headers()
+
+
+@pytest.fixture
+def authenticated_client(
+    client: TestClient, origin_headers: dict[str, str]
+) -> TestClient:
+    """Client with session cookies from a successful login (no CSRF header)."""
+    response = client.post(
+        "/api/operator-auth/login",
+        json={"password": _PASSWORD},
+        headers=origin_headers,
+    )
+    assert response.status_code == 200, response.text
+    # TestClient stores cookies; leave CSRF header unset for pair-missing tests.
+    return client
+
+
+def _csrf_headers(client: TestClient, **extra: str) -> dict[str, str]:
+    csrf = client.cookies.get(CSRF_COOKIE_NAME)
+    assert csrf, "expected CSRF cookie after login"
+    headers = _origin_headers(**{CSRF_HEADER_NAME: csrf})
+    headers.update(extra)
+    return headers
+
+
+def _set_cookies(response: Any) -> list[str]:
+    return response.headers.get_list("set-cookie")
+
+
+# ---------------------------------------------------------------------------
+# Step 1 brief cases
+# ---------------------------------------------------------------------------
+
+
+def test_login_sets_exact_cookie_contract(
+    client: TestClient, initialized_operator: None, origin_headers: dict[str, str]
+) -> None:
+    response = client.post(
+        "/api/operator-auth/login",
+        json={"password": _PASSWORD},
+        headers=origin_headers,
+    )
+    assert response.status_code == 200
+    session = response.cookies.get(SESSION_COOKIE_NAME)
+    csrf = response.cookies.get(CSRF_COOKIE_NAME)
+    assert session and csrf and session != csrf
+    cookies = _set_cookies(response)
+    assert any("HttpOnly" in item and SESSION_COOKIE_NAME in item for item in cookies)
+    assert all("SameSite=strict" in item for item in cookies)
+    assert all("Domain=" not in item for item in cookies)
+    assert response.headers.get("cache-control") == "no-store"
+    body = response.json()
+    assert body["success"] is True
+    data = body["data"]
+    assert data["authenticated"] is True
+    assert data["role"] == "operator"
+    assert data["idleExpiresAt"]
+    assert data["absoluteExpiresAt"]
+    # No secret echo — password value must never appear; field names may in schemas.
+    dumped = json.dumps(body)
+    assert _PASSWORD not in dumped
+    assert "correct horse" not in dumped.lower()
+    assert session not in dumped
+    assert csrf not in dumped
+
+
+def test_mutation_requires_cookie_header_pair(authenticated_client: TestClient) -> None:
+    response = authenticated_client.put(
+        "/api/system-settings/locale",
+        json={"locale": "en"},
+        headers=_origin_headers(),  # session cookie present, CSRF header absent
+    )
+    assert response.status_code == 403
+    assert response.json()["message"] == "csrf_rejected"
+
+
+def test_forged_operator_headers_never_authenticate(client: TestClient) -> None:
+    response = client.put(
+        "/api/system-settings/locale",
+        json={"locale": "en"},
+        headers={
+            "X-MindAtlas-Operator-Id": "forged",
+            "X-MindAtlas-Operator-Role": "operator",
+            **_origin_headers(),
+        },
+    )
+    assert response.status_code == 401
+    assert response.json()["message"] == "invalid_session"
+
+
+def test_invalid_session_cookie_cleared_on_mutation_401(
+    client: TestClient,
+    origin_headers: dict[str, str],
+    session_factory: sessionmaker,
+) -> None:
+    """Present-but-invalid session cookies must be expired on 401 responses.
+
+    FastAPI exception handlers build a fresh JSONResponse, so clears applied only
+    to the dependency Response are dropped unless the handler re-applies them.
+    """
+    login = client.post(
+        "/api/operator-auth/login",
+        json={"password": _PASSWORD},
+        headers=origin_headers,
+    )
+    assert login.status_code == 200
+    session_cookie = client.cookies.get(SESSION_COOKIE_NAME)
+    csrf_cookie = client.cookies.get(CSRF_COOKIE_NAME)
+    assert session_cookie and csrf_cookie
+
+    # Revoke the durable session server-side while leaving browser cookies intact.
+    db = session_factory()
+    try:
+        repo = OperatorRepository(db)
+        account = repo.get_singleton_account(for_update=True)
+        assert account is not None
+        revoked = repo.revoke_all_sessions_for_account(
+            account.id, reason="revoke_all"
+        )
+        assert revoked >= 1
+        db.commit()
+    finally:
+        db.close()
+
+    response = client.put(
+        "/api/system-settings/locale",
+        json={"locale": "en"},
+        headers=_origin_headers(**{CSRF_HEADER_NAME: csrf_cookie}),
+    )
+    assert response.status_code == 401
+    assert response.json()["message"] == "invalid_session"
+    cookies = _set_cookies(response)
+    assert any(
+        SESSION_COOKIE_NAME in item and "Max-Age=0" in item for item in cookies
+    ), cookies
+    assert any(
+        CSRF_COOKIE_NAME in item and "Max-Age=0" in item for item in cookies
+    ), cookies
+
+
+# ---------------------------------------------------------------------------
+# Step 6 negative origin / content-type / lockout / audit
+# ---------------------------------------------------------------------------
+
+
+def test_login_rejects_non_json_content_type(
+    client: TestClient, origin_headers: dict[str, str]
+) -> None:
+    headers = dict(origin_headers)
+    headers["Content-Type"] = "text/plain"
+    response = client.post(
+        "/api/operator-auth/login",
+        content=b'{"password":"correct horse battery"}',
+        headers=headers,
+    )
+    assert response.status_code == 415
+    assert response.json()["message"] == "json_content_type_required"
+
+
+def test_login_rejects_missing_origin(client: TestClient) -> None:
+    response = client.post(
+        "/api/operator-auth/login",
+        json={"password": _PASSWORD},
+        headers={
+            "Content-Type": "application/json",
+            "Sec-Fetch-Site": "same-origin",
+        },
+    )
+    assert response.status_code == 403
+    assert response.json()["message"] == "same_origin_required"
+
+
+def test_login_rejects_cross_site_fetch(client: TestClient) -> None:
+    response = client.post(
+        "/api/operator-auth/login",
+        json={"password": _PASSWORD},
+        headers=_origin_headers(**{"Sec-Fetch-Site": "cross-site"}),
+    )
+    assert response.status_code == 403
+    assert response.json()["message"] == "same_origin_required"
+
+
+def test_login_rejects_wrong_origin(client: TestClient) -> None:
+    response = client.post(
+        "/api/operator-auth/login",
+        json={"password": _PASSWORD},
+        headers=_origin_headers(**{"Origin": "https://evil.example"}),
+    )
+    assert response.status_code == 403
+    assert response.json()["message"] == "same_origin_required"
+
+
+def test_wrong_password_is_generic(
+    client: TestClient, origin_headers: dict[str, str]
+) -> None:
+    response = client.post(
+        "/api/operator-auth/login",
+        json={"password": "definitely-not-the-password"},
+        headers=origin_headers,
+    )
+    assert response.status_code == 401
+    body = response.json()
+    assert body["message"] == "invalid_credentials"
+    dumped = json.dumps(body).lower()
+    assert "definitely-not-the-password" not in dumped
+    assert "correct horse" not in dumped
+    # Same message shape for missing account path is covered by service tests;
+    # HTTP must not leak which secret component failed.
+    assert "data" not in body or body.get("data") in (None, {})
+
+
+def test_login_lockout_returns_retry_after(
+    client: TestClient, origin_headers: dict[str, str]
+) -> None:
+    for _ in range(LOGIN_FAILURE_LIMIT):
+        failed = client.post(
+            "/api/operator-auth/login",
+            json={"password": "wrong-password-xx"},
+            headers=origin_headers,
+        )
+        assert failed.status_code in {401, 429}
+    locked = client.post(
+        "/api/operator-auth/login",
+        json={"password": _PASSWORD},
+        headers=origin_headers,
+    )
+    assert locked.status_code == 429
+    body = locked.json()
+    assert body["message"] == "login_locked"
+    retry = body["data"]["retryAfterSeconds"]
+    assert isinstance(retry, int)
+    assert 0 < retry <= 15 * 60
+    assert locked.headers.get("retry-after") == str(retry)
+
+
+def test_oversized_request_id_does_not_block_lockout(
+    client: TestClient,
+    origin_headers: dict[str, str],
+    session_factory: sessionmaker,
+) -> None:
+    """Oversized X-Request-ID must not 500 or skip durable failure/lockout rows."""
+    oversized = "R" * 200
+    for _ in range(LOGIN_FAILURE_LIMIT):
+        failed = client.post(
+            "/api/operator-auth/login",
+            json={"password": "wrong-password-xx"},
+            headers={**origin_headers, "X-Request-ID": oversized},
+        )
+        assert failed.status_code in {401, 429}, failed.text
+        assert failed.status_code != 500
+        # Response echoes the normalized (server-generated) id, not the raw oversize.
+        echoed = failed.headers.get("x-request-id") or ""
+        assert echoed != oversized
+        assert len(echoed) <= 128
+
+    locked = client.post(
+        "/api/operator-auth/login",
+        json={"password": _PASSWORD},
+        headers={**origin_headers, "X-Request-ID": oversized},
+    )
+    assert locked.status_code == 429, locked.text
+    assert locked.json()["message"] == "login_locked"
+
+    db = session_factory()
+    try:
+        rows = list(
+            db.execute(
+                select(OperatorAuditEvent).order_by(OperatorAuditEvent.occurred_at)
+            ).scalars()
+        )
+        assert rows
+        failure_rows = [r for r in rows if r.event_type == "login_rejected"]
+        # Failures before the lockout threshold stage login_rejected; the final
+        # attempt that trips the lock may stage login_locked instead.
+        assert len(failure_rows) >= max(1, LOGIN_FAILURE_LIMIT - 1)
+        for row in rows:
+            assert row.request_id
+            assert len(row.request_id) <= 128
+            assert oversized not in (row.request_id or "")
+    finally:
+        db.close()
+
+
+def test_login_invalid_body_is_generic_422(
+    client: TestClient, origin_headers: dict[str, str]
+) -> None:
+    """Manual model_validate must not 500 or echo submitted password material."""
+    secret = "should-never-echo-this-password-value"
+    response = client.post(
+        "/api/operator-auth/login",
+        # password too long for OperatorLoginRequest max_length=1024
+        json={"password": secret + ("x" * 1100)},
+        headers=origin_headers,
+    )
+    assert response.status_code == 422
+    body = response.json()
+    assert body["message"] == "login_request_invalid"
+    dumped = json.dumps(body)
+    assert secret not in dumped
+    assert "x" * 50 not in dumped
+    assert response.status_code != 500
+
+
+def test_session_probe_unauthenticated(client: TestClient) -> None:
+    response = client.get("/api/operator-auth/session")
+    assert response.status_code == 200
+    assert response.json()["data"]["authenticated"] is False
+    assert response.json()["data"]["role"] is None
+
+
+def test_session_probe_authenticated(
+    authenticated_client: TestClient,
+) -> None:
+    response = authenticated_client.get("/api/operator-auth/session")
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["authenticated"] is True
+    assert data["role"] == "operator"
+    assert data["idleExpiresAt"]
+    assert data["absoluteExpiresAt"]
+
+
+def test_logout_requires_csrf_and_clears_cookies(
+    authenticated_client: TestClient,
+) -> None:
+    missing = authenticated_client.post(
+        "/api/operator-auth/logout",
+        json={},
+        headers=_origin_headers(),
+    )
+    assert missing.status_code == 403
+    assert missing.json()["message"] == "csrf_rejected"
+
+    ok = authenticated_client.post(
+        "/api/operator-auth/logout",
+        json={},
+        headers=_csrf_headers(authenticated_client),
+    )
+    assert ok.status_code == 200
+    assert ok.json()["data"]["authenticated"] is False
+    cookies = _set_cookies(ok)
+    assert any(SESSION_COOKIE_NAME in item and "Max-Age=0" in item for item in cookies)
+    assert any(CSRF_COOKIE_NAME in item and "Max-Age=0" in item for item in cookies)
+
+    # Session no longer usable.
+    probe = authenticated_client.get("/api/operator-auth/session")
+    # Client may still send old cookies; server must reject / clear.
+    assert probe.json()["data"]["authenticated"] is False
+
+
+def test_password_change_clears_cookies_and_revokes(
+    authenticated_client: TestClient,
+    session_factory: sessionmaker,
+) -> None:
+    new_password = "new horse battery staple"
+    response = authenticated_client.post(
+        "/api/operator-auth/password",
+        json={
+            "currentPassword": _PASSWORD,
+            "newPassword": new_password,
+        },
+        headers=_csrf_headers(authenticated_client),
+    )
+    assert response.status_code == 200
+    assert response.json()["data"]["authenticated"] is False
+    cookies = _set_cookies(response)
+    assert any(SESSION_COOKIE_NAME in item and "Max-Age=0" in item for item in cookies)
+
+    # Old session rejected.
+    probe = authenticated_client.get("/api/operator-auth/session")
+    assert probe.json()["data"]["authenticated"] is False
+
+    # New password works.
+    login = authenticated_client.post(
+        "/api/operator-auth/login",
+        json={"password": new_password},
+        headers=_origin_headers(),
+    )
+    assert login.status_code == 200
+
+
+def test_password_change_validation_422_does_not_echo_submitted_secrets(
+    authenticated_client: TestClient,
+) -> None:
+    """Pydantic field rejection must not echo password/input in the 422 body."""
+    # Over max_length (1024) so the submitted secret lands in error.input without sanitization.
+    leaked_current = "cur-secret-" + ("A" * 1020)
+    leaked_new = "new-secret-" + ("B" * 1020)
+    assert len(leaked_current) > 1024
+    assert len(leaked_new) > 1024
+    response = authenticated_client.post(
+        "/api/operator-auth/password",
+        json={
+            "currentPassword": leaked_current,
+            "newPassword": leaked_new,
+        },
+        headers=_csrf_headers(authenticated_client),
+    )
+    assert response.status_code == 422
+    dumped = response.text
+    assert leaked_current not in dumped
+    assert leaked_new not in dumped
+    assert "cur-secret-" not in dumped
+    assert "new-secret-" not in dumped
+    payload = response.json()
+    assert payload["code"] == 42200
+    assert isinstance(payload["data"], list)
+    for error in payload["data"]:
+        assert "input" not in error
+        assert "cur-secret-" not in json.dumps(error)
+        assert "new-secret-" not in json.dumps(error)
+
+
+def test_revoke_all_clears_cookies(authenticated_client: TestClient) -> None:
+    response = authenticated_client.post(
+        "/api/operator-auth/sessions/revoke-all",
+        json={"reason": "revoke_all"},
+        headers=_csrf_headers(authenticated_client),
+    )
+    assert response.status_code == 200
+    assert response.json()["data"]["authenticated"] is False
+    cookies = _set_cookies(response)
+    assert any(SESSION_COOKIE_NAME in item and "Max-Age=0" in item for item in cookies)
+
+
+def test_invalid_csrf_header_rejected(authenticated_client: TestClient) -> None:
+    response = authenticated_client.put(
+        "/api/system-settings/locale",
+        json={"locale": "en"},
+        headers=_origin_headers(**{CSRF_HEADER_NAME: "not-the-real-csrf-token-value!!"}),
+    )
+    assert response.status_code == 403
+    assert response.json()["message"] == "csrf_rejected"
+
+
+def test_mutation_with_valid_csrf_succeeds(authenticated_client: TestClient) -> None:
+    response = authenticated_client.put(
+        "/api/system-settings/locale",
+        json={"locale": "en"},
+        headers=_csrf_headers(authenticated_client),
+    )
+    assert response.status_code == 200
+    assert response.json()["data"]["locale"] == "en"
+
+
+def test_viewer_role_cannot_mutate(
+    client: TestClient,
+    session_factory: sessionmaker,
+    auth_settings: Settings,
+    origin_headers: dict[str, str],
+) -> None:
+    # Re-seed as viewer (singleton already operator from fixture — replace role).
+    db = session_factory()
+    try:
+        account = OperatorRepository(db).get_singleton_account(for_update=True)
+        assert account is not None
+        account.role = "viewer"
+        db.commit()
+    finally:
+        db.close()
+
+    login = client.post(
+        "/api/operator-auth/login",
+        json={"password": _PASSWORD},
+        headers=origin_headers,
+    )
+    assert login.status_code == 200
+    assert login.json()["data"]["role"] == "viewer"
+
+    response = client.put(
+        "/api/system-settings/locale",
+        json={"locale": "zh"},
+        headers=_csrf_headers(client),
+    )
+    assert response.status_code == 403
+    assert response.json()["message"] == "operator_role_required"
+
+
+def test_login_audit_metadata_is_allowlisted(
+    client: TestClient,
+    origin_headers: dict[str, str],
+    session_factory: sessionmaker,
+) -> None:
+    response = client.post(
+        "/api/operator-auth/login",
+        json={"password": _PASSWORD},
+        headers={
+            **origin_headers,
+            "User-Agent": "MindAtlas-Test-Agent/1.0",
+            "X-Request-ID": "req-audit-allowlist-1",
+        },
+    )
+    assert response.status_code == 200
+
+    db = session_factory()
+    try:
+        rows = list(
+            db.execute(
+                select(OperatorAuditEvent).order_by(OperatorAuditEvent.occurred_at)
+            ).scalars()
+        )
+        assert rows
+        dumped = json.dumps(
+            [
+                {
+                    "type": r.event_type,
+                    "meta": r.metadata_json,
+                    "req": r.request_id,
+                    "rd": r.request_digest,
+                    "ua": r.user_agent_digest,
+                    "net": r.network_digest,
+                }
+                for r in rows
+            ]
+        )
+        assert "MindAtlas-Test-Agent" not in dumped
+        assert "correct horse" not in dumped
+        assert response.cookies.get(SESSION_COOKIE_NAME) not in dumped
+        # Digests present, raws absent.
+        for row in rows:
+            if row.event_type in {"login_succeeded", "session_created"}:
+                assert row.request_digest
+                assert row.user_agent_digest
+                assert row.network_digest
+                assert row.request_id == "req-audit-allowlist-1"
+    finally:
+        db.close()
+
+
+def test_auth_unavailable_without_key_ring(
+    client: TestClient,
+    origin_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    broken = Settings(
+        APP_ENV="development",
+        MINDATLAS_CANONICAL_ORIGIN=_ORIGIN,
+        CORS_ORIGINS=_ORIGIN,
+        MINDATLAS_SESSION_HMAC_ACTIVE_KEY_ID="",
+        MINDATLAS_SESSION_HMAC_KEYS=None,
+    )
+    monkeypatch.setattr("app.config.get_settings", lambda: broken)
+    monkeypatch.setattr("app.operator_auth.dependencies.get_settings", lambda: broken)
+    monkeypatch.setattr("app.operator_auth.router.get_settings", lambda: broken)
+    client.app.dependency_overrides[get_settings] = lambda: broken  # type: ignore[attr-defined]
+
+    response = client.post(
+        "/api/operator-auth/login",
+        json={"password": _PASSWORD},
+        headers=origin_headers,
+    )
+    assert response.status_code == 503
+    assert response.json()["message"] == "operator_auth_unavailable"
+
+
+# ---------------------------------------------------------------------------
+# Task 6: setup-authorized clean initialization
+# ---------------------------------------------------------------------------
+
+
+_SETUP_TOKEN = "a" * 32  # 32 UTF-8 bytes; never logged in assertions below
+
+
+def _init_body(**overrides: Any) -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "locale": "en",
+        "operatorPassword": _PASSWORD,
+        "aiCredential": {
+            "name": "OpenAI",
+            "baseUrl": "https://api.openai.com/v1",
+            "apiKey": "sk-test-1234567890",
+        },
+        "llmModel": {"name": "gpt-4.1-mini"},
+        "entryTypes": [
+            {
+                "code": "KNOWLEDGE",
+                "name": "Knowledge",
+                "description": "Concepts",
+                "color": "#3B82F6",
+                "icon": "book",
+                "graphEnabled": True,
+                "aiEnabled": True,
+                "enabled": True,
+                "origin": "default",
+            }
+        ],
+    }
+    body.update(overrides)
+    return body
+
+
+@pytest.fixture
+def setup_settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
+    """Settings with a configured Setup Token + session MAC key, no operator yet."""
+    import os
+
+    reset_caches()
+    # Fernet key for AI credential staging during initialize.
+    os.environ.setdefault(
+        "AI_PROVIDER_FERNET_KEY",
+        "07v02gVBdreNrXjLJZkIMdohHtgy6aDFKBHxakHjbrQ=",
+    )
+    monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.setenv("MINDATLAS_CANONICAL_ORIGIN", _ORIGIN)
+    monkeypatch.setenv("CORS_ORIGINS", _ORIGIN)
+    monkeypatch.setenv("MINDATLAS_SESSION_HMAC_ACTIVE_KEY_ID", _KEY_ID)
+    monkeypatch.setenv("MINDATLAS_SESSION_HMAC_KEYS", _encoded_keys())
+    monkeypatch.setenv("MINDATLAS_INITIAL_SETUP_TOKEN", _SETUP_TOKEN)
+    settings = Settings(
+        APP_ENV="development",
+        MINDATLAS_CANONICAL_ORIGIN=_ORIGIN,
+        CORS_ORIGINS=_ORIGIN,
+        MINDATLAS_SESSION_HMAC_ACTIVE_KEY_ID=_KEY_ID,
+        MINDATLAS_SESSION_HMAC_KEYS=_encoded_keys(),
+        MINDATLAS_INITIAL_SETUP_TOKEN=_SETUP_TOKEN,
+        AI_PROVIDER_FERNET_KEY=os.environ["AI_PROVIDER_FERNET_KEY"],
+    )
+    get_settings.cache_clear()
+    monkeypatch.setattr("app.config.get_settings", lambda: settings)
+    monkeypatch.setattr("app.operator_auth.dependencies.get_settings", lambda: settings)
+    monkeypatch.setattr("app.operator_auth.router.get_settings", lambda: settings)
+    monkeypatch.setattr("app.system_settings.router.get_settings", lambda: settings)
+    return settings
+
+
+@pytest.fixture
+def uninitialized_session_factory() -> Iterator[sessionmaker]:
+    """Session factory with full metadata (for initialize) and no operator account."""
+    import os
+    import tempfile
+    from pathlib import Path
+
+    from sqlalchemy import create_engine, event
+
+    import tests._db  # noqa: F401 — JSONB→JSON for SQLite
+    import app.assistant.capability_calls.models  # noqa: F401 — FK target for Entry
+    import app.entry.models  # noqa: F401 — resolve Relation→Entry mapper
+    import app.operator_auth.models  # noqa: F401 — register tables
+    import app.report.models  # noqa: F401 — register before full create_all
+    from app.database import Base  # noqa: E402
+    from tests._db import _normalize_report_tables_for_sqlite  # noqa: E402
+
+    os.environ.setdefault(
+        "AI_PROVIDER_FERNET_KEY",
+        "07v02gVBdreNrXjLJZkIMdohHtgy6aDFKBHxakHjbrQ=",
+    )
+
+    tmp = tempfile.NamedTemporaryFile(
+        prefix="mindatlas-setup-init-", suffix=".sqlite", delete=False
+    )
+    tmp_path = Path(tmp.name)
+    tmp.close()
+    engine = create_engine(
+        f"sqlite+pysqlite:///{tmp_path}",
+        connect_args={"check_same_thread": False},
+        future=True,
+    )
+
+    @event.listens_for(engine, "connect")
+    def _fk(dbapi_connection, _connection_record):  # noqa: ANN001
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+    # Full metadata so AI/entry/assistant tables exist for coordinator staging.
+    _normalize_report_tables_for_sqlite()
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(
+        bind=engine,
+        autoflush=False,
+        autocommit=False,
+        expire_on_commit=False,
+        future=True,
+    )
+    try:
+        yield factory
+    finally:
+        engine.dispose()
+        try:
+            tmp_path.unlink(missing_ok=True)  # type: ignore[call-arg]
+        except TypeError:
+            if tmp_path.exists():
+                tmp_path.unlink()
+
+
+@pytest.fixture
+def setup_app(
+    setup_settings: Settings,
+    uninitialized_session_factory: sessionmaker,
+) -> Iterator[FastAPI]:
+    application = FastAPI()
+    register_exception_handlers(application)
+
+    @application.middleware("http")
+    async def _request_id_middleware(request, call_next):  # noqa: ANN001
+        request_id = normalize_request_id(request.headers.get("x-request-id"))
+        request.state.request_id = request_id
+        token = set_request_id(request_id)
+        try:
+            response = await call_next(request)
+        finally:
+            reset_request_id(token)
+        response.headers["x-request-id"] = request_id
+        return response
+
+    def _override_db() -> Iterator[Session]:
+        db = uninitialized_session_factory()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    application.dependency_overrides[get_db] = _override_db
+    application.dependency_overrides[get_settings] = lambda: setup_settings
+    application.include_router(operator_auth_router)
+    application.include_router(system_settings_router)
+    try:
+        yield application
+    finally:
+        application.dependency_overrides.clear()
+
+
+@pytest.fixture
+def setup_client(setup_app: FastAPI) -> Iterator[TestClient]:
+    with TestClient(setup_app) as test_client:
+        try:
+            yield test_client
+        finally:
+            test_client.app.dependency_overrides.clear()
+
+
+def _setup_headers(**extra: str) -> dict[str, str]:
+    headers = _origin_headers(**{"Authorization": f"Setup {_SETUP_TOKEN}"})
+    headers.update(extra)
+    return headers
+
+
+def test_initialize_rejects_invalid_setup_before_body_validation(
+    setup_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Invalid Setup authorization must 401 before body domain validation."""
+    calls: list[str] = []
+
+    from app.system_settings import schemas as schemas_mod
+
+    real_validate = schemas_mod.InitializeSystemRequest.model_validate
+
+    @classmethod  # type: ignore[misc]
+    def spy_validate(cls, raw):  # noqa: ANN001
+        calls.append("validated")
+        return real_validate(raw)
+
+    monkeypatch.setattr(
+        schemas_mod.InitializeSystemRequest,
+        "model_validate",
+        spy_validate,
+    )
+
+    # Missing Authorization entirely + deliberately invalid body.
+    response = setup_client.post(
+        "/api/system-settings/initialize",
+        json={"locale": "not-a-locale", "operatorPassword": "x"},
+        headers=_origin_headers(),
+    )
+    assert response.status_code == 401
+    assert response.json()["message"] == "invalid_setup_authorization"
+    assert calls == []
+
+    # Wrong token also 401s first.
+    response = setup_client.post(
+        "/api/system-settings/initialize",
+        json={"locale": "not-a-locale"},
+        headers=_origin_headers(**{"Authorization": "Setup wrong-token-value-xxxxxxxx"}),
+    )
+    assert response.status_code == 401
+    assert response.json()["message"] == "invalid_setup_authorization"
+    assert calls == []
+    # Token must never echo.
+    dumped = json.dumps(response.json())
+    assert _SETUP_TOKEN not in dumped
+    assert "wrong-token" not in dumped
+
+
+def test_initialize_rejects_cross_origin_before_setup(
+    setup_client: TestClient,
+) -> None:
+    response = setup_client.post(
+        "/api/system-settings/initialize",
+        json=_init_body(),
+        headers={
+            "Origin": "https://evil.example",
+            "Sec-Fetch-Site": "cross-site",
+            "Content-Type": "application/json",
+            "Authorization": f"Setup {_SETUP_TOKEN}",
+        },
+    )
+    assert response.status_code == 403
+    assert response.json()["message"] == "same_origin_required"
+
+
+def test_initialize_requires_json_content_type(setup_client: TestClient) -> None:
+    response = setup_client.post(
+        "/api/system-settings/initialize",
+        content=b'{"locale":"en"}',
+        headers={
+            "Origin": _ORIGIN,
+            "Sec-Fetch-Site": "same-origin",
+            "Content-Type": "text/plain",
+            "Authorization": f"Setup {_SETUP_TOKEN}",
+        },
+    )
+    assert response.status_code == 415
+    assert response.json()["message"] == "json_content_type_required"
+
+
+def test_initialize_success_sets_session_cookies(
+    setup_client: TestClient,
+    uninitialized_session_factory: sessionmaker,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.system_settings.initialization_service.sync_scheduler",
+        lambda: None,
+    )
+    response = setup_client.post(
+        "/api/system-settings/initialize",
+        json=_init_body(),
+        headers=_setup_headers(),
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["success"] is True
+    assert body["data"]["initialized"] is True
+    assert body["data"]["locale"] == "en"
+    assert "legacyAutoCompleted" not in body["data"]
+
+    session = response.cookies.get(SESSION_COOKIE_NAME)
+    csrf = response.cookies.get(CSRF_COOKIE_NAME)
+    assert session and csrf and session != csrf
+    cookies = _set_cookies(response)
+    assert any("HttpOnly" in item and SESSION_COOKIE_NAME in item for item in cookies)
+    assert all("SameSite=strict" in item for item in cookies)
+
+    # Secrets never echo.
+    dumped = json.dumps(body)
+    assert _PASSWORD not in dumped
+    assert _SETUP_TOKEN not in dumped
+    assert session not in dumped
+    assert csrf not in dumped
+
+    # One enabled operator + clean marker.
+    from app.operator_auth.models import OperatorAccount
+    from app.system_settings.initialization_service import (
+        SYSTEM_INITIALIZATION_STATE_KEY,
+    )
+    from app.system_settings.models import AppSetting
+
+    db = uninitialized_session_factory()
+    try:
+        assert db.query(OperatorAccount).filter(OperatorAccount.enabled.is_(True)).count() == 1
+        marker = (
+            db.query(AppSetting)
+            .filter(AppSetting.key == SYSTEM_INITIALIZATION_STATE_KEY)
+            .first()
+        )
+        assert marker is not None
+        assert marker.value_json.get("initialized") is True
+        assert marker.value_json.get("source") == "user"
+    finally:
+        db.close()
+
+    # Setup token unusable after init (system already initialized).
+    again = setup_client.post(
+        "/api/system-settings/initialize",
+        json=_init_body(locale="zh"),
+        headers=_setup_headers(),
+    )
+    assert again.status_code == 409
+    assert again.json()["message"] == "system_already_initialized"
+
+    # Session cookies work for authenticated probe.
+    probe = setup_client.get("/api/operator-auth/session")
+    assert probe.status_code == 200
+    assert probe.json()["data"]["authenticated"] is True
+    assert probe.json()["data"]["role"] == "operator"
+
+
+def test_initialization_status_is_clean_only(setup_client: TestClient) -> None:
+    response = setup_client.get("/api/system-settings/initialization-status")
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["initialized"] is False
+    assert "legacyAutoCompleted" not in data
+    assert "locale" in data

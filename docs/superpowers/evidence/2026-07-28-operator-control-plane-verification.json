@@ -1,0 +1,27 @@
+{
+  "aggregateDigest": "f85ce4c93aa111c833a3d67755ce8498252de6829f78e77fd53c8a0869476cb2",
+  "alembicHead": "9f3c1a7e2b40",
+  "buildRevision": "a3ba50ea17b0652272f6f9a8d7fc02451f338963",
+  "generatedAtUtc": "2026-07-29T03:42:16+00:00",
+  "postgresVersion": "PostgreSQL 15.18",
+  "previousKeySessionsRevoked": true,
+  "restartSessionPreserved": true,
+  "rotationSucceeded": true,
+  "routePolicyCounts": {
+    "authenticated_machine": 2,
+    "credential_exchange": 1,
+    "protected_browser": 208,
+    "public": 4,
+    "setup_initialization": 1
+  },
+  "schemaVersion": "1",
+  "testSuites": {
+    "passed": true,
+    "pytestVersion": "9.0.2",
+    "pythonVersion": "3.12.7",
+    "suiteCount": 4,
+    "totalFailed": 0,
+    "totalPassed": 112,
+    "totalSkipped": 0
+  }
+}

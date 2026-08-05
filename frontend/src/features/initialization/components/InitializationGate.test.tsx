@@ -60,7 +60,7 @@ describe('InitializationGate', () => {
     expect(screen.getByText('initialize-page')).toBeInTheDocument()
   })
 
-  it('redirects initialized users away from the initialization route', () => {
+  it('allows initialized users to remain on the initialization route for activation', () => {
     mockedUseInitializationStatusQuery.mockReturnValue({
       isLoading: false,
       isError: false,
@@ -70,7 +70,8 @@ describe('InitializationGate', () => {
 
     renderGate('/initialize')
 
-    expect(screen.getByText('dashboard-page')).toBeInTheDocument()
+    // Post-init activation is explicit and happens on the initialization route.
+    expect(screen.getByText('initialize-page')).toBeInTheDocument()
   })
 
   it('renders the loading state while status is pending on app routes', () => {
@@ -85,5 +86,34 @@ describe('InitializationGate', () => {
 
     expect(screen.getByText('initialization.loadingTitle')).toBeInTheDocument()
     expect(screen.getByText('initialization.loadingDescription')).toBeInTheDocument()
+  })
+
+  it('renders a status failure state with retry on app routes', () => {
+    const refetch = vi.fn()
+    mockedUseInitializationStatusQuery.mockReturnValue({
+      isLoading: false,
+      isError: true,
+      data: undefined,
+      refetch,
+    } as never)
+
+    renderGate('/dashboard')
+
+    expect(screen.getByText('initialization.statusErrorTitle')).toBeInTheDocument()
+    expect(screen.getByText('initialization.statusErrorDescription')).toBeInTheDocument()
+    expect(screen.getByText('initialization.retry')).toBeInTheDocument()
+  })
+
+  it('allows the initialization route while status is still loading', () => {
+    mockedUseInitializationStatusQuery.mockReturnValue({
+      isLoading: true,
+      isError: false,
+      data: undefined,
+      refetch: vi.fn(),
+    } as never)
+
+    renderGate('/initialize')
+
+    expect(screen.getByText('initialize-page')).toBeInTheDocument()
   })
 })

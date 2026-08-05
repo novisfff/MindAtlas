@@ -4,8 +4,7 @@ One transaction API owns status mutations, lease-owned writes, pointer updates,
 immutable child appends, and idempotent event sequence allocation.
 
 Callers MUST NOT append durable child rows or advance Main Agent status/events
-outside this repository. Legacy ``AssistantChatRunService`` methods remain for
-``runtime_kind=legacy`` only.
+outside this repository. Live schema admits ``runtime_kind=main_agent`` only.
 """
 
 from __future__ import annotations
@@ -50,7 +49,6 @@ CODE_FORBIDDEN_TRANSITION = "forbidden_transition"
 CODE_CHILD_APPEND_REJECTED = "child_append_rejected"
 
 RUNTIME_KIND_MAIN_AGENT = "main_agent"
-RUNTIME_KIND_LEGACY = "legacy"
 
 STATUS_QUEUED = "queued"
 STATUS_RUNNING = "running"

@@ -10,6 +10,7 @@ from typing import Any, Iterator
 from tests._bootstrap import bootstrap_backend_imports, reset_caches
 
 bootstrap_backend_imports()
+from tests.assistant_runtime_support import make_main_agent_run, seed_main_agent_runtime  # noqa: E402
 reset_caches()
 
 DIGEST_A = "a" * 64
@@ -24,9 +25,9 @@ def _make_session():
 
 
 def _seed_main_agent_run(db, *, status: str = "queued"):
-    from app.assistant.models import AssistantChatRun, Conversation, Message
+    from app.assistant.models import Conversation, Message
 
-    conv = Conversation(title="audit")
+    conv = Conversation(title="audit-run")
     db.add(conv)
     db.flush()
     user = Message(conversation_id=conv.id, role="user", content="hello audit")
@@ -35,20 +36,14 @@ def _seed_main_agent_run(db, *, status: str = "queued"):
     assistant = Message(conversation_id=conv.id, role="assistant", content="")
     db.add(assistant)
     db.flush()
-    run = AssistantChatRun(
-        conversation_id=conv.id,
-        user_message_id=user.id,
-        assistant_message_id=assistant.id,
+    run = make_main_agent_run(
+        db,
         status=status,
-        runtime_kind="main_agent",
-        runtime_contract_version=1,
-        required_app_build_revision=BUILD,
-        state_revision=0,
-        memory_commit_status="pending",
+        build_revision=BUILD,
+        conversation=conv,
+        user_message=user,
+        assistant_message=assistant,
     )
-    db.add(run)
-    db.commit()
-    db.refresh(run)
     return run, conv, user, assistant
 
 
@@ -381,15 +376,12 @@ class AtomicMainAgentCreateTests(unittest.TestCase):
         self.db.flush()
 
         svc = AssistantChatRunService(self.db)
+        seeded = seed_main_agent_runtime(self.db, build_revision=BUILD)
         run = svc.create_run(
             conversation=conv,
             user_message=user,
             assistant_message=assistant,
-            runtime_kind="main_agent",
-            runtime_contract_version=1,
-            required_app_build_revision=BUILD,
-            memory_commit_status="pending",
-            commit=False,
+            **seeded.as_create_run_kwargs(commit=False),
         )
         # Not committed yet — a second session must not see the Run.
         from tests._db import make_session

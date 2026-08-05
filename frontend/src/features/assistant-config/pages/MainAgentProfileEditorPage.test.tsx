@@ -98,6 +98,13 @@ vi.mock('react-i18next', () => ({
           'A promotion gate is required to enable runtime.',
         'settings.universalSkills.profileDisableConfirm':
           'Disable Main Agent Profile runtime?',
+        'settings.universalSkills.profileV1ReadOnlyBanner':
+          'Historical Profile V1 — read only. Draft, publish, and prepare require Profile V2.',
+        'settings.universalSkills.profileV1ReadOnly':
+          'Historical Profile V1 is read only.',
+        'settings.universalSkills.profileRuntimePolicy': 'Runtime policy',
+        'settings.universalSkills.profileV1FallbackReadonly':
+          'Historical fallback policy (read only)',
         'settings.universalSkills.promotionGateId': 'Promotion gate ID',
         'settings.universalSkills.versionHistory': 'Version history',
         'settings.universalSkills.evaluationWorkbench': 'Evaluation workbench',
@@ -198,6 +205,49 @@ function profileSummary(overrides: Record<string, unknown> = {}) {
 }
 
 function snapshot() {
+  return {
+    schemaVersion: 2 as const,
+    basePrompt: 'You are the MindAtlas main assistant.',
+    responseStyle: {},
+    supportedEntrypoints: ['assistant_chat'],
+    modelRequirements: {
+      toolCalling: true,
+      streaming: true,
+      multiToolCalls: true,
+      jsonSchema: true,
+    },
+    controlCapabilityKeys: [],
+    skillCatalogScope: { mode: 'all_published' as const, packageIds: [] },
+    contextBudget: {
+      maxPromptCharacters: 72000,
+      maxActiveSkills: 4,
+      maxSkillInstructionCharacters: 24000,
+      maxSingleSkillInstructionCharacters: 12000,
+      maxHistoryCharacters: 24000,
+      maxToolSummaryCharacters: 24000,
+      maxResourceBytesPerCall: 65536,
+    },
+    outputBudget: {
+      maxCompletionTokens: 4096,
+      maxProviderRounds: 8,
+      maxOuterAgentRounds: 8,
+      maxTotalCapabilityCalls: 16,
+      maxParallelCalls: 4,
+      maxCapabilityDepth: 4,
+      maxAgentDepth: 2,
+      maxSameReadSignature: 3,
+      maxCompletionFollowupRounds: 2,
+      maxWallTimeMs: 120000,
+    },
+    globalSafetyPolicy: { denyByDefault: true as const },
+    runtimePolicy: {
+      runtimeKind: 'main_agent' as const,
+      recoveryScope: 'same_run_only' as const,
+    },
+  }
+}
+
+function snapshotV1() {
   return {
     schemaVersion: 1 as const,
     basePrompt: 'You are the MindAtlas main assistant.',
@@ -381,8 +431,14 @@ describe('MainAgentProfileEditorPage two-gate lifecycle', () => {
 
   it('gate request contains no client-authored closure fields', async () => {
     renderPage()
+    // Qualifying evidence must resolve before the dialog enables Request gate;
+    // under full-suite load the open click can race the evidence fetch.
+    await waitFor(() => {
+      expect(skillEvaluations.listQualifyingEvidence).toHaveBeenCalled()
+    })
     await screen.findByRole('button', { name: 'Open publish gate dialog' })
     fireEvent.click(screen.getByRole('button', { name: 'Open publish gate dialog' }))
+    expect(await screen.findByRole('dialog', { name: 'Request publish gate' })).toBeInTheDocument()
     fireEvent.click(await screen.findByRole('button', { name: 'Request gate' }))
     await waitFor(() => {
       expect(gateRequests.length).toBeGreaterThan(0)
@@ -407,9 +463,13 @@ describe('MainAgentProfileEditorPage two-gate lifecycle', () => {
 
   it('does not reuse the draft publish gate after publish for runtime enable', async () => {
     renderPage()
+    await waitFor(() => {
+      expect(skillEvaluations.listQualifyingEvidence).toHaveBeenCalled()
+    })
     await screen.findByRole('button', { name: 'Open publish gate dialog' })
 
     fireEvent.click(screen.getByRole('button', { name: 'Open publish gate dialog' }))
+    expect(await screen.findByRole('dialog', { name: 'Request publish gate' })).toBeInTheDocument()
     fireEvent.click(await screen.findByRole('button', { name: 'Request gate' }))
     await waitFor(() => {
       expect(lastGateRequest()?.action).toBe('profile_publish')
@@ -454,12 +514,16 @@ describe('MainAgentProfileEditorPage two-gate lifecycle', () => {
     } as never)
 
     renderPage()
+    await waitFor(() => {
+      expect(skillEvaluations.listQualifyingEvidence).toHaveBeenCalled()
+    })
     await screen.findByRole('button', { name: 'Open promotion gate dialog' })
 
     // Without promotion gate, enable stays disabled.
     expect(screen.getByRole('button', { name: 'Enable runtime' })).toBeDisabled()
 
     fireEvent.click(screen.getByRole('button', { name: 'Open promotion gate dialog' }))
+    expect(await screen.findByRole('dialog', { name: 'Request publish gate' })).toBeInTheDocument()
     fireEvent.click(await screen.findByRole('button', { name: 'Request gate' }))
     await waitFor(() => {
       expect(lastGateRequest()?.action).toBe('profile_runtime_enable')
@@ -593,9 +657,13 @@ describe('MainAgentProfileEditorPage two-gate lifecycle', () => {
     })
 
     renderPage()
+    await waitFor(() => {
+      expect(skillEvaluations.listQualifyingEvidence).toHaveBeenCalled()
+    })
     await screen.findByTestId('skill-test-workbench')
     // Request publish gate then publish.
     fireEvent.click(screen.getByRole('button', { name: 'Open publish gate dialog' }))
+    expect(await screen.findByRole('dialog', { name: 'Request publish gate' })).toBeInTheDocument()
     fireEvent.click(await screen.findByRole('button', { name: 'Request gate' }))
     await waitFor(() => {
       expect(skillEvaluations.createPublishGate).toHaveBeenCalled()
@@ -649,5 +717,39 @@ describe('MainAgentProfileEditorPage two-gate lifecycle', () => {
     expect(body.subjectVersionId).toBe(DRAFT_ID)
     // Profile subject pins the evaluated version when no separate pin selected.
     expect(body.profileVersionId).toBeTruthy()
+  })
+
+  it('renders V1 as historical read-only without legacy fallback controls', async () => {
+    vi.mocked(profilesApi.getProtectedDefaultMainAgentVersion).mockResolvedValue({
+      ...draftVersion(),
+      snapshot: snapshotV1(),
+    } as never)
+
+    renderPage()
+    expect(await screen.findByTestId('profile-v1-readonly-banner')).toBeInTheDocument()
+    expect(screen.getByTestId('profile-v1-fallback-readonly')).toBeInTheDocument()
+    expect(screen.queryByTestId('profile-v2-runtime-policy')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText(/legacy runtime/i)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Save draft' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Publish profile' })).toBeDisabled()
+  })
+
+  it('saves new drafts as Profile V2 with fixed runtime policy', async () => {
+    renderPage()
+    const prompt = await screen.findByDisplayValue('You are the MindAtlas main assistant.')
+    fireEvent.change(prompt, { target: { value: 'Updated V2 base prompt.' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save draft' }))
+    await waitFor(() => {
+      expect(profilesApi.saveProtectedDefaultMainAgentDraft).toHaveBeenCalled()
+    })
+    const body = vi.mocked(profilesApi.saveProtectedDefaultMainAgentDraft).mock.calls[0][0]
+    expect(body.snapshot.schemaVersion).toBe(2)
+    expect(body.snapshot).toMatchObject({
+      runtimePolicy: {
+        runtimeKind: 'main_agent',
+        recoveryScope: 'same_run_only',
+      },
+    })
+    expect(body.snapshot).not.toHaveProperty('fallbackPolicy')
   })
 })

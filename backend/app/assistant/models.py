@@ -89,8 +89,9 @@ class Message(UuidPrimaryKeyMixin, TimestampMixin, Base):
 class AssistantChatRun(UuidPrimaryKeyMixin, TimestampMixin, Base):
     """Assistant 对话运行记录（后台执行生命周期）。
 
-    Plan 06 adds durable Main Agent fields. ``runtime_kind`` is immutable after
-    creation (service-enforced; DB default ``legacy`` for backfill).
+    Plan 2 freezes Main-Agent-only runtime identity on every Run. ``runtime_kind``
+    is always ``main_agent``; closure fields are immutable after insert
+    (PostgreSQL trigger + service validation).
     """
 
     __tablename__ = "assistant_chat_run"
@@ -121,15 +122,31 @@ class AssistantChatRun(UuidPrimaryKeyMixin, TimestampMixin, Base):
     last_event_seq = Column(Integer, nullable=False, default=0)
     checkpoint_seq = Column(Integer, nullable=False, default=0)
 
-    # Plan 06 durable foundation
+    # Plan 2 Main-Agent-only runtime identity (frozen after insert).
     runtime_kind = Column(
         String(32),
         nullable=False,
-        default="legacy",
-        server_default=text("'legacy'"),
+        default="main_agent",
+        server_default=text("'main_agent'"),
     )
-    runtime_contract_version = Column(Integer, nullable=True)
-    required_app_build_revision = Column(String(160), nullable=True)
+    main_agent_rollout_revision_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("assistant_main_agent_rollout_revision.id"),
+        nullable=False,
+    )
+    main_agent_profile_version_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("assistant_main_agent_profile_version.id"),
+        nullable=False,
+    )
+    resolved_model_id = Column(
+        UUID(as_uuid=True), ForeignKey("ai_model.id"), nullable=False
+    )
+    runtime_closure_digest = Column(String(64), nullable=False)
+    runtime_contract_version = Column(Integer, nullable=False)
+    required_checkpoint_codec_version = Column(Integer, nullable=False)
+    required_capability_feature_digest = Column(String(64), nullable=False)
+    required_app_build_revision = Column(String(128), nullable=False)
     state_revision = Column(
         Integer,
         nullable=False,
@@ -207,13 +224,12 @@ class AssistantChatRun(UuidPrimaryKeyMixin, TimestampMixin, Base):
     memory_commit_status = Column(
         String(32),
         nullable=False,
-        default="not_applicable",
-        server_default=text("'not_applicable'"),
+        default="pending",
+        server_default=text("'pending'"),
     )
     memory_committed_at = Column(DateTime(timezone=True), nullable=True)
-    # Plan 08 capability ledger admission mode. Nullable for runtime_kind=legacy.
-    # Main Agent Runs created before Plan 08 are backfilled to legacy_read_only.
-    capability_ledger_mode = Column(String(32), nullable=True)
+    # Plan 08 capability ledger admission mode. Frozen for Main-Agent Runs.
+    capability_ledger_mode = Column(String(32), nullable=False)
 
     conversation = relationship("Conversation", back_populates="chat_runs")
     events = relationship(
@@ -233,8 +249,8 @@ class AssistantChatRun(UuidPrimaryKeyMixin, TimestampMixin, Base):
             name="ck_assistant_chat_run_status",
         ),
         CheckConstraint(
-            "runtime_kind IN ('legacy','main_agent')",
-            name="ck_assistant_chat_run_runtime_kind",
+            "runtime_kind = 'main_agent'",
+            name="ck_assistant_chat_run_main_agent_only",
         ),
         CheckConstraint(
             "state_revision >= 0",
@@ -249,38 +265,23 @@ class AssistantChatRun(UuidPrimaryKeyMixin, TimestampMixin, Base):
             name="ck_assistant_chat_run_recovery_count",
         ),
         CheckConstraint(
-            "runtime_contract_version IS NULL OR runtime_contract_version > 0",
-            name="ck_assistant_chat_run_runtime_contract_version",
+            "runtime_contract_version > 0 AND required_checkpoint_codec_version > 0",
+            name="ck_assistant_chat_run_positive_runtime_contract",
+        ),
+        # Portable length checks for SQLite; PostgreSQL migration adds full
+        # lowercase-hex regex via ck_assistant_chat_run_runtime_digests.
+        CheckConstraint(
+            "length(runtime_closure_digest) = 64 "
+            "AND length(required_capability_feature_digest) = 64",
+            name="ck_assistant_chat_run_runtime_digests_len",
         ),
         CheckConstraint(
             "memory_commit_status IN ('not_applicable','pending','committed','failed')",
             name="ck_assistant_chat_run_memory_commit_status",
         ),
         CheckConstraint(
-            "capability_ledger_mode IS NULL OR capability_ledger_mode IN ("
-            "'legacy_read_only','enforced'"
-            ")",
+            "capability_ledger_mode IN ('legacy_read_only','enforced')",
             name="ck_assistant_chat_run_capability_ledger_mode",
-        ),
-        # Main Agent rows require contract version + app build revision.
-        # capability_ledger_mode is frozen for main_agent after Plan 08 backfill;
-        # legacy runtime always leaves it null. ORM allows null main_agent only
-        # for pre-backfill test fixtures; migration enforces non-null after upgrade.
-        CheckConstraint(
-            "("
-            "  runtime_kind = 'legacy'"
-            "  AND runtime_contract_version IS NULL"
-            "  AND capability_ledger_mode IS NULL"
-            ") OR ("
-            "  runtime_kind = 'main_agent'"
-            "  AND runtime_contract_version IS NOT NULL"
-            "  AND required_app_build_revision IS NOT NULL"
-            "  AND ("
-            "    capability_ledger_mode IS NULL"
-            "    OR capability_ledger_mode IN ('legacy_read_only','enforced')"
-            "  )"
-            ")",
-            name="ck_assistant_chat_run_runtime_kind_shape",
         ),
         Index("ix_assistant_chat_run_conversation_status", "conversation_id", "status"),
         Index(

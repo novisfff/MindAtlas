@@ -1,20 +1,16 @@
-"""Main Agent runtime admission and Assistant Run composition (Plan 04 Task 8).
+"""Main Agent runtime admission and Assistant Run composition.
 
-Feature modes:
-- off: Legacy only; never construct MainAgentService
-- shadow: production chat stays Legacy; explicit evaluation may run MA without
-  Message/L1/L2/title writes
-- read_only: admit MA after preflight; fallback to Legacy only when §4.3 allows
+Plan 2 Task 9: live admission is Main-Agent-only. No configuration, mode, or
+runtime failure may select Legacy. Provider/worker errors raise into the Run
+state machine on the same durable Run.
 """
 
 from __future__ import annotations
 
 import logging
-import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
-from urllib.parse import urlsplit
 from uuid import UUID
 
 from sqlalchemy.orm import Session
@@ -82,8 +78,11 @@ from app.assistant.skills.models import (
     AssistantMainAgentProfileVersion,
 )
 from app.assistant.skills.schemas import (
-    MainAgentProfileSnapshotV1,
+    MainAgentProfileSnapshotV2,
     ModelRequirementsV1,
+    ReadableMainAgentProfileSnapshot,
+    parse_main_agent_profile_snapshot_for_read,
+    require_production_profile_v2,
 )
 from app.config import get_settings
 
@@ -91,11 +90,10 @@ logger = logging.getLogger(__name__)
 
 MainAgentAdmissionMode = Literal["off", "shadow", "read_only"]
 
-RuntimeKind = Literal["legacy", "main_agent"]
+RuntimeKind = Literal["main_agent"]
 ExecutionKind = Literal["production", "evaluation"]
-AdmissionDecision = Literal["legacy", "main_agent", "fallback_legacy", "fail"]
 
-# Safe admission / fallback reason codes
+# Safe admission reason codes
 MODE_OFF = "mode_off"
 MODE_SHADOW_PRODUCTION = "mode_shadow_production"
 PROFILE_UNAVAILABLE = "profile_unavailable"
@@ -108,32 +106,10 @@ BUDGET_INVALID = "budget_invalid"
 CATALOG_UNAVAILABLE = "catalog_unavailable"
 ADAPTER_UNAVAILABLE_BEFORE_REQUEST = "adapter_unavailable_before_request"
 ADAPTER_FAILURE_AFTER_REQUEST = "adapter_failure_after_request"
-FALLBACK_DISALLOWED = "fallback_disallowed"
-FALLBACK_SAFE = "fallback_safe"
 CANCELLED = "cancelled"
 MAIN_AGENT_COMPLETED = "main_agent_completed"
 MAIN_AGENT_FAILED = "main_agent_failed"
 NOOP_LIFECYCLE_REJECTED = "noop_lifecycle_rejected"
-
-FALLBACK_SAFE_REASONS = frozenset(
-    {
-        PROFILE_UNAVAILABLE,
-        PROFILE_DISABLED,
-        PROFILE_UNPUBLISHED,
-        MODEL_BINDING_MISSING,
-        MODEL_INELIGIBLE,
-        MODEL_TYPE_UNSUPPORTED,
-        PROBE_MISSING,
-        ADAPTER_UNAVAILABLE,
-        ADAPTER_UNAVAILABLE_BEFORE_REQUEST,
-        CATALOG_UNAVAILABLE,
-        BUDGET_INVALID,
-        CONTROL_MISSING,
-        CONTROL_UNSUPPORTED,
-        ENTRYPOINT_UNSUPPORTED,
-        "provider_retry_safe_before_output",
-    }
-)
 
 # Stable policy / budget / completion / recursion codes that may surface as
 # stop_reason or SafeProviderError.semantic_code after Provider request start.
@@ -221,104 +197,6 @@ class MainAgentAdmissionError(ValueError):
         super().__init__(self.reason_code)
 
 
-class MainAgentFallbackState:
-    """Process-local fallback gate (Plan 04 §4.3)."""
-
-    def __init__(self) -> None:
-        self._lock = threading.RLock()
-        self.provider_requests_started = 0
-        self.capability_dispatches_started = 0
-        self.strongest_started_side_effect: str | None = None
-        self.pending_interrupt = False
-        self.uncertain_result = False
-        self.user_output_started = False
-
-    def mark_provider_request(self) -> None:
-        with self._lock:
-            self.provider_requests_started += 1
-
-    def mark_capability_dispatch(self, *, side_effect: str | None = None) -> None:
-        with self._lock:
-            self.capability_dispatches_started += 1
-            if side_effect:
-                self.strongest_started_side_effect = _stronger_side_effect(
-                    self.strongest_started_side_effect, side_effect
-                )
-
-    def mark_user_output(self) -> None:
-        with self._lock:
-            self.user_output_started = True
-
-    def mark_pending_interrupt(self) -> None:
-        with self._lock:
-            self.pending_interrupt = True
-
-    def mark_uncertain(self) -> None:
-        with self._lock:
-            self.uncertain_result = True
-
-    def snapshot(self) -> dict[str, Any]:
-        with self._lock:
-            return {
-                "provider_requests_started": self.provider_requests_started,
-                "capability_dispatches_started": self.capability_dispatches_started,
-                "strongest_started_side_effect": self.strongest_started_side_effect,
-                "pending_interrupt": self.pending_interrupt,
-                "uncertain_result": self.uncertain_result,
-                "user_output_started": self.user_output_started,
-            }
-
-    def allows_automatic_fallback(
-        self,
-        *,
-        reason_code: str,
-        legacy_runtime_allowed: bool,
-        before_side_effects_only: bool,
-        cancel_requested: bool,
-    ) -> bool:
-        with self._lock:
-            if cancel_requested:
-                return False
-            if not legacy_runtime_allowed:
-                return False
-            if before_side_effects_only is False:
-                return False
-            if reason_code not in FALLBACK_SAFE_REASONS:
-                return False
-            if self.user_output_started:
-                return False
-            if self.pending_interrupt or self.uncertain_result:
-                return False
-            strongest = self.strongest_started_side_effect
-            if strongest in {"draft", "write_local", "write_external", "unknown"}:
-                return False
-            return True
-
-
-_SIDE_EFFECT_RANK = {
-    None: -1,
-    "none": 0,
-    "compute": 1,
-    "read": 2,
-    "draft": 3,
-    "write_local": 4,
-    "write_external": 5,
-    "unknown": 6,
-}
-
-
-def _stronger_side_effect(current: str | None, candidate: str | None) -> str | None:
-    if candidate is None:
-        return current
-    if current is None:
-        return candidate
-    return (
-        candidate
-        if _SIDE_EFFECT_RANK.get(candidate, -1) > _SIDE_EFFECT_RANK.get(current, -1)
-        else current
-    )
-
-
 @dataclass(frozen=True)
 class AssistantRuntimeRequest:
     run_id: UUID
@@ -339,7 +217,7 @@ class AssistantRuntimeRequest:
 @dataclass(frozen=True)
 class AssistantRuntimeResult:
     runtime: RuntimeKind
-    status: Literal["completed", "failed", "cancelled", "fallback"]
+    status: Literal["completed", "failed", "cancelled"]
     final_text: str
     reason_code: str | None = None
     write_message: bool = True
@@ -348,7 +226,6 @@ class AssistantRuntimeResult:
     write_title: bool = True
     skill_summaries: tuple[dict[str, Any], ...] = ()
     tool_summaries: tuple[dict[str, Any], ...] = ()
-    fallback_to_legacy: bool = False
 
 
 class AssistantRuntimeRunner(Protocol):
@@ -361,7 +238,7 @@ class AdmissionContext:
     execution_kind: ExecutionKind
     profile: AssistantMainAgentProfile
     profile_version: AssistantMainAgentProfileVersion
-    snapshot: MainAgentProfileSnapshotV1
+    snapshot: MainAgentProfileSnapshotV2
     main_agent_ref: ResolvedMainAgentRef
     control_keys: tuple[str, ...]
     frozen_model: FrozenModelIdentity
@@ -369,8 +246,7 @@ class AdmissionContext:
     model_ref: ModelRef
     eligibility: ModelEligibilityReport
     effective_policy_digest: str
-    legacy_runtime_allowed: bool
-    before_side_effects_only: bool
+    probe_diagnostics: ModelEligibilityReport | None = None
 
 
 @dataclass
@@ -380,7 +256,6 @@ class MainAgentRunState:
     run_id: UUID
     conversation_id: UUID
     manifest: ResolvedRunManifestRevision
-    fallback: MainAgentFallbackState = field(default_factory=MainAgentFallbackState)
     applied_skill_version_ids: set[UUID] = field(default_factory=set)
     final_text: str = ""
     status: str = "running"
@@ -415,21 +290,19 @@ def select_runtime_for_mode(
 ) -> tuple[RuntimeKind | None, str | None]:
     """Return (runtime_to_try, reason) without constructing services.
 
-    - off: legacy only (None means "do not construct MA")
-    - shadow + production: legacy only
-    - shadow + evaluation: main_agent allowed
-    - read_only: main_agent after preflight
+    Plan 2 Task 9: never returns legacy. off / shadow-production refuse construction
+    with a typed reason; only main_agent is constructible.
     """
+    del execution_kind  # reserved for evaluation shadow diagnostics
     normalized = str(mode or "off").strip().lower()
     if normalized == "off":
-        return "legacy", MODE_OFF
+        return None, MODE_OFF
     if normalized == "shadow":
-        if execution_kind == "production":
-            return "legacy", MODE_SHADOW_PRODUCTION
-        return "main_agent", None
+        # Shadow no longer routes to legacy; production shadow is refused.
+        return None, MODE_SHADOW_PRODUCTION
     if normalized == "read_only":
         return "main_agent", None
-    return "legacy", MODE_OFF
+    return None, MODE_OFF
 
 
 def should_construct_main_agent(
@@ -442,22 +315,21 @@ def should_construct_main_agent(
 
 
 def _credential_config_digest(*, base_url: str, runtime_revision: int) -> str:
-    parts = urlsplit((base_url or "").strip())
-    return sha256_canonical_json(
-        {
-            "schemaVersion": 1,
-            "scheme": parts.scheme or None,
-            "host": parts.hostname,
-            "port": parts.port,
-            "path": parts.path or None,
-            "runtimeRevision": int(runtime_revision or 1),
-        }
+    from app.assistant.runtime.closure import credential_config_digest
+
+    return credential_config_digest(
+        base_url=base_url, runtime_revision=runtime_revision
     )
 
 
 def load_default_published_profile(
     db: Session,
-) -> tuple[AssistantMainAgentProfile, AssistantMainAgentProfileVersion, MainAgentProfileSnapshotV1]:
+) -> tuple[AssistantMainAgentProfile, AssistantMainAgentProfileVersion, MainAgentProfileSnapshotV2]:
+    """Load the default published Main Agent profile for production admission.
+
+    Plan 2: production admit is V2-exclusive. V1 snapshots remain readable for
+    historical display only and must fail closed here as PROFILE_UNAVAILABLE.
+    """
     profile = (
         db.query(AssistantMainAgentProfile)
         .filter(AssistantMainAgentProfile.is_default.is_(True))
@@ -475,7 +347,8 @@ def load_default_published_profile(
     if str(version.version_source) != "publish":
         raise MainAgentAdmissionError(PROFILE_UNPUBLISHED)
     try:
-        snapshot = MainAgentProfileSnapshotV1.model_validate(version.snapshot or {})
+        parsed = parse_main_agent_profile_snapshot_for_read(version.snapshot or {})
+        snapshot = require_production_profile_v2(parsed)
     except Exception as exc:
         raise MainAgentAdmissionError(PROFILE_UNAVAILABLE) from exc
     recomputed = snapshot.content_digest()
@@ -485,8 +358,14 @@ def load_default_published_profile(
 
 
 def validate_profile_for_assistant_chat(
-    snapshot: MainAgentProfileSnapshotV1,
+    snapshot: ReadableMainAgentProfileSnapshot,
 ) -> tuple[str, ...]:
+    """Validate shared profile fields used by assistant_chat admission.
+
+    Accepts V1 or V2 for unit/historical callers that only exercise shared fields
+    (supported_entrypoints, control_capability_keys). Production admit always
+    supplies V2 via load_default_published_profile.
+    """
     if "assistant_chat" not in set(snapshot.supported_entrypoints):
         raise MainAgentAdmissionError(ENTRYPOINT_UNSUPPORTED)
     keys = tuple(snapshot.control_capability_keys or ())
@@ -687,8 +566,7 @@ def admit_main_agent(
         model_ref=model_ref,
         eligibility=eligibility,
         effective_policy_digest=policy_digest,
-        legacy_runtime_allowed=bool(snapshot.fallback_policy.legacy_runtime_allowed),
-        before_side_effects_only=bool(snapshot.fallback_policy.before_side_effects_only),
+        probe_diagnostics=eligibility,
     )
 
 
@@ -729,14 +607,18 @@ def build_base_manifest_with_controls(
     )
 
 
-def construct_openai_adapter_after_eligibility(
+def construct_openai_adapter_after_identity_recheck(
     db: Session,
     *,
     frozen: FrozenModelIdentity,
     provider_ref: ProviderRef,
     app_build_revision: str,
 ) -> ProviderAdapter:
-    """Decrypt credential and build adapter only after eligibility + recheck."""
+    """Decrypt credential and build adapter after identity recheck.
+
+    Probe is optional: when ``frozen`` carries no diagnostic probe, recheck
+    compares only model/credential revisions and config digests.
+    """
     from app.ai_provider.crypto import decrypt_api_key
     from app.ai_registry.models import AiCredential, AiModel, AiModelCapabilityProbe
     from app.assistant.provider_loop.adapters.openai_chat import (
@@ -819,6 +701,22 @@ def construct_openai_adapter_after_eligibility(
     return OpenAIChatCompletionsAdapter(runtime_config=runtime_config)
 
 
+def construct_openai_adapter_after_eligibility(
+    db: Session,
+    *,
+    frozen: FrozenModelIdentity,
+    provider_ref: ProviderRef,
+    app_build_revision: str,
+) -> ProviderAdapter:
+    """Backward-compatible alias for identity-recheck adapter construction."""
+    return construct_openai_adapter_after_identity_recheck(
+        db,
+        frozen=frozen,
+        provider_ref=provider_ref,
+        app_build_revision=app_build_revision,
+    )
+
+
 class _CancelBridge:
     def __init__(self, checker: Callable[[], bool] | None) -> None:
         self._checker = checker
@@ -898,11 +796,7 @@ class MainAgentService:
                 # Re-admission validates its dependencies; it never re-routes from env.
                 self.admit(mode="read_only", execution_kind=request.execution_kind)
             except MainAgentAdmissionError as exc:
-                return self._admission_failure_result(
-                    request=request,
-                    reason_code=exc.reason_code,
-                    events=events,
-                )
+                return self._failed_result(reason_code=exc.reason_code)
 
         assert self._admission is not None
         admission = self._admission
@@ -931,7 +825,6 @@ class MainAgentService:
             conversation_id=request.conversation_id,
             manifest=manifest,
         )
-        fallback = self._state.fallback
 
         # Shadow / evaluation: never write Message/L1/L2/title from MA output.
         persist = request.execution_kind == "production" and str(admission.mode) == "read_only"
@@ -959,13 +852,7 @@ class MainAgentService:
                         app_build_revision=self._app_build_revision,
                     )
                 except MainAgentAdmissionError as exc:
-                    return self._maybe_fallback(
-                        request=request,
-                        reason_code=exc.reason_code,
-                        events=events,
-                        fallback=fallback,
-                        admission=admission,
-                    )
+                    return self._failed_result(reason_code=exc.reason_code)
 
             ports = self._injected_ports
             policy_runtime = None
@@ -991,12 +878,8 @@ class MainAgentService:
                         "main agent policy composition failed run_id=%s",
                         request.run_id,
                     )
-                    return self._maybe_fallback(
-                        request=request,
-                        reason_code=ADAPTER_UNAVAILABLE_BEFORE_REQUEST,
-                        events=events,
-                        fallback=fallback,
-                        admission=admission,
+                    return self._failed_result(
+                        reason_code=ADAPTER_UNAVAILABLE_BEFORE_REQUEST
                     )
 
             # Reject no-op lifecycle for Main Agent composition.
@@ -1004,12 +887,8 @@ class MainAgentService:
                 getattr(ports, "manifest_effect_lifecycle", None),
                 NoOpManifestEffectLifecyclePort,
             ):
-                return self._maybe_fallback(
-                    request=request,
-                    reason_code=ADAPTER_UNAVAILABLE_BEFORE_REQUEST,
-                    events=events,
-                    fallback=fallback,
-                    admission=admission,
+                return self._failed_result(
+                    reason_code=ADAPTER_UNAVAILABLE_BEFORE_REQUEST
                 )
 
             builder = MainAgentPromptBuilder()
@@ -1026,13 +905,7 @@ class MainAgentService:
                     tool_artifact_summaries=(),
                 )
             except Exception:
-                return self._maybe_fallback(
-                    request=request,
-                    reason_code=BUDGET_INVALID,
-                    events=events,
-                    fallback=fallback,
-                    admission=admission,
-                )
+                return self._failed_result(reason_code=BUDGET_INVALID)
 
             scope = create_execution_scope(
                 run_id=request.run_id,
@@ -1122,21 +995,7 @@ class MainAgentService:
                     capability_ledger=ports.capability_ledger,
                 )
 
-            fallback.mark_provider_request()
             result: ProviderLoopResult = self._loop.start(loop_request, ports=ports)
-            # Any capability dispatch that actually started blocks automatic Legacy
-            # fallback under §4.3 (read completions still count as started dispatches).
-            tool_records = getattr(result, "tool_calls", None) or ()
-            for record in tool_records:
-                side = None
-                try:
-                    # Prefer descriptor-level side effect if present on the record.
-                    side = getattr(record, "side_effect", None) or getattr(
-                        getattr(record, "call", None), "side_effect", None
-                    )
-                except Exception:
-                    side = None
-                fallback.mark_capability_dispatch(side_effect=side if isinstance(side, str) else "read")
             final_text = (result.final_text or "").strip()
 
             if result.status == "cancelled":
@@ -1183,13 +1042,7 @@ class MainAgentService:
                     and reason == MAIN_AGENT_FAILED
                 ):
                     reason = "provider_retry_safe_before_output"
-                    return self._maybe_fallback(
-                        request=request,
-                        reason_code=reason,
-                        events=events,
-                        fallback=fallback,
-                        admission=admission,
-                    )
+                    return self._failed_result(reason_code=reason)
                 return AssistantRuntimeResult(
                     runtime="main_agent",
                     status="failed",
@@ -1206,7 +1059,6 @@ class MainAgentService:
             # Message checkpoint + single bounded content_delta stream so SSE and
             # Message content stay ordered and non-duplicated.
             if final_text:
-                fallback.mark_user_output()
                 self._state.final_text = final_text
 
             return AssistantRuntimeResult(
@@ -1222,13 +1074,7 @@ class MainAgentService:
                 tool_summaries=tuple(events.tool_summaries),
             )
         except MainAgentAdmissionError as exc:
-            return self._maybe_fallback(
-                request=request,
-                reason_code=exc.reason_code,
-                events=events,
-                fallback=fallback,
-                admission=admission,
-            )
+            return self._failed_result(reason_code=exc.reason_code)
         except Exception:
             logger.exception(
                 "main agent run failed run_id=%s conversation_id=%s",
@@ -1342,155 +1188,23 @@ class MainAgentService:
         )
         return runtime, ports
 
-    def _admission_failure_result(
-
+    def _failed_result(
         self,
         *,
-        request: AssistantRuntimeRequest,
         reason_code: str,
-        events: MainAgentEventAdapter,
     ) -> AssistantRuntimeResult:
-        # No admission context: use conservative fallback policy from defaults.
-        legacy_allowed = True
-        before_side_effects_only = True
-        fallback = MainAgentFallbackState()
-        if fallback.allows_automatic_fallback(
-            reason_code=reason_code,
-            legacy_runtime_allowed=legacy_allowed,
-            before_side_effects_only=before_side_effects_only,
-            cancel_requested=bool(request.cancel_checker and request.cancel_checker()),
-        ):
-            events.fallback_selected(
-                run_id=request.run_id,
-                source_runtime="main_agent",
-                target_runtime="legacy",
-                reason_code=reason_code,
-            )
-            return AssistantRuntimeResult(
-                runtime="main_agent",
-                status="fallback",
-                final_text="",
-                reason_code=reason_code,
-                write_message=False,
-                write_l1=False,
-                write_l2=False,
-                write_title=False,
-                fallback_to_legacy=True,
-            )
+        """Return a typed Main Agent failure without selecting another runtime."""
         return AssistantRuntimeResult(
             runtime="main_agent",
             status="failed",
             final_text="",
-            reason_code=reason_code or FALLBACK_DISALLOWED,
+            reason_code=reason_code or MAIN_AGENT_FAILED,
             write_message=False,
             write_l1=False,
             write_l2=False,
             write_title=False,
-            fallback_to_legacy=False,
         )
 
-    def _maybe_fallback(
-        self,
-        *,
-        request: AssistantRuntimeRequest,
-        reason_code: str,
-        events: MainAgentEventAdapter,
-        fallback: MainAgentFallbackState,
-        admission: AdmissionContext,
-    ) -> AssistantRuntimeResult:
-        cancel_requested = bool(request.cancel_checker and request.cancel_checker())
-        if fallback.allows_automatic_fallback(
-            reason_code=reason_code,
-            legacy_runtime_allowed=admission.legacy_runtime_allowed,
-            before_side_effects_only=admission.before_side_effects_only,
-            cancel_requested=cancel_requested,
-        ):
-            snap = fallback.snapshot()
-            events.fallback_selected(
-                run_id=request.run_id,
-                source_runtime="main_agent",
-                target_runtime="legacy",
-                reason_code=reason_code,
-                provider_requests_started=int(snap["provider_requests_started"]),
-                capability_dispatches_started=int(snap["capability_dispatches_started"]),
-                strongest_side_effect=snap["strongest_started_side_effect"],
-            )
-            return AssistantRuntimeResult(
-                runtime="main_agent",
-                status="fallback",
-                final_text="",
-                reason_code=reason_code,
-                write_message=False,
-                write_l1=False,
-                write_l2=False,
-                write_title=False,
-                fallback_to_legacy=True,
-            )
-        return AssistantRuntimeResult(
-            runtime="main_agent",
-            status="failed",
-            final_text="",
-            reason_code=reason_code if reason_code else FALLBACK_DISALLOWED,
-            write_message=False,
-            write_l1=False,
-            write_l2=False,
-            write_title=False,
-            fallback_to_legacy=False,
-        )
-
-
-class LegacyAssistantRuntimeRunner:
-    """Wraps the existing ``_generate_response`` path."""
-
-    def __init__(
-        self,
-        generate: Callable[..., Iterator[str]],
-        *,
-        conversation_id: UUID,
-        message_id: UUID | None,
-        run_id: UUID,
-        stream_output: bool,
-        locale: str,
-        db: Session,
-        cancel_checker: Callable[[], bool] | None = None,
-        event_callbacks: Mapping[str, Any] | None = None,
-    ) -> None:
-        self._generate = generate
-        self._conversation_id = conversation_id
-        self._message_id = message_id
-        self._run_id = run_id
-        self._stream_output = stream_output
-        self._locale = locale
-        self._db = db
-        self._cancel_checker = cancel_checker
-        self._event_callbacks = dict(event_callbacks or {})
-
-    def run(self, request: AssistantRuntimeRequest) -> AssistantRuntimeResult:
-        del request  # parameters already bound at construction for Legacy path
-        parts: list[str] = []
-        for delta in self._generate(
-            self._conversation_id,
-            message_id=self._message_id,
-            run_id=self._run_id,
-            stream_output=self._stream_output,
-            locale=self._locale,
-            db=self._db,
-            cancel_checker=self._cancel_checker,
-            **self._event_callbacks,
-        ):
-            if delta:
-                parts.append(str(delta))
-        text = "".join(parts)
-        return AssistantRuntimeResult(
-            runtime="legacy",
-            status="completed",
-            final_text=text,
-            reason_code=None,
-            write_message=True,
-            write_l1=True,
-            write_l2=True,
-            write_title=True,
-        )
 
 
 def chunk_text(text: str, *, chunk_size: int = 64) -> Iterator[str]:
@@ -1513,15 +1227,11 @@ __all__ = [
     "CONTROL_UNSUPPORTED",
     "CANCELLED",
     "ENTRYPOINT_UNSUPPORTED",
-    "FALLBACK_DISALLOWED",
-    "FALLBACK_SAFE_REASONS",
-    "LegacyAssistantRuntimeRunner",
     "MAIN_AGENT_COMPLETED",
     "MAIN_AGENT_FAILED",
     "MODE_OFF",
     "MODE_SHADOW_PRODUCTION",
     "MainAgentAdmissionError",
-    "MainAgentFallbackState",
     "MainAgentRunState",
     "MainAgentService",
     "NOOP_LIFECYCLE_REJECTED",
@@ -1533,6 +1243,7 @@ __all__ = [
     "chunk_text",
     "compute_main_agent_effective_policy_digest",
     "construct_openai_adapter_after_eligibility",
+    "construct_openai_adapter_after_identity_recheck",
     "load_default_published_profile",
     "resolve_assistant_model_identity",
     "select_runtime_for_mode",

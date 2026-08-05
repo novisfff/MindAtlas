@@ -57,14 +57,16 @@ def _seed_external_call(
         create_initial_obligation_ledger_state,
         pure_create_obligation,
     )
-    from app.assistant.models import AssistantChatRun, Conversation
+    from app.assistant.models import Conversation
+    from tests.assistant_runtime_support import make_main_agent_run
     conv = Conversation(title="t")
     db.add(conv)
     db.flush()
-    run = AssistantChatRun(
-        conversation_id=conv.id,
-        status="needs_reconciliation",
-        runtime_kind="main_agent",
+    run = make_main_agent_run(
+        db,
+        conversation=conv,
+        status=status,
+        build_revision="b1",
         runtime_contract_version=1,
         required_app_build_revision="b1",
         capability_ledger_mode="enforced",
@@ -73,9 +75,6 @@ def _seed_external_call(
         lease_generation=1,
         memory_commit_status="pending",
     )
-    db.add(run)
-    db.commit()
-    db.refresh(run)
     manifest = AssistantRunManifestRevision(
         run_id=run.id,
         revision=1,
@@ -1683,9 +1682,12 @@ class ReconciliationServiceTests(unittest.TestCase):
         self.assertEqual(disabled, 2)
 
     def test_cli_issues_server_derived_success_attestation(self) -> None:
+        """CLI issue-success is refused; mutations require HTTP Operator session."""
+        import io
+        import sys
+
         from app.assistant.capability_calls.cli import main
         from app.assistant.capability_calls.models import AssistantCapabilityCallAttempt
-        from app.assistant.durable.models import AssistantRunArtifact
         from tests.test_capability_call_repository import _normalized_result_artifact
 
         run, call, _ = _seed_external_call(self.db)
@@ -1698,73 +1700,68 @@ class ReconciliationServiceTests(unittest.TestCase):
         attempt.status = "committed"
         attempt.response_digest = result_artifact.content_sha256
         self.db.commit()
-        code = main(
-            [
-                "issue-success",
-                "--call-id",
-                str(call.id),
-                "--result-artifact-id",
-                str(result_artifact.id),
-            ],
-            session_factory=lambda: self.db,
-            settings=SimpleNamespace(
-                assistant_capability_reconciliation_enabled=True,
-                assistant_capability_reconciliation_operator_id=uuid.uuid4(),
-                assistant_capability_reconciliation_evidence_secret=EVIDENCE_SECRET,
-            ),
-        )
-        self.assertEqual(code, 0)
-        issued = (
-            self.db.query(AssistantRunArtifact)
-            .filter(AssistantRunArtifact.kind == "capability_call_evidence")
-            .one()
-        )
-        claims = _evidence_verifier().verify(
-            bytes(issued.inline_bytes), now=datetime.now(timezone.utc)
-        )
-        self.assertEqual(claims["evidenceType"], "capability_call_success_attestation")
-        self.assertEqual(claims["resultArtifactDigest"], result_artifact.content_sha256)
-        self.assertEqual(claims["attempt"]["attemptId"], str(attempt.id))
+        err = io.StringIO()
+        old_err = sys.stderr
+        try:
+            sys.stderr = err
+            code = main(
+                [
+                    "issue-success",
+                    "--call-id",
+                    str(call.id),
+                    "--result-artifact-id",
+                    str(result_artifact.id),
+                ],
+                session_factory=lambda: self.db,
+                settings=SimpleNamespace(
+                    assistant_capability_reconciliation_enabled=True,
+                    assistant_capability_reconciliation_operator_id=uuid.uuid4(),
+                    assistant_capability_reconciliation_evidence_secret=EVIDENCE_SECRET,
+                ),
+            )
+        finally:
+            sys.stderr = old_err
+        self.assertEqual(code, 2)
+        self.assertIn("authenticated HTTP Operator session is required", err.getvalue())
 
     def test_cli_issues_authenticated_product_failure_acceptance(self) -> None:
+        """CLI issue-failure-acceptance is refused; mutations require HTTP session."""
+        import io
+        import sys
+
         from app.assistant.capability_calls.cli import main
-        from app.assistant.durable.models import AssistantRunArtifact
 
         run, call, _ = _seed_external_call(self.db)
         operator_id = uuid.uuid4()
-        code = main(
-            [
-                "issue-failure-acceptance",
-                "--call-id",
-                str(call.id),
-                "--reason",
-                "product accepts unresolved provider outcome",
-            ],
-            session_factory=lambda: self.db,
-            settings=SimpleNamespace(
-                assistant_capability_reconciliation_enabled=True,
-                assistant_capability_reconciliation_operator_id=operator_id,
-                assistant_capability_reconciliation_evidence_secret=EVIDENCE_SECRET,
-            ),
-        )
-        self.assertEqual(code, 0)
-        issued = (
-            self.db.query(AssistantRunArtifact)
-            .filter(AssistantRunArtifact.kind == "capability_call_evidence")
-            .one()
-        )
-        claims = _evidence_verifier().verify(
-            bytes(issued.inline_bytes), now=datetime.now(timezone.utc)
-        )
-        self.assertEqual(claims["evidenceType"], "capability_call_failure")
-        self.assertEqual(
-            claims["failureDisposition"],
-            "explicit_product_acceptance_unresolved",
-        )
-        self.assertEqual(claims["acceptedBy"], str(operator_id))
-        self.assertNotIn("reason", claims)
+        err = io.StringIO()
+        old_err = sys.stderr
+        try:
+            sys.stderr = err
+            code = main(
+                [
+                    "issue-failure-acceptance",
+                    "--call-id",
+                    str(call.id),
+                    "--reason",
+                    "product accepts unresolved provider outcome",
+                ],
+                session_factory=lambda: self.db,
+                settings=SimpleNamespace(
+                    assistant_capability_reconciliation_enabled=True,
+                    assistant_capability_reconciliation_operator_id=operator_id,
+                    assistant_capability_reconciliation_evidence_secret=EVIDENCE_SECRET,
+                ),
+            )
+        finally:
+            sys.stderr = old_err
+        self.assertEqual(code, 2)
+        self.assertIn("authenticated HTTP Operator session is required", err.getvalue())
 
     def test_cli_decide_uses_only_server_configured_operator(self) -> None:
+        """CLI decide is refused; env-asserted operator identity is not authorized."""
+        import io
+        import sys
+
         from app.assistant.capability_calls.cli import main
         from app.assistant.capability_calls.models import (
             AssistantCapabilityReconciliation,
@@ -1779,36 +1776,38 @@ class ReconciliationServiceTests(unittest.TestCase):
         )
         self.db.commit()
         operator_id = uuid.uuid4()
-        code = main(
-            [
-                "decide",
-                "--call-id",
-                str(call.id),
-                "--expected-call-revision",
-                "3",
-                "--expected-run-revision",
-                "2",
-                "--decision",
-                "mark_failed",
-                "--reason",
-                "typed evidence proves failure",
-                "--evidence-artifact-id",
-                str(artifact.id),
-            ],
-            session_factory=lambda: self.db,
-            settings=SimpleNamespace(
-                assistant_capability_reconciliation_enabled=True,
-                assistant_capability_reconciliation_operator_id=operator_id,
-                assistant_capability_reconciliation_evidence_secret=EVIDENCE_SECRET,
-            ),
-        )
-        self.assertEqual(code, 0)
-        row = self.db.query(AssistantCapabilityReconciliation).one()
-        self.assertEqual(row.actor_admin_id, operator_id)
-        self.assertEqual(
-            row.authorization_evidence["authorizationMethod"],
-            "configured_cli_operator",
-        )
+        err = io.StringIO()
+        old_err = sys.stderr
+        try:
+            sys.stderr = err
+            code = main(
+                [
+                    "decide",
+                    "--call-id",
+                    str(call.id),
+                    "--expected-call-revision",
+                    "3",
+                    "--expected-run-revision",
+                    "2",
+                    "--decision",
+                    "mark_failed",
+                    "--reason",
+                    "typed evidence proves failure",
+                    "--evidence-artifact-id",
+                    str(artifact.id),
+                ],
+                session_factory=lambda: self.db,
+                settings=SimpleNamespace(
+                    assistant_capability_reconciliation_enabled=True,
+                    assistant_capability_reconciliation_operator_id=operator_id,
+                    assistant_capability_reconciliation_evidence_secret=EVIDENCE_SECRET,
+                ),
+            )
+        finally:
+            sys.stderr = old_err
+        self.assertEqual(code, 2)
+        self.assertIn("authenticated HTTP Operator session is required", err.getvalue())
+        self.assertEqual(self.db.query(AssistantCapabilityReconciliation).count(), 0)
 
     def test_unsigned_status_label_is_not_trusted_evidence(self) -> None:
         from app.assistant.capability_calls.reconciliation import (
