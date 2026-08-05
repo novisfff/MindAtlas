@@ -145,6 +145,11 @@ def normalize_document(
     side: Literal["old", "clean"],
 ) -> CanonicalSchemaDocument:
     """Apply exact, definition-locked exclusions to one comparison side."""
+    if (
+        type(document.canonicalization_version) is not int
+        or document.canonicalization_version != 1
+    ):
+        raise SchemaComparisonError("exclusion_document_version_invalid")
     manifest_items = _manifest_items(manifest)
     by_key = {item.key: item for item in document.objects}
 

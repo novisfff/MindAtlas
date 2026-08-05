@@ -30,6 +30,7 @@
 
 - Create: `backend/app/schema/application_contract.py`
 - Create: `backend/tests/test_schema_application_contract.py`
+- Modify: `backend/app/schema/canonical.py`
 - Modify: `backend/app/schema/contracts.py`
 
 **Interfaces:**
@@ -108,6 +109,8 @@ if self.canonicalization_version not in (1, 2):
 ```
 
 Keep `PostgresCatalogReader.read_document()` fixed at version 1.
+
+Add a RED test proving `normalize_document()` rejects version-2 input with `exclusion_document_version_invalid`, then enforce that guard at the start of `normalize_document()`. This makes exact Legacy removal a version-1-only operation before projection.
 
 - [ ] **Step 4: Implement exact control constants**
 
@@ -203,6 +206,7 @@ Expected: all pass; raw catalog tests retain version 1 physical fields.
 ```bash
 git add \
   backend/app/schema/application_contract.py \
+  backend/app/schema/canonical.py \
   backend/app/schema/contracts.py \
   backend/tests/test_schema_application_contract.py
 git commit -m "feat(schema): project clean logical contracts"

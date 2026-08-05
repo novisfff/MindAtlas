@@ -179,12 +179,15 @@ class CanonicalSchemaObject:
 
 @dataclass(frozen=True)
 class CanonicalSchemaDocument:
-    canonicalization_version: Literal[1]
+    canonicalization_version: Literal[1, 2]
     postgres_major: int
     objects: tuple[CanonicalSchemaObject, ...]
 
     def __post_init__(self) -> None:
-        if self.canonicalization_version != 1:
+        if (
+            type(self.canonicalization_version) is not int
+            or self.canonicalization_version not in (1, 2)
+        ):
             raise ValueError("unsupported canonicalization version")
         if type(self.postgres_major) is not int or self.postgres_major <= 0:
             raise ValueError("postgres_major must be a positive integer")
