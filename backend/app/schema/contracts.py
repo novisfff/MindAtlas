@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Literal
+from typing import Any, Literal, TypeAlias
 
 SCHEMA_FAMILY = "pre_ga_v1"
 PRE_SQUASH_HEAD = "b6e2d4f8a901"
@@ -97,3 +98,106 @@ class SchemaCompatibilitySnapshot:
                 self.runtime_identity_digest,
                 field_name="runtime_identity_digest",
             )
+
+
+JsonScalar: TypeAlias = None | bool | int | str
+JsonValue: TypeAlias = (
+    JsonScalar
+    | list["JsonValue"]
+    | tuple["JsonValue", ...]
+    | Mapping[str, "JsonValue"]
+)
+
+
+@dataclass(frozen=True, order=True)
+class CanonicalObjectKey:
+    kind: str
+    schema: str
+    name: str
+    qualifier: str = ""
+
+    def __post_init__(self) -> None:
+        if not all(
+            isinstance(item, str)
+            for item in (self.kind, self.schema, self.name, self.qualifier)
+        ):
+            raise ValueError("canonical object key fields must be strings")
+        if not self.kind or not self.schema or not self.name:
+            raise ValueError("canonical object kind, schema, and name must be nonempty")
+
+    def to_payload(self) -> dict[str, JsonValue]:
+        return {
+            "kind": self.kind,
+            "schema": self.schema,
+            "name": self.name,
+            "qualifier": self.qualifier,
+        }
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, Any]) -> "CanonicalObjectKey":
+        try:
+            kind = payload["kind"]
+            schema = payload["schema"]
+            name = payload["name"]
+            qualifier = payload.get("qualifier", "")
+            if not all(
+                isinstance(item, str) for item in (kind, schema, name, qualifier)
+            ):
+                raise TypeError("canonical object key fields must be strings")
+            return cls(
+                kind=kind,
+                schema=schema,
+                name=name,
+                qualifier=qualifier,
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("invalid canonical object key") from exc
+
+
+@dataclass(frozen=True)
+class CanonicalSchemaObject:
+    key: CanonicalObjectKey
+    definition: Mapping[str, JsonValue]
+
+    def __post_init__(self) -> None:
+        from app.schema.canonical import validate_json_value
+
+        validate_json_value(self.definition)
+
+    @property
+    def definition_digest(self) -> str:
+        from app.schema.canonical import sha256_canonical_json
+
+        return sha256_canonical_json(self.definition)
+
+    def to_payload(self) -> dict[str, JsonValue]:
+        return {
+            "key": self.key.to_payload(),
+            "definition": self.definition,
+        }
+
+
+@dataclass(frozen=True)
+class CanonicalSchemaDocument:
+    canonicalization_version: Literal[1]
+    postgres_major: int
+    objects: tuple[CanonicalSchemaObject, ...]
+
+    def __post_init__(self) -> None:
+        if self.canonicalization_version != 1:
+            raise ValueError("unsupported canonicalization version")
+        if type(self.postgres_major) is not int or self.postgres_major <= 0:
+            raise ValueError("postgres_major must be a positive integer")
+        keys = tuple(item.key for item in self.objects)
+        if keys != tuple(sorted(keys)) or len(keys) != len(set(keys)):
+            raise ValueError("canonical schema objects must be unique and sorted")
+
+    def to_payload(self) -> dict[str, JsonValue]:
+        return {
+            "canonicalizationVersion": self.canonicalization_version,
+            "postgresMajor": self.postgres_major,
+            "objects": [item.to_payload() for item in self.objects],
+        }
+
+    def object_by_key(self, key: CanonicalObjectKey) -> CanonicalSchemaObject | None:
+        return next((item for item in self.objects if item.key == key), None)
