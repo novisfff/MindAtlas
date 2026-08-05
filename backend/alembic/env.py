@@ -12,78 +12,9 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from app.config import get_settings  # noqa: E402
 from app.database import Base  # noqa: E402
+from app.model_registry import load_all_live_models  # noqa: E402
 
-# Import all models to ensure they are registered with Base.metadata
-from app.entry_type.models import EntryType  # noqa: E402, F401
-from app.tag.models import Tag  # noqa: E402, F401
-from app.entry.models import Entry, entry_tag  # noqa: E402, F401
-from app.relation.models import Relation, RelationType  # noqa: E402, F401
-from app.attachment.models import Attachment  # noqa: E402, F401
-from app.ai_provider.models import AiProvider  # noqa: E402, F401
-from app.ai_registry.models import (  # noqa: E402, F401
-    AiCredential,
-    AiModel,
-    AiModelCapabilityProbe,
-    AiComponentBinding,
-)
-from app.assistant.models import Conversation, Message  # noqa: E402, F401
-from app.assistant.runtime.models import (  # noqa: E402, F401
-    AssistantMainAgentRolloutControl,
-    AssistantMainAgentRolloutEvent,
-    AssistantMainAgentRolloutRevision,
-)
-from app.assistant.capability_calls.models import (  # noqa: E402, F401
-    AssistantCapabilityCall,
-    AssistantCapabilityCallAttempt,
-    AssistantCapabilityReconciliation,
-)
-from app.assistant.durable.models import (  # noqa: E402, F401
-    AssistantRunArtifact,
-    AssistantRunArtifactGc,
-    AssistantRunBudgetRevision,
-    AssistantRunCheckpoint,
-    AssistantRunInterrupt,
-    AssistantRunManifestRevision,
-    AssistantRunObligationRevision,
-    AssistantRunPolicyRevision,
-    AssistantRunProviderMessage,
-    AssistantWorkerRegistration,
-)
-from app.assistant.skills.models import (  # noqa: E402, F401
-    AssistantMainAgentProfile,
-    AssistantMainAgentProfileVersion,
-    AssistantSkillCapabilityBinding,
-    AssistantSkillCapabilityDependency,
-    AssistantSkillImportPreview,
-    AssistantSkillPackage,
-    AssistantSkillPackageAlias,
-    AssistantSkillResourceBlob,
-    AssistantSkillVersion,
-    AssistantSkillVersionResource,
-)
-from app.assistant.evaluation.models import (  # noqa: E402, F401
-    AssistantSkillEvalArtifact,
-    AssistantSkillEvalCapabilityCall,
-    AssistantSkillEvalCase,
-    AssistantSkillEvalCaseResult,
-    AssistantSkillEvalDataset,
-    AssistantSkillEvalDatasetDraft,
-    AssistantSkillEvalDatasetVersion,
-    AssistantSkillEvalEvent,
-    AssistantSkillEvalRun,
-    AssistantSkillPublishGate,
-    AssistantSkillPublishGateUse,
-)
-from app.assistant_config.models import AssistantTool, AssistantSkillNode, AssistantSkillEdge  # noqa: E402, F401  # AssistantSkill dropped Plan 10 B2
-from app.lightrag.models import EntryIndexOutbox  # noqa: E402, F401
-from app.openclaw_integration.models import OpenClawCapabilityItem  # noqa: E402, F401
-from app.report.models import MonthlyReport, WeeklyReport  # noqa: E402, F401
-from app.system_settings.models import AppSetting  # noqa: E402, F401
-from app.operator_auth.models import (  # noqa: E402, F401
-    OperatorAccount,
-    OperatorAuditEvent,
-    OperatorSession,
-)
+load_all_live_models()
 
 config = context.config
 

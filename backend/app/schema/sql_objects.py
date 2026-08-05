@@ -9,8 +9,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy import text
+from sqlalchemy.engine import Connection
+from sqlalchemy.exc import SQLAlchemyError
+
 from app.schema.canonical import sha256_canonical_json
 from app.schema.canonical import structural_fingerprint
+from app.schema.catalog import CatalogReadError, PostgresCatalogReader
 from app.schema.contracts import (
     PRE_SQUASH_HEAD,
     SCHEMA_FAMILY,
@@ -28,6 +33,10 @@ class SchemaManifestError(RuntimeError):
     def __init__(self, safe_code: str) -> None:
         super().__init__(safe_code)
         self.safe_code = safe_code
+
+
+class SqlObjectRegistryError(SchemaManifestError):
+    """Bounded retained-SQL installation failure."""
 
 
 @dataclass(frozen=True)
@@ -548,6 +557,47 @@ def load_retained_sql_object_registry(
         creation_order=objects,
         registry_digest=claimed_digest,
     )
+
+
+def install_retained_sql_objects(connection: Connection) -> None:
+    """Install and re-validate the committed retained SQL registry."""
+    registry = load_retained_sql_object_registry()
+    try:
+        before = PostgresCatalogReader(connection).read_document()
+    except CatalogReadError as exc:
+        raise SqlObjectRegistryError(exc.safe_code) from exc
+    available = {item.key for item in before.objects}
+
+    if any(
+        sha256_canonical_json(item.canonical_definition)
+        != item.definition_digest
+        for item in registry.creation_order
+    ):
+        raise SqlObjectRegistryError("sql_object_definition_digest_mismatch")
+    registry_keys = {item.key for item in registry.creation_order}
+    if registry_keys & available:
+        raise SqlObjectRegistryError("sql_object_collision")
+
+    for item in registry.creation_order:
+        if any(dependency not in available for dependency in item.dependencies):
+            raise SqlObjectRegistryError("sql_object_dependency_missing")
+        try:
+            connection.execute(text(item.create_sql))
+        except SQLAlchemyError as exc:
+            raise SqlObjectRegistryError("sql_object_install_failed") from exc
+        available.add(item.key)
+
+    try:
+        after = PostgresCatalogReader(connection).read_document()
+    except CatalogReadError as exc:
+        raise SqlObjectRegistryError(exc.safe_code) from exc
+    installed_by_key = {item.key: item for item in after.objects}
+    for item in registry.creation_order:
+        actual = installed_by_key.get(item.key)
+        if actual is None:
+            raise SqlObjectRegistryError("sql_object_install_missing")
+        if actual.definition_digest != item.definition_digest:
+            raise SqlObjectRegistryError("sql_object_install_drift")
 
 
 def _parse_exclusion_item(payload: Any) -> SchemaExclusionItem:

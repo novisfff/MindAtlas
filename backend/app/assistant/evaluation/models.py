@@ -59,7 +59,7 @@ class AssistantSkillEvalDataset(UuidPrimaryKeyMixin, TimestampMixin, Base):
 
     __tablename__ = "assistant_skill_eval_dataset"
 
-    stable_key = Column(String(128), nullable=False, unique=True, index=True)
+    stable_key = Column(String(128), nullable=False, index=True)
     display_name = Column(String(256), nullable=False)
     description = Column(String(2048), nullable=False, default="", server_default=text("''"))
     ownership = Column(String(32), nullable=False, default="system", server_default=text("'system'"))
@@ -100,6 +100,10 @@ class AssistantSkillEvalDataset(UuidPrimaryKeyMixin, TimestampMixin, Base):
     )
 
     __table_args__ = (
+        UniqueConstraint(
+            "stable_key",
+            name="uq_assistant_skill_eval_dataset_stable_key",
+        ),
         CheckConstraint(
             "ownership IN ('system','custom')",
             name="ck_assistant_skill_eval_dataset_ownership",
@@ -122,9 +126,12 @@ class AssistantSkillEvalDatasetDraft(UuidPrimaryKeyMixin, TimestampMixin, Base):
 
     dataset_id = Column(
         UUID(as_uuid=True),
-        ForeignKey("assistant_skill_eval_dataset.id", ondelete="RESTRICT"),
+        ForeignKey(
+            "assistant_skill_eval_dataset.id",
+            ondelete="RESTRICT",
+            name="fk_assistant_skill_eval_dataset_draft_dataset_id",
+        ),
         nullable=False,
-        unique=True,
         index=True,
     )
     draft_revision = Column(
@@ -155,6 +162,10 @@ class AssistantSkillEvalDatasetDraft(UuidPrimaryKeyMixin, TimestampMixin, Base):
     )
 
     __table_args__ = (
+        UniqueConstraint(
+            "dataset_id",
+            name="uq_assistant_skill_eval_dataset_draft_dataset_id",
+        ),
         CheckConstraint(
             "draft_revision >= 0",
             name="ck_assistant_skill_eval_dataset_draft_revision",
@@ -181,7 +192,11 @@ class AssistantSkillEvalDatasetVersion(UuidPrimaryKeyMixin, Base):
 
     dataset_id = Column(
         UUID(as_uuid=True),
-        ForeignKey("assistant_skill_eval_dataset.id", ondelete="RESTRICT"),
+        ForeignKey(
+            "assistant_skill_eval_dataset.id",
+            ondelete="RESTRICT",
+            name="fk_assistant_skill_eval_dataset_version_dataset_id",
+        ),
         nullable=False,
         index=True,
     )
@@ -240,7 +255,11 @@ class AssistantSkillEvalCase(UuidPrimaryKeyMixin, Base):
 
     dataset_version_id = Column(
         UUID(as_uuid=True),
-        ForeignKey("assistant_skill_eval_dataset_version.id", ondelete="RESTRICT"),
+        ForeignKey(
+            "assistant_skill_eval_dataset_version.id",
+            ondelete="RESTRICT",
+            name="fk_assistant_skill_eval_case_dataset_version_id",
+        ),
         nullable=False,
         index=True,
     )
@@ -536,13 +555,21 @@ class AssistantSkillEvalCaseResult(UuidPrimaryKeyMixin, Base):
 
     eval_run_id = Column(
         UUID(as_uuid=True),
-        ForeignKey("assistant_skill_eval_run.id", ondelete="RESTRICT"),
+        ForeignKey(
+            "assistant_skill_eval_run.id",
+            ondelete="RESTRICT",
+            name="fk_assistant_skill_eval_case_result_eval_run_id",
+        ),
         nullable=False,
         index=True,
     )
     eval_case_id = Column(
         UUID(as_uuid=True),
-        ForeignKey("assistant_skill_eval_case.id", ondelete="RESTRICT"),
+        ForeignKey(
+            "assistant_skill_eval_case.id",
+            ondelete="RESTRICT",
+            name="fk_assistant_skill_eval_case_result_eval_case_id",
+        ),
         nullable=False,
         index=True,
     )
@@ -610,16 +637,24 @@ class AssistantSkillEvalCapabilityCall(UuidPrimaryKeyMixin, Base):
 
     # Synthetic primary key is `id` from UuidPrimaryKeyMixin. `eval_call_id` is
     # the stable logical identity used by recovery/replay CAS (may equal id).
-    eval_call_id = Column(UUID(as_uuid=True), nullable=False, unique=True, index=True)
+    eval_call_id = Column(UUID(as_uuid=True), nullable=False, index=True)
     eval_run_id = Column(
         UUID(as_uuid=True),
-        ForeignKey("assistant_skill_eval_run.id", ondelete="RESTRICT"),
+        ForeignKey(
+            "assistant_skill_eval_run.id",
+            ondelete="RESTRICT",
+            name="fk_assistant_skill_eval_capability_call_eval_run_id",
+        ),
         nullable=False,
         index=True,
     )
     eval_case_id = Column(
         UUID(as_uuid=True),
-        ForeignKey("assistant_skill_eval_case.id", ondelete="RESTRICT"),
+        ForeignKey(
+            "assistant_skill_eval_case.id",
+            ondelete="RESTRICT",
+            name="fk_assistant_skill_eval_capability_call_eval_case_id",
+        ),
         nullable=False,
         index=True,
     )
@@ -649,6 +684,10 @@ class AssistantSkillEvalCapabilityCall(UuidPrimaryKeyMixin, Base):
     )
 
     __table_args__ = (
+        UniqueConstraint(
+            "eval_call_id",
+            name="uq_assistant_skill_eval_capability_call_eval_call_id",
+        ),
         UniqueConstraint(
             "eval_run_id",
             "eval_case_id",
@@ -707,7 +746,11 @@ class AssistantSkillEvalEvent(UuidPrimaryKeyMixin, Base):
 
     eval_run_id = Column(
         UUID(as_uuid=True),
-        ForeignKey("assistant_skill_eval_run.id", ondelete="RESTRICT"),
+        ForeignKey(
+            "assistant_skill_eval_run.id",
+            ondelete="RESTRICT",
+            name="fk_assistant_skill_eval_event_eval_run_id",
+        ),
         nullable=False,
         index=True,
     )
@@ -742,7 +785,11 @@ class AssistantSkillEvalArtifact(UuidPrimaryKeyMixin, Base):
 
     eval_run_id = Column(
         UUID(as_uuid=True),
-        ForeignKey("assistant_skill_eval_run.id", ondelete="RESTRICT"),
+        ForeignKey(
+            "assistant_skill_eval_run.id",
+            ondelete="RESTRICT",
+            name="fk_assistant_skill_eval_artifact_eval_run_id",
+        ),
         nullable=False,
         index=True,
     )
@@ -822,7 +869,12 @@ class AssistantSkillPublishGate(UuidPrimaryKeyMixin, Base):
     threshold_version = Column(String(64), nullable=False)
     build_revision = Column(String(160), nullable=False)
     # Server-stored action this gate authorizes (publish vs enable are distinct).
-    action = Column(String(64), nullable=False, default="skill_publish")
+    action = Column(
+        String(64),
+        nullable=False,
+        default="skill_publish",
+        server_default=text("'skill_publish'"),
+    )
     decision = Column(String(32), nullable=False)
     assertion_snapshot = Column(JSON, nullable=False, default=dict)
     metric_snapshot = Column(JSON, nullable=False, default=dict)
@@ -836,7 +888,7 @@ class AssistantSkillPublishGate(UuidPrimaryKeyMixin, Base):
     publication_pin_count = Column(
         Integer, nullable=False, default=0, server_default=text("0")
     )
-    request_id = Column(String(128), nullable=True, unique=True)
+    request_id = Column(String(128), nullable=True)
 
     uses = relationship(
         "AssistantSkillPublishGateUse",
@@ -845,6 +897,10 @@ class AssistantSkillPublishGate(UuidPrimaryKeyMixin, Base):
     )
 
     __table_args__ = (
+        UniqueConstraint(
+            "request_id",
+            name="uq_assistant_skill_publish_gate_request_id",
+        ),
         CheckConstraint(
             "subject_kind IN ("
             "'skill_draft','skill_version',"
@@ -904,7 +960,11 @@ class AssistantSkillPublishGateUse(UuidPrimaryKeyMixin, Base):
 
     gate_id = Column(
         UUID(as_uuid=True),
-        ForeignKey("assistant_skill_publish_gate.id", ondelete="RESTRICT"),
+        ForeignKey(
+            "assistant_skill_publish_gate.id",
+            ondelete="RESTRICT",
+            name="fk_assistant_skill_publish_gate_use_gate_id",
+        ),
         nullable=False,
         index=True,
     )

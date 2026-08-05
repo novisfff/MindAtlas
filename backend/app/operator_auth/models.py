@@ -23,12 +23,8 @@ from sqlalchemy.orm import relationship
 from app.common.time import utcnow
 from app.database import Base
 
-# Portable ORM digest checks (length only). Full lowercase-hex regex is
-# enforced in the PostgreSQL Alembic migration, matching skills/durable pattern.
-
-
 def _sha256_check(column: str, *, name: str) -> CheckConstraint:
-    return CheckConstraint(f"length({column}) = 64", name=name)
+    return CheckConstraint(f"{column} ~ '^[0-9a-f]{{64}}$'", name=name)
 
 
 # Bounded revoke reasons used by session lifecycle (Task 4+) and maintenance.
@@ -56,13 +52,29 @@ class OperatorAccount(Base):
     __tablename__ = "operator_account"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    singleton_key = Column(String(32), nullable=False, default="operator")
-    role = Column(String(16), nullable=False, default="operator")
+    singleton_key = Column(
+        String(32),
+        nullable=False,
+        default="operator",
+        server_default=text("'operator'"),
+    )
+    role = Column(
+        String(16),
+        nullable=False,
+        default="operator",
+        server_default=text("'operator'"),
+    )
     password_hash = Column(Text, nullable=False)
-    password_revision = Column(Integer, nullable=False, default=1)
-    enabled = Column(Boolean, nullable=False, default=True)
+    password_revision = Column(
+        Integer, nullable=False, default=1, server_default=text("1")
+    )
+    enabled = Column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
     failed_login_window_started_at = Column(DateTime(timezone=True), nullable=True)
-    failed_login_count = Column(Integer, nullable=False, default=0)
+    failed_login_count = Column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
     locked_until = Column(DateTime(timezone=True), nullable=True)
     password_changed_at = Column(DateTime(timezone=True), nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
@@ -107,10 +119,14 @@ class OperatorSession(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     operator_account_id = Column(
         UUID(as_uuid=True),
-        ForeignKey("operator_account.id", ondelete="CASCADE"),
+        ForeignKey(
+            "operator_account.id",
+            ondelete="CASCADE",
+            name="fk_operator_session_operator_account_id",
+        ),
         nullable=False,
     )
-    token_digest = Column(String(64), nullable=False, unique=True)
+    token_digest = Column(String(64), nullable=False)
     csrf_digest = Column(String(64), nullable=False)
     hmac_key_id = Column(String(64), nullable=False)
     password_revision = Column(Integer, nullable=False)
@@ -127,6 +143,10 @@ class OperatorSession(Base):
     account = relationship("OperatorAccount", back_populates="sessions")
 
     __table_args__ = (
+        UniqueConstraint(
+            "token_digest",
+            name="uq_operator_session_token_digest",
+        ),
         _sha256_check(
             "token_digest",
             name="ck_operator_session_token_digest_hex",
@@ -206,7 +226,12 @@ class OperatorAuditEvent(Base):
     user_agent_digest = Column(String(64), nullable=False)
     network_digest = Column(String(64), nullable=False)
     reason_code = Column(String(64), nullable=True)
-    metadata_json = Column(JSONB, nullable=False, default=dict)
+    metadata_json = Column(
+        JSONB,
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
+    )
 
     __table_args__ = (
         _sha256_check(
@@ -224,6 +249,10 @@ class OperatorAuditEvent(Base):
         CheckConstraint(
             "outcome IN ('succeeded', 'rejected', 'failed')",
             name="ck_operator_audit_event_outcome",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(metadata_json) = 'object'",
+            name="ck_operator_audit_event_metadata_object",
         ),
         Index(
             "idx_operator_audit_event_occurred_at",
