@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+import traceback
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -11,6 +12,17 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
+from app.schema.application_contract import (
+    PRE_SQUASH_CONTROL_CONTRACT_DIGEST,
+    LogicalApplicationContractError,
+    SchemaControlStage,
+    project_logical_application_document,
+)
+from app.schema.canonical import canonical_json_bytes, sha256_canonical_json
+from app.schema.sql_objects import (
+    load_exclusion_manifest,
+    load_pre_squash_snapshot,
+)
 from scripts import capture_pre_ga_schema as capture_script
 from tests.postgres_destructive_guard import reset_disposable_public_schema
 
@@ -208,10 +220,7 @@ def test_atomic_manifest_install_rolls_back_second_rename_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    outputs = {
-        name: (capture_script.DEFAULT_MANIFEST_ROOT / name).read_bytes()
-        for name in capture_script._FILENAMES
-    }
+    outputs = _four_manifest_outputs()
     paths = capture_script._destination_paths(tmp_path)
     real_replace = capture_script.os.replace
     call_count = 0
@@ -231,7 +240,152 @@ def test_atomic_manifest_install_rolls_back_second_rename_failure(
     assert list(tmp_path.iterdir()) == []
 
 
-def test_capture_writes_three_sanitized_manifests_and_checks_byte_identity(
+def _four_manifest_outputs() -> dict[str, bytes]:
+    old_names = (
+        "pre_ga_v1-exclusions.json",
+        "pre_ga_v1-pre-squash-schema.json",
+        "pre_ga_v1-sql-objects.json",
+    )
+    outputs = {
+        name: (capture_script.DEFAULT_MANIFEST_ROOT / name).read_bytes()
+        for name in old_names
+    }
+    snapshot = load_pre_squash_snapshot()
+    exclusions = load_exclusion_manifest()
+    logical_document = project_logical_application_document(
+        snapshot.normalized_application_document,
+        control_stage=SchemaControlStage.PRE_SQUASH_MIGRATED,
+    )
+    logical_payload = {
+        "schemaVersion": 1,
+        "schemaFamily": "pre_ga_v1",
+        "sourceHead": PRE_SQUASH_HEAD,
+        "sourceSnapshotDigest": snapshot.snapshot_digest,
+        "exclusionManifestDigest": exclusions.manifest_digest,
+        "controlContractDigest": PRE_SQUASH_CONTROL_CONTRACT_DIGEST,
+        "canonicalizationVersion": 2,
+        "logicalApplicationDocument": logical_document.to_payload(),
+        "logicalApplicationFingerprint": sha256_canonical_json(
+            logical_document.to_payload()
+        ),
+    }
+    logical_manifest = {
+        **logical_payload,
+        "manifestDigest": sha256_canonical_json(logical_payload),
+    }
+    outputs["pre_ga_v1-clean-application-contract.json"] = (
+        canonical_json_bytes(logical_manifest) + b"\n"
+    )
+    return outputs
+
+
+def test_atomic_manifest_extension_adds_only_verified_fourth_artifact(
+    tmp_path: Path,
+) -> None:
+    outputs = _four_manifest_outputs()
+    old_names = (
+        "pre_ga_v1-exclusions.json",
+        "pre_ga_v1-pre-squash-schema.json",
+        "pre_ga_v1-sql-objects.json",
+    )
+    for name in old_names:
+        (tmp_path / name).write_bytes(outputs[name])
+    before = {name: (tmp_path / name).read_bytes() for name in old_names}
+
+    capture_script._write_outputs(
+        capture_script._destination_paths(tmp_path),
+        outputs,
+    )
+
+    assert (tmp_path / "pre_ga_v1-clean-application-contract.json").read_bytes() == (
+        outputs["pre_ga_v1-clean-application-contract.json"]
+    )
+    assert {name: (tmp_path / name).read_bytes() for name in old_names} == before
+
+
+def test_atomic_manifest_extension_rejects_old_manifest_drift(
+    tmp_path: Path,
+) -> None:
+    outputs = _four_manifest_outputs()
+    old_names = (
+        "pre_ga_v1-exclusions.json",
+        "pre_ga_v1-pre-squash-schema.json",
+        "pre_ga_v1-sql-objects.json",
+    )
+    for name in old_names:
+        (tmp_path / name).write_bytes(outputs[name])
+    (tmp_path / old_names[0]).write_bytes(b"{}\n")
+    before = {path.name: path.read_bytes() for path in tmp_path.iterdir()}
+
+    with pytest.raises(capture_script.CaptureError) as exc:
+        capture_script._write_outputs(
+            capture_script._destination_paths(tmp_path),
+            outputs,
+        )
+
+    assert exc.value.safe_code == "schema_capture_drift"
+    assert {path.name: path.read_bytes() for path in tmp_path.iterdir()} == before
+
+
+def test_atomic_manifest_extension_rejects_other_partial_sets(
+    tmp_path: Path,
+) -> None:
+    outputs = _four_manifest_outputs()
+    logical_name = "pre_ga_v1-clean-application-contract.json"
+    (tmp_path / logical_name).write_bytes(outputs[logical_name])
+    before = {path.name: path.read_bytes() for path in tmp_path.iterdir()}
+
+    with pytest.raises(capture_script.CaptureError) as exc:
+        capture_script._write_outputs(
+            capture_script._destination_paths(tmp_path),
+            outputs,
+        )
+
+    assert exc.value.safe_code == "schema_capture_drift"
+    assert {path.name: path.read_bytes() for path in tmp_path.iterdir()} == before
+
+
+def test_temporary_logical_validation_failure_is_bounded_and_cleans_up(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    outputs = _four_manifest_outputs()
+    sentinel = "postgresql://user:secret@host/db"
+
+    def fail_logical_validation(*args: object, **kwargs: object) -> None:
+        try:
+            raise ValueError(sentinel)
+        except ValueError as exc:
+            raise LogicalApplicationContractError(
+                "logical_schema_manifest_invalid"
+            ) from exc
+
+    monkeypatch.setattr(
+        capture_script,
+        "load_logical_application_contract",
+        fail_logical_validation,
+    )
+
+    with pytest.raises(capture_script.CaptureError) as exc:
+        capture_script._write_outputs(
+            capture_script._destination_paths(tmp_path),
+            outputs,
+        )
+
+    assert exc.value.safe_code == "schema_capture_drift"
+    assert exc.value.__cause__ is None
+    assert exc.value.__context__ is None
+    assert sentinel not in "".join(
+        traceback.format_exception(
+            type(exc.value),
+            exc.value,
+            exc.value.__traceback__,
+        )
+    )
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_capture_writes_four_sanitized_manifests_and_checks_byte_identity(
     postgres_engine: Engine,
     tmp_path: Path,
 ) -> None:
@@ -242,6 +396,7 @@ def test_capture_writes_three_sanitized_manifests_and_checks_byte_identity(
     assert write_result.returncode == 0, write_result.stderr
     paths = sorted(path.name for path in tmp_path.iterdir())
     assert paths == [
+        "pre_ga_v1-clean-application-contract.json",
         "pre_ga_v1-exclusions.json",
         "pre_ga_v1-pre-squash-schema.json",
         "pre_ga_v1-sql-objects.json",
@@ -255,12 +410,25 @@ def test_capture_writes_three_sanitized_manifests_and_checks_byte_identity(
     registry = json.loads(
         (tmp_path / "pre_ga_v1-sql-objects.json").read_text(encoding="utf-8")
     )
+    logical = json.loads(
+        (tmp_path / "pre_ga_v1-clean-application-contract.json").read_text(
+            encoding="utf-8"
+        )
+    )
     assert len(exclusions["objects"]) == 27
     assert snapshot["legacyBusinessRowCount"] == 0
     assert snapshot["knownInertSeedRowCount"] == 1
     assert len(snapshot["sourceDocument"]["objects"]) == 207
     assert len(snapshot["normalizedApplicationDocument"]["objects"]) == 180
     assert len(registry["objects"]) == 101
+    assert logical["canonicalizationVersion"] == 2
+    assert logical["sourceSnapshotDigest"] == snapshot["snapshotDigest"]
+    assert logical["exclusionManifestDigest"] == exclusions["manifestDigest"]
+    assert logical["controlContractDigest"] == PRE_SQUASH_CONTROL_CONTRACT_DIGEST
+    assert len(logical["logicalApplicationDocument"]["objects"]) == 179
+    assert logical["logicalApplicationFingerprint"] == sha256_canonical_json(
+        logical["logicalApplicationDocument"]
+    )
     assert _POSTGRES_URL not in write_result.stdout
     assert _POSTGRES_URL not in write_result.stderr
     assert "CREATE " not in write_result.stdout

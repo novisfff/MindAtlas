@@ -3,11 +3,21 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from enum import StrEnum
+import json
+from pathlib import Path
+import re
 from typing import Any
 
-from app.schema.canonical import sha256_canonical_json
+from app.schema.canonical import (
+    canonical_json_bytes,
+    sha256_canonical_json,
+    structural_fingerprint,
+)
 from app.schema.contracts import (
+    PRE_SQUASH_HEAD,
+    SCHEMA_FAMILY,
     CanonicalObjectKey,
     CanonicalSchemaDocument,
     CanonicalSchemaObject,
@@ -50,6 +60,279 @@ PRE_SQUASH_CONTROL_CONTRACT_PAYLOAD: Mapping[str, JsonValue] = {
 PRE_SQUASH_CONTROL_CONTRACT_DIGEST = sha256_canonical_json(
     PRE_SQUASH_CONTROL_CONTRACT_PAYLOAD
 )
+
+DEFAULT_LOGICAL_APPLICATION_CONTRACT_PATH = (
+    Path(__file__).resolve().parent
+    / "manifests"
+    / "pre_ga_v1-clean-application-contract.json"
+)
+_DEFAULT_PRE_SQUASH_SNAPSHOT_PATH = (
+    DEFAULT_LOGICAL_APPLICATION_CONTRACT_PATH.parent
+    / "pre_ga_v1-pre-squash-schema.json"
+)
+_DEFAULT_EXCLUSION_MANIFEST_PATH = (
+    DEFAULT_LOGICAL_APPLICATION_CONTRACT_PATH.parent
+    / "pre_ga_v1-exclusions.json"
+)
+
+
+@dataclass(frozen=True)
+class LogicalApplicationContract:
+    schema_family: str
+    source_head: str
+    source_snapshot_digest: str
+    exclusion_manifest_digest: str
+    control_contract_digest: str
+    logical_application_document: CanonicalSchemaDocument
+    logical_application_fingerprint: str
+    manifest_digest: str
+
+
+class _DuplicateJsonMember(ValueError):
+    pass
+
+
+_SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
+_MANIFEST_KEYS = frozenset(
+    {
+        "schemaVersion",
+        "schemaFamily",
+        "sourceHead",
+        "sourceSnapshotDigest",
+        "exclusionManifestDigest",
+        "controlContractDigest",
+        "canonicalizationVersion",
+        "logicalApplicationDocument",
+        "logicalApplicationFingerprint",
+        "manifestDigest",
+    }
+)
+_DOCUMENT_KEYS = frozenset(
+    {"canonicalizationVersion", "postgresMajor", "objects"}
+)
+_OBJECT_KEYS = frozenset({"key", "definition"})
+_KEY_KEYS = frozenset({"kind", "schema", "name", "qualifier"})
+
+
+def _reject_duplicate_json_members(
+    pairs: list[tuple[str, Any]],
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in payload:
+            raise _DuplicateJsonMember
+        payload[key] = value
+    return payload
+
+
+def _load_manifest_json(path: Path) -> Mapping[str, Any]:
+    payload: Any = None
+    invalid = False
+    try:
+        payload = json.loads(
+            path.read_text(encoding="utf-8"),
+            object_pairs_hook=_reject_duplicate_json_members,
+        )
+    except (OSError, UnicodeError, ValueError, RecursionError):
+        invalid = True
+    if invalid:
+        raise LogicalApplicationContractError(
+            "logical_schema_manifest_invalid"
+        ) from None
+    if not isinstance(payload, Mapping):
+        raise LogicalApplicationContractError(
+            "logical_schema_manifest_invalid"
+        )
+    return payload
+
+
+def _valid_sha256(value: Any) -> bool:
+    return isinstance(value, str) and _SHA256_PATTERN.fullmatch(value) is not None
+
+
+def _parse_logical_document(value: Any) -> CanonicalSchemaDocument:
+    if not isinstance(value, Mapping) or set(value) != _DOCUMENT_KEYS:
+        raise LogicalApplicationContractError(
+            "logical_schema_manifest_invalid"
+        )
+    if type(value.get("canonicalizationVersion")) is not int or value.get(
+        "canonicalizationVersion"
+    ) != 2:
+        raise LogicalApplicationContractError(
+            "logical_schema_manifest_invalid"
+        )
+    if type(value.get("postgresMajor")) is not int or value.get(
+        "postgresMajor"
+    ) != 15:
+        raise LogicalApplicationContractError(
+            "logical_schema_manifest_invalid"
+        )
+    raw_objects = value.get("objects")
+    if not isinstance(raw_objects, Sequence) or isinstance(
+        raw_objects, (str, bytes)
+    ):
+        raise LogicalApplicationContractError(
+            "logical_schema_manifest_invalid"
+        )
+    objects: list[CanonicalSchemaObject] = []
+    document: CanonicalSchemaDocument | None = None
+    invalid = False
+    try:
+        for raw_object in raw_objects:
+            if (
+                not isinstance(raw_object, Mapping)
+                or set(raw_object) != _OBJECT_KEYS
+            ):
+                raise ValueError
+            raw_key = raw_object.get("key")
+            definition = raw_object.get("definition")
+            if (
+                not isinstance(raw_key, Mapping)
+                or set(raw_key) != _KEY_KEYS
+                or not isinstance(definition, Mapping)
+            ):
+                raise ValueError
+            objects.append(
+                CanonicalSchemaObject(
+                    CanonicalObjectKey.from_payload(raw_key),
+                    definition,
+                )
+            )
+        document = CanonicalSchemaDocument(2, 15, tuple(objects))
+    except (TypeError, ValueError):
+        invalid = True
+    if invalid or document is None:
+        raise LogicalApplicationContractError(
+            "logical_schema_manifest_invalid"
+        ) from None
+    return document
+
+
+def load_logical_application_contract(
+    path: Path = DEFAULT_LOGICAL_APPLICATION_CONTRACT_PATH,
+    *,
+    snapshot_path: Path = _DEFAULT_PRE_SQUASH_SNAPSHOT_PATH,
+    exclusion_path: Path = _DEFAULT_EXCLUSION_MANIFEST_PATH,
+) -> LogicalApplicationContract:
+    """Load and cross-check the committed version-2 application contract."""
+    from app.schema.sql_objects import (
+        SchemaManifestError,
+        load_exclusion_manifest,
+        load_pre_squash_snapshot,
+    )
+
+    raw = _load_manifest_json(path)
+    if set(raw) != _MANIFEST_KEYS:
+        raise LogicalApplicationContractError(
+            "logical_schema_manifest_invalid"
+        ) from None
+
+    claimed_manifest_digest = raw.get("manifestDigest")
+    if not _valid_sha256(claimed_manifest_digest):
+        raise LogicalApplicationContractError(
+            "logical_schema_manifest_invalid"
+        ) from None
+    digest_payload = {
+        key: value for key, value in raw.items() if key != "manifestDigest"
+    }
+    calculated_manifest_digest: str | None = None
+    digest_invalid = False
+    try:
+        calculated_manifest_digest = sha256_canonical_json(digest_payload)
+    except (TypeError, ValueError):
+        digest_invalid = True
+    if digest_invalid or calculated_manifest_digest is None:
+        raise LogicalApplicationContractError(
+            "logical_schema_manifest_invalid"
+        ) from None
+    if calculated_manifest_digest != claimed_manifest_digest:
+        raise LogicalApplicationContractError(
+            "logical_schema_manifest_digest_mismatch"
+        ) from None
+
+    if (
+        type(raw.get("schemaVersion")) is not int
+        or raw.get("schemaVersion") != 1
+        or type(raw.get("canonicalizationVersion")) is not int
+        or raw.get("canonicalizationVersion") != 2
+        or raw.get("schemaFamily") != SCHEMA_FAMILY
+        or raw.get("sourceHead") != PRE_SQUASH_HEAD
+    ):
+        raise LogicalApplicationContractError(
+            "logical_schema_manifest_invalid"
+        ) from None
+
+    digest_fields = (
+        "sourceSnapshotDigest",
+        "exclusionManifestDigest",
+        "controlContractDigest",
+        "logicalApplicationFingerprint",
+    )
+    if any(not _valid_sha256(raw.get(field)) for field in digest_fields):
+        raise LogicalApplicationContractError(
+            "logical_schema_manifest_invalid"
+        ) from None
+
+    document = _parse_logical_document(raw.get("logicalApplicationDocument"))
+    logical_fingerprint = raw["logicalApplicationFingerprint"]
+    if structural_fingerprint(document) != logical_fingerprint:
+        raise LogicalApplicationContractError(
+            "logical_schema_manifest_invalid"
+        ) from None
+
+    snapshot = None
+    exclusions = None
+    reference_invalid = False
+    try:
+        snapshot = load_pre_squash_snapshot(snapshot_path)
+        exclusions = load_exclusion_manifest(exclusion_path)
+    except SchemaManifestError:
+        reference_invalid = True
+    if reference_invalid or snapshot is None or exclusions is None:
+        raise LogicalApplicationContractError(
+            "logical_schema_cross_reference_mismatch"
+        ) from None
+
+    if (
+        raw["sourceSnapshotDigest"] != snapshot.snapshot_digest
+        or raw["exclusionManifestDigest"] != exclusions.manifest_digest
+        or raw["controlContractDigest"]
+        != PRE_SQUASH_CONTROL_CONTRACT_DIGEST
+    ):
+        raise LogicalApplicationContractError(
+            "logical_schema_cross_reference_mismatch"
+        ) from None
+
+    projected: CanonicalSchemaDocument | None = None
+    projection_invalid = False
+    try:
+        projected = project_logical_application_document(
+            snapshot.normalized_application_document,
+            control_stage=SchemaControlStage.PRE_SQUASH_MIGRATED,
+        )
+    except LogicalApplicationContractError:
+        projection_invalid = True
+    if projection_invalid or projected is None:
+        raise LogicalApplicationContractError(
+            "logical_schema_cross_reference_mismatch"
+        ) from None
+    if canonical_json_bytes(projected.to_payload()) != canonical_json_bytes(
+        document.to_payload()
+    ):
+        raise LogicalApplicationContractError(
+            "logical_schema_cross_reference_mismatch"
+        ) from None
+
+    return LogicalApplicationContract(
+        schema_family=SCHEMA_FAMILY,
+        source_head=PRE_SQUASH_HEAD,
+        source_snapshot_digest=raw["sourceSnapshotDigest"],
+        exclusion_manifest_digest=raw["exclusionManifestDigest"],
+        control_contract_digest=raw["controlContractDigest"],
+        logical_application_document=document,
+        logical_application_fingerprint=logical_fingerprint,
+        manifest_digest=claimed_manifest_digest,
+    )
 
 _RESERVED_IDENTITY_CONTROL_KEYS = frozenset(
     {
@@ -400,9 +683,12 @@ def project_logical_application_document(
 __all__ = [
     "ALEMBIC_VERSION_DEFINITION_DIGEST",
     "ALEMBIC_VERSION_KEY",
+    "DEFAULT_LOGICAL_APPLICATION_CONTRACT_PATH",
     "PRE_SQUASH_CONTROL_CONTRACT_DIGEST",
     "PRE_SQUASH_CONTROL_CONTRACT_PAYLOAD",
+    "LogicalApplicationContract",
     "LogicalApplicationContractError",
     "SchemaControlStage",
+    "load_logical_application_contract",
     "project_logical_application_document",
 ]

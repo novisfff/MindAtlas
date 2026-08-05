@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import json
+from pathlib import Path
 import traceback
 
 import pytest
@@ -9,8 +11,10 @@ from app.schema.application_contract import (
     ALEMBIC_VERSION_KEY,
     PRE_SQUASH_CONTROL_CONTRACT_DIGEST,
     PRE_SQUASH_CONTROL_CONTRACT_PAYLOAD,
+    DEFAULT_LOGICAL_APPLICATION_CONTRACT_PATH,
     LogicalApplicationContractError,
     SchemaControlStage,
+    load_logical_application_contract,
     project_logical_application_document,
 )
 from app.schema.canonical import (
@@ -18,13 +22,17 @@ from app.schema.canonical import (
     compare_documents,
     normalize_document,
     sha256_canonical_json,
+    structural_fingerprint,
 )
 from app.schema.contracts import (
     CanonicalObjectKey,
     CanonicalSchemaDocument,
     CanonicalSchemaObject,
 )
-from app.schema.sql_objects import load_pre_squash_snapshot
+from app.schema.sql_objects import (
+    load_exclusion_manifest,
+    load_pre_squash_snapshot,
+)
 
 
 def _column(name: str, ordinal: int) -> dict[str, object]:
@@ -449,3 +457,182 @@ def test_invalid_control_stage_does_not_retain_untrusted_input() -> None:
     assert exc.value.__cause__ is None
     assert exc.value.__context__ is None
     assert sentinel not in rendered
+
+
+def _logical_manifest_payload() -> dict[str, object]:
+    snapshot = load_pre_squash_snapshot()
+    exclusions = load_exclusion_manifest()
+    logical = project_logical_application_document(
+        snapshot.normalized_application_document,
+        control_stage=SchemaControlStage.PRE_SQUASH_MIGRATED,
+    )
+    payload: dict[str, object] = {
+        "schemaVersion": 1,
+        "schemaFamily": "pre_ga_v1",
+        "sourceHead": "b6e2d4f8a901",
+        "sourceSnapshotDigest": snapshot.snapshot_digest,
+        "exclusionManifestDigest": exclusions.manifest_digest,
+        "controlContractDigest": PRE_SQUASH_CONTROL_CONTRACT_DIGEST,
+        "canonicalizationVersion": 2,
+        "logicalApplicationDocument": logical.to_payload(),
+        "logicalApplicationFingerprint": structural_fingerprint(logical),
+    }
+    return {
+        **payload,
+        "manifestDigest": sha256_canonical_json(payload),
+    }
+
+
+def _write_mutated_logical_manifest(
+    tmp_path: Path,
+    mutation: str,
+) -> Path:
+    payload = _logical_manifest_payload()
+    if mutation == "duplicate_top_level_member":
+        raw = json.dumps(payload, separators=(",", ":"))
+        raw = raw.replace("{", '{"schemaVersion":999,', 1)
+        path = tmp_path / "logical.json"
+        path.write_text(raw, encoding="utf-8")
+        return path
+    if mutation == "boolean_version":
+        payload["schemaVersion"] = True
+    elif mutation == "extra_field":
+        payload["generatedAt"] = "2026-08-05"
+    elif mutation == "snapshot_cross_reference":
+        payload["sourceSnapshotDigest"] = "0" * 64
+    elif mutation == "exclusion_cross_reference":
+        payload["exclusionManifestDigest"] = "0" * 64
+    elif mutation == "control_cross_reference":
+        payload["controlContractDigest"] = "0" * 64
+    elif mutation == "logical_document_cross_reference":
+        document = deepcopy(payload["logicalApplicationDocument"])
+        document["objects"].pop()  # type: ignore[index]
+        payload["logicalApplicationDocument"] = document
+        payload["logicalApplicationFingerprint"] = sha256_canonical_json(document)
+    elif mutation == "logical_fingerprint":
+        payload["logicalApplicationFingerprint"] = "0" * 64
+    elif mutation == "manifest_digest":
+        payload["manifestDigest"] = "0" * 64
+        path = tmp_path / "logical.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return path
+    else:  # pragma: no cover - parametrization is closed below
+        raise AssertionError(mutation)
+    digest_payload = {
+        key: value for key, value in payload.items() if key != "manifestDigest"
+    }
+    payload["manifestDigest"] = sha256_canonical_json(digest_payload)
+    path = tmp_path / "logical.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def test_committed_logical_contract_is_self_validating() -> None:
+    contract = load_logical_application_contract()
+
+    assert DEFAULT_LOGICAL_APPLICATION_CONTRACT_PATH.is_file()
+    assert contract.schema_family == "pre_ga_v1"
+    assert contract.source_head == "b6e2d4f8a901"
+    assert contract.source_snapshot_digest == (
+        "3ee2120ded35e7e550f947f726bc38a5eb5f6d3c88bf8b78e191a27b1e634346"
+    )
+    assert contract.exclusion_manifest_digest == (
+        "f27f89bcfe248aa1e29fce60d1d19a51bafee857d1db7b3dff01c9ecfa7321f4"
+    )
+    assert contract.control_contract_digest == PRE_SQUASH_CONTROL_CONTRACT_DIGEST
+    assert contract.logical_application_document.canonicalization_version == 2
+    assert len(contract.logical_application_document.objects) == 179
+    assert contract.logical_application_fingerprint == structural_fingerprint(
+        contract.logical_application_document
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "safe_code"),
+    [
+        ("duplicate_top_level_member", "logical_schema_manifest_invalid"),
+        ("boolean_version", "logical_schema_manifest_invalid"),
+        ("extra_field", "logical_schema_manifest_invalid"),
+        ("snapshot_cross_reference", "logical_schema_cross_reference_mismatch"),
+        ("exclusion_cross_reference", "logical_schema_cross_reference_mismatch"),
+        ("control_cross_reference", "logical_schema_cross_reference_mismatch"),
+        (
+            "logical_document_cross_reference",
+            "logical_schema_cross_reference_mismatch",
+        ),
+        ("logical_fingerprint", "logical_schema_manifest_invalid"),
+        ("manifest_digest", "logical_schema_manifest_digest_mismatch"),
+    ],
+)
+def test_logical_contract_loader_rejects_drift(
+    tmp_path: Path,
+    mutation: str,
+    safe_code: str,
+) -> None:
+    path = _write_mutated_logical_manifest(tmp_path, mutation)
+
+    with pytest.raises(LogicalApplicationContractError) as exc:
+        load_logical_application_contract(path)
+
+    assert exc.value.safe_code == safe_code
+    assert str(exc.value) == safe_code
+
+
+@pytest.mark.parametrize("failure_source", ["malformed_json", "missing_snapshot"])
+def test_logical_contract_loader_discards_untrusted_exception_context(
+    tmp_path: Path,
+    failure_source: str,
+) -> None:
+    sentinel = "postgresql-secret-material"
+    if failure_source == "malformed_json":
+        path = tmp_path / "logical.json"
+        path.write_text(f'{{"secret":"{sentinel}"', encoding="utf-8")
+        kwargs = {}
+    else:
+        path = DEFAULT_LOGICAL_APPLICATION_CONTRACT_PATH
+        kwargs = {"snapshot_path": tmp_path / sentinel}
+
+    with pytest.raises(LogicalApplicationContractError) as exc:
+        load_logical_application_contract(path, **kwargs)
+
+    rendered = "".join(
+        traceback.format_exception(
+            type(exc.value),
+            exc.value,
+            exc.value.__traceback__,
+        )
+    )
+    assert exc.value.__cause__ is None
+    assert exc.value.__context__ is None
+    assert sentinel not in rendered
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "[" * 1_100 + "]" * 1_100,
+        "9" * 5_000,
+    ],
+    ids=["excessive_nesting", "oversized_integer"],
+)
+def test_logical_contract_loader_bounds_json_decoder_resource_failures(
+    tmp_path: Path,
+    raw: str,
+) -> None:
+    path = tmp_path / "logical.json"
+    path.write_text(raw, encoding="utf-8")
+
+    with pytest.raises(LogicalApplicationContractError) as exc:
+        load_logical_application_contract(path)
+
+    rendered = "".join(
+        traceback.format_exception(
+            type(exc.value),
+            exc.value,
+            exc.value.__traceback__,
+        )
+    )
+    assert exc.value.safe_code == "logical_schema_manifest_invalid"
+    assert exc.value.__cause__ is None
+    assert exc.value.__context__ is None
+    assert str(path) not in rendered

@@ -25,6 +25,13 @@ from app.schema.canonical import (  # noqa: E402
     sha256_canonical_json,
     structural_fingerprint,
 )
+from app.schema.application_contract import (  # noqa: E402
+    PRE_SQUASH_CONTROL_CONTRACT_DIGEST,
+    LogicalApplicationContractError,
+    SchemaControlStage,
+    load_logical_application_contract,
+    project_logical_application_document,
+)
 from app.schema.catalog import CatalogReadError, PostgresCatalogReader  # noqa: E402
 from app.schema.contracts import PRE_SQUASH_HEAD, SCHEMA_FAMILY  # noqa: E402
 from app.schema.exclusions import LEGACY_TABLE_NAMES  # noqa: E402
@@ -57,11 +64,13 @@ _DEVIATION_PATH = (
     / "evidence"
     / "2026-07-28-pre-ga-clean-baseline-deviation.md"
 )
-_FILENAMES = (
+_LEGACY_FILENAMES = (
     "pre_ga_v1-exclusions.json",
     "pre_ga_v1-pre-squash-schema.json",
     "pre_ga_v1-sql-objects.json",
 )
+_LOGICAL_FILENAME = "pre_ga_v1-clean-application-contract.json"
+_FILENAMES = (*_LEGACY_FILENAMES, _LOGICAL_FILENAME)
 
 
 def _sqlalchemy_url(url: str) -> str:
@@ -378,10 +387,33 @@ def _build_outputs(database_url: str) -> dict[str, bytes]:
         **snapshot_payload,
         "snapshotDigest": sha256_canonical_json(snapshot_payload),
     }
+    try:
+        logical_document = project_logical_application_document(
+            normalized_document,
+            control_stage=SchemaControlStage.PRE_SQUASH_MIGRATED,
+        )
+    except LogicalApplicationContractError as exc:
+        raise CaptureError(exc.safe_code) from None
+    logical_payload = {
+        "schemaVersion": 1,
+        "schemaFamily": SCHEMA_FAMILY,
+        "sourceHead": PRE_SQUASH_HEAD,
+        "sourceSnapshotDigest": snapshot["snapshotDigest"],
+        "exclusionManifestDigest": exclusion_manifest["manifestDigest"],
+        "controlContractDigest": PRE_SQUASH_CONTROL_CONTRACT_DIGEST,
+        "canonicalizationVersion": 2,
+        "logicalApplicationDocument": logical_document.to_payload(),
+        "logicalApplicationFingerprint": structural_fingerprint(logical_document),
+    }
+    logical_manifest = {
+        **logical_payload,
+        "manifestDigest": sha256_canonical_json(logical_payload),
+    }
     return {
         "pre_ga_v1-exclusions.json": canonical_json_bytes(exclusion_manifest) + b"\n",
         "pre_ga_v1-pre-squash-schema.json": canonical_json_bytes(snapshot) + b"\n",
         "pre_ga_v1-sql-objects.json": canonical_json_bytes(registry) + b"\n",
+        _LOGICAL_FILENAME: canonical_json_bytes(logical_manifest) + b"\n",
     }
 
 
@@ -428,6 +460,17 @@ def _write_temporary_files(
             temporary["pre_ga_v1-pre-squash-schema.json"],
             temporary["pre_ga_v1-sql-objects.json"],
         )
+        logical_validation_failed = False
+        try:
+            load_logical_application_contract(
+                temporary[_LOGICAL_FILENAME],
+                snapshot_path=temporary["pre_ga_v1-pre-squash-schema.json"],
+                exclusion_path=temporary["pre_ga_v1-exclusions.json"],
+            )
+        except LogicalApplicationContractError:
+            logical_validation_failed = True
+        if logical_validation_failed:
+            raise CaptureError("schema_capture_drift") from None
         return temporary
     except Exception:
         for path in temporary.values():
@@ -435,41 +478,80 @@ def _write_temporary_files(
         raise
 
 
+def _check_legacy_outputs(
+    paths: dict[str, Path],
+    outputs: dict[str, bytes],
+) -> None:
+    validate_manifest_set(
+        paths["pre_ga_v1-exclusions.json"],
+        paths["pre_ga_v1-pre-squash-schema.json"],
+        paths["pre_ga_v1-sql-objects.json"],
+    )
+    if any(paths[name].read_bytes() != outputs[name] for name in _LEGACY_FILENAMES):
+        raise CaptureError("schema_capture_drift")
+
+
 def _check_outputs(paths: dict[str, Path], outputs: dict[str, bytes]) -> None:
     try:
-        validate_manifest_set(
-            paths["pre_ga_v1-exclusions.json"],
-            paths["pre_ga_v1-pre-squash-schema.json"],
-            paths["pre_ga_v1-sql-objects.json"],
+        _check_legacy_outputs(paths, outputs)
+        load_logical_application_contract(
+            paths[_LOGICAL_FILENAME],
+            snapshot_path=paths["pre_ga_v1-pre-squash-schema.json"],
+            exclusion_path=paths["pre_ga_v1-exclusions.json"],
         )
         if any(paths[name].read_bytes() != outputs[name] for name in _FILENAMES):
             raise CaptureError("schema_capture_drift")
     except CaptureError:
         raise
-    except (OSError, SchemaManifestError) as exc:
-        raise CaptureError("schema_capture_drift") from exc
+    except (OSError, SchemaManifestError, LogicalApplicationContractError):
+        raise CaptureError("schema_capture_drift") from None
+
+
+def _fsync_directory(root: Path) -> None:
+    directory_fd = os.open(root, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
 
 
 def _write_outputs(paths: dict[str, Path], outputs: dict[str, bytes]) -> None:
-    existing = tuple(path.exists() for path in paths.values())
-    if any(existing):
-        if not all(existing):
-            raise CaptureError("schema_capture_drift")
+    existing = {name: paths[name].exists() for name in _FILENAMES}
+    if all(existing.values()):
         _check_outputs(paths, outputs)
         return
 
+    extending_legacy_set = (
+        all(existing[name] for name in _LEGACY_FILENAMES)
+        and not existing[_LOGICAL_FILENAME]
+    )
+    if any(existing.values()) and not extending_legacy_set:
+        raise CaptureError("schema_capture_drift")
+
     root = next(iter(paths.values())).parent
     temporary = _write_temporary_files(root, outputs)
+    if extending_legacy_set:
+        installed = False
+        try:
+            _check_legacy_outputs(paths, outputs)
+            os.replace(temporary[_LOGICAL_FILENAME], paths[_LOGICAL_FILENAME])
+            installed = True
+            _fsync_directory(root)
+        except (OSError, SchemaManifestError):
+            if installed:
+                paths[_LOGICAL_FILENAME].unlink(missing_ok=True)
+            raise CaptureError("schema_capture_drift") from None
+        finally:
+            for path in temporary.values():
+                path.unlink(missing_ok=True)
+        return
+
     installed: list[Path] = []
     try:
         for name in _FILENAMES:
             os.replace(temporary[name], paths[name])
             installed.append(paths[name])
-        directory_fd = os.open(root, os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+        _fsync_directory(root)
     except Exception:
         for path in installed:
             path.unlink(missing_ok=True)
@@ -510,11 +592,13 @@ def main(
         snapshot_payload = json.loads(
             outputs["pre_ga_v1-pre-squash-schema.json"].decode("utf-8")
         )
+        logical_payload = json.loads(outputs[_LOGICAL_FILENAME].decode("utf-8"))
         print(
             "schema_capture_ok exclusions=27 legacy_business_rows=0 "
             "known_inert_seed_rows=1 "
             f"normalized_fingerprint={snapshot_payload['normalizedStructuralFingerprint']} "
-            "manifests=3"
+            f"logical_fingerprint={logical_payload['logicalApplicationFingerprint']} "
+            "logical_objects=179 manifests=4"
         )
         return 0
     except CaptureError as exc:
