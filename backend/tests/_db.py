@@ -176,7 +176,6 @@ def make_session() -> Session:
     import app.assistant.capability_calls.models  # noqa: F401,E402
     import app.assistant.skills.models  # noqa: F401,E402
     import app.assistant.evaluation.models  # noqa: F401,E402
-    import app.assistant.migration.models  # noqa: F401,E402
     import app.assistant_config.models  # noqa: F401,E402
     import app.attachment.models  # noqa: F401,E402
     import app.entry.models  # noqa: F401,E402

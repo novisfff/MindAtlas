@@ -74,19 +74,6 @@ from app.assistant.evaluation.models import (  # noqa: E402, F401
     AssistantSkillPublishGate,
     AssistantSkillPublishGateUse,
 )
-from app.assistant.migration.models import (  # noqa: E402, F401
-    AssistantLegacyApprovalArchive,
-    AssistantRuntimeAdmissionFallbackEvent,
-    AssistantRuntimeCleanupGate,
-    AssistantRuntimeMigrationBatch,
-    AssistantRuntimeMigrationEvent,
-    AssistantRuntimeMigrationItem,
-    AssistantRuntimeRolloutAssignment,
-    AssistantRuntimeRolloutControl,
-    AssistantRuntimeRolloutEvent,
-    AssistantRuntimeRolloutRevision,
-    AssistantRuntimeShadowComparison,
-)
 from app.assistant_config.models import AssistantTool, AssistantSkillNode, AssistantSkillEdge  # noqa: E402, F401  # AssistantSkill dropped Plan 10 B2
 from app.lightrag.models import EntryIndexOutbox  # noqa: E402, F401
 from app.openclaw_integration.models import OpenClawCapabilityItem  # noqa: E402, F401
