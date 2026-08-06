@@ -167,6 +167,22 @@ docker compose up -d
 
 ## 常见问题排查
 
+### 0. Schema migration 与回滚边界
+
+- 默认部署路径只对空库或已有 clean-family `alembic_version` 的数据库执行
+  `alembic upgrade head`；非空但未版本化的数据库会以
+  `unsupported_nonempty_unversioned_database` 失败，绝不会自动 `stamp`。
+- GA 前恢复优先使用同一 clean-family/revision 的备份，或删除并重新创建
+  disposable 数据库后从 `pre_ga_v1_0001` fresh upgrade。不要重新启用归档的旧
+  Alembic lineage，也不要把归档文件复制回 live `versions/`。
+- root downgrade 只允许在测试环境、精确 acknowledgement 且数据库没有任何保留
+  业务/运行时数据时执行；它会销毁到空 schema，不是生产回滚，也不会重建 Legacy。
+- guarded rebaseline 是非生产本地维护命令，不由 Compose 启动路径调用。它要么完整
+  提交 clean-family marker 与版本，要么事务回滚并保持源库不变。
+- API readiness 和 Assistant Worker 在 family、revision、fingerprint、deployment
+  class 或 runtime contract 漂移时 fail closed；修复方式是前向部署兼容的 clean
+  revision 或恢复同一 clean-family 备份。
+
 ### 1. 数据库连接失败
 
 **症状**: 后端启动失败，日志显示数据库连接错误

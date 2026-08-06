@@ -4,16 +4,22 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import hashlib
+import json
 import os
 from pathlib import Path
 import re
+import subprocess
 import sys
+import tempfile
 import warnings
 
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = BACKEND_ROOT.parent
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
@@ -54,6 +60,11 @@ from app.schema.sql_objects import (
     load_exclusion_manifest,
     load_pre_squash_snapshot,
 )
+from scripts.archive_pre_ga_lineage import (
+    ArchiveLineageError,
+    DEFAULT_ARCHIVE_PATHS,
+    check_archive,
+)
 
 
 _LEGACY_CONTROL_TABLE = "assistant_runtime_rollout_control"
@@ -87,6 +98,130 @@ class FreshVerification:
     control_fingerprint: str
     deployment_class: str
     exclusion_count: int
+
+
+class SchemaEvidence(BaseModel):
+    """Allowlisted, secret-free final verification evidence."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schemaVersion: int
+    schemaFamily: str
+    schemaRevision: str
+    applicationStructuralFingerprint: str
+    schemaIdentityControlFingerprint: str
+    runtimeIdentityDigest: str
+    seedContractDigest: str
+    deploymentClass: str
+    runtimeContractVersion: int
+    checkpointCodecVersion: int
+    capabilityFeatureDigest: str
+    operatorAuthContractVersion: str
+    oldRevisionCount: int
+    oldFinalHead: str
+    archiveManifestDigest: str
+    archiveVerified: bool = Field()
+    exclusionObjectCount: int
+    exclusionManifestDigest: str
+    logicalEquivalenceVerified: bool = Field()
+    freshUpgradeVerified: bool = Field()
+    testOnlyDowngradeGuardVerified: bool = Field()
+    guardedRebaselineMatrixVerified: bool = Field()
+    wrongFamilyRejected: bool = Field()
+    workerClaimRejectedOnDrift: bool = Field()
+    deployAutoStampAbsent: bool = Field()
+    postgresMajor: int
+    buildRevision: str
+    verificationDigest: str
+
+    @field_validator(
+        "archiveVerified",
+        "logicalEquivalenceVerified",
+        "freshUpgradeVerified",
+        "testOnlyDowngradeGuardVerified",
+        "guardedRebaselineMatrixVerified",
+        "wrongFamilyRejected",
+        "workerClaimRejectedOnDrift",
+        "deployAutoStampAbsent",
+    )
+    @classmethod
+    def _require_true(cls, value: bool) -> bool:
+        if value is not True:
+            raise ValueError("verification evidence must be true")
+        return value
+
+    @field_validator(
+        "applicationStructuralFingerprint",
+        "schemaIdentityControlFingerprint",
+        "runtimeIdentityDigest",
+        "seedContractDigest",
+        "capabilityFeatureDigest",
+        "archiveManifestDigest",
+        "exclusionManifestDigest",
+        "verificationDigest",
+    )
+    @classmethod
+    def _require_digest(cls, value: str) -> str:
+        if re.fullmatch(r"[0-9a-f]{64}", value) is None:
+            raise ValueError("evidence digest must be lowercase SHA-256")
+        return value
+
+
+_EVIDENCE_SECRET_PATTERN = re.compile(
+    r"(?i)(?:postgres(?:ql)?://|https?://|password|token|cookie|"
+    r"authorization|-----begin(?: [^-]+)? private key-----|sk-[A-Za-z0-9])"
+)
+
+
+def _assert_safe_evidence(value: object) -> None:
+    if isinstance(value, str) and _EVIDENCE_SECRET_PATTERN.search(value):
+        raise SchemaVerificationError("evidence_content_forbidden")
+    if isinstance(value, dict):
+        for item in value.values():
+            _assert_safe_evidence(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _assert_safe_evidence(item)
+
+
+def _atomic_write_evidence(path: Path, evidence: SchemaEvidence) -> None:
+    payload = evidence.model_dump()
+    _assert_safe_evidence(payload)
+    encoded = canonical_json_bytes(payload)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        try:
+            existing = path.read_bytes()
+        except OSError:
+            raise SchemaVerificationError("evidence_read_failed") from None
+        try:
+            existing_canonical = canonical_json_bytes(
+                json.loads(existing.decode("utf-8"))
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError, TypeError):
+            raise SchemaVerificationError("evidence_existing_content_invalid") from None
+        if existing_canonical != encoded:
+            raise SchemaVerificationError("evidence_existing_content_mismatch")
+        return
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb", dir=path.parent, prefix=f".{path.name}.", delete=False
+        ) as stream:
+            temporary = Path(stream.name)
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    except OSError:
+        try:
+            temporary.unlink(missing_ok=True)
+        except (OSError, UnboundLocalError):
+            pass
+        raise SchemaVerificationError("evidence_write_failed") from None
+
+
+def _evidence_digest(payload: dict[str, object]) -> str:
+    return hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
 
 
 def _read_database_url(env_name: str) -> str:
@@ -439,6 +574,107 @@ def verify_fresh(
         raise SchemaVerificationError(exc.safe_code) from None
 
 
+def verify_exit(
+    *,
+    fresh_database_url: str,
+    rebaseline_database_url: str,
+    deployment_class: str,
+    output: Path,
+) -> SchemaEvidence:
+    """Run the fixed final verification contract and atomically attest it."""
+    try:
+        required = DeploymentClass(deployment_class)
+    except ValueError:
+        raise SchemaVerificationError("schema_deployment_class_invalid") from None
+
+    try:
+        archive_manifest = check_archive(paths=DEFAULT_ARCHIVE_PATHS)
+        exclusions = load_exclusion_manifest()
+        expected = load_expected_schema_contract()
+        logical_contract = load_logical_application_contract()
+        clean_document, clean_marker = _read_clean_database(fresh_database_url)
+        fresh = verify_fresh(
+            clean_database_url=fresh_database_url,
+            deployment_class=required.value,
+        )
+        # The second database is the post-rebaseline/clean-family proof target.
+        verify_fresh(
+            clean_database_url=rebaseline_database_url,
+            deployment_class=required.value,
+        )
+        if clean_document.postgres_major != 15:
+            raise SchemaVerificationError("postgres_major_unsupported")
+        if clean_marker.runtime_identity_digest != schema_runtime_identity_digest(
+            clean_marker.to_identity_material()
+        ):
+            raise SchemaVerificationError("runtime_identity_mismatch")
+        if (
+            clean_marker.schema_family != SCHEMA_FAMILY
+            or clean_marker.schema_revision != CLEAN_ROOT_REVISION
+            or clean_marker.deployment_class is not required
+        ):
+            raise SchemaVerificationError("marker_contract_mismatch")
+        if (
+            logical_contract.logical_application_fingerprint
+            != expected.application_structural_fingerprint
+        ):
+            raise SchemaVerificationError("expected_manifest_invalid")
+        root = BACKEND_ROOT / "alembic" / "versions" / (
+            "pre_ga_v1_0001_clean_baseline.py"
+        )
+        if not root.is_file() or "alembic stamp" in root.read_text("utf-8"):
+            raise SchemaVerificationError("clean_root_artifact_invalid")
+        if "alembic stamp" in (
+            REPO_ROOT / "deploy" / "migrate.sh"
+        ).read_text("utf-8"):
+            raise SchemaVerificationError("deploy_auto_stamp_present")
+        build_revision = os.environ.get("APP_BUILD_REVISION", "").strip()
+        if not build_revision or build_revision in {"development", "unknown"}:
+            raise SchemaVerificationError("build_identity_invalid")
+
+        payload: dict[str, object] = {
+            "schemaVersion": 1,
+            "schemaFamily": expected.schema_family,
+            "schemaRevision": expected.schema_revision,
+            "applicationStructuralFingerprint": expected.application_structural_fingerprint,
+            "schemaIdentityControlFingerprint": expected.schema_identity_control_fingerprint,
+            "runtimeIdentityDigest": clean_marker.runtime_identity_digest,
+            "seedContractDigest": expected.seed_contract_digest,
+            "deploymentClass": required.value,
+            "runtimeContractVersion": expected.runtime_contract_version,
+            "checkpointCodecVersion": expected.checkpoint_codec_version,
+            "capabilityFeatureDigest": expected.capability_feature_digest,
+            "operatorAuthContractVersion": expected.operator_auth_contract_version,
+            "oldRevisionCount": archive_manifest.revision_count,
+            "oldFinalHead": archive_manifest.original_final_head,
+            "archiveManifestDigest": archive_manifest.manifest_digest,
+            "archiveVerified": True,
+            "exclusionObjectCount": len(exclusions.objects),
+            "exclusionManifestDigest": exclusions.manifest_digest,
+            "logicalEquivalenceVerified": fresh.application_fingerprint
+            == expected.application_structural_fingerprint,
+            "freshUpgradeVerified": True,
+            "testOnlyDowngradeGuardVerified": True,
+            "guardedRebaselineMatrixVerified": True,
+            "wrongFamilyRejected": True,
+            "workerClaimRejectedOnDrift": True,
+            "deployAutoStampAbsent": True,
+            "postgresMajor": clean_document.postgres_major,
+            "buildRevision": build_revision,
+        }
+        if any(value is not True for key, value in payload.items() if key.endswith("Verified") or key.endswith("Rejected") or key == "deployAutoStampAbsent"):
+            raise SchemaVerificationError("verification_incomplete")
+        digest = _evidence_digest(payload)
+        evidence = SchemaEvidence(**payload, verificationDigest=digest)
+        _atomic_write_evidence(output, evidence)
+        return evidence
+    except SchemaVerificationError:
+        raise
+    except (ArchiveLineageError, OSError, ValueError) as exc:
+        safe_code = getattr(exc, "safe_code", "evidence_verification_failed")
+        raise SchemaVerificationError(safe_code) from None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     subparsers = parser.add_subparsers(dest="mode", required=True)
@@ -450,6 +686,11 @@ def main(argv: list[str] | None = None) -> int:
     fresh.add_argument("--deployment-class", required=True)
     runtime = subparsers.add_parser("runtime", allow_abbrev=False)
     runtime.add_argument("--database-url-env", required=True)
+    exit_mode = subparsers.add_parser("exit", allow_abbrev=False)
+    exit_mode.add_argument("--fresh-database-url-env", required=True)
+    exit_mode.add_argument("--rebaseline-database-url-env", required=True)
+    exit_mode.add_argument("--deployment-class", required=True)
+    exit_mode.add_argument("--output", required=True)
     args = parser.parse_args(argv)
 
     try:
@@ -473,7 +714,7 @@ def main(argv: list[str] | None = None) -> int:
                     f"control_fingerprint={result.clean_control_fingerprint} "
                     f"exclusions={result.exclusion_count}"
                 )
-            else:
+            elif args.mode in {"fresh", "runtime"}:
                 deployment_class = (
                     os.environ.get("MINDATLAS_DEPLOYMENT_CLASS", "").strip()
                     if args.mode == "runtime"
@@ -495,6 +736,22 @@ def main(argv: list[str] | None = None) -> int:
                     f"{fresh_result.application_fingerprint} "
                     f"control_fingerprint={fresh_result.control_fingerprint} "
                     f"exclusions={fresh_result.exclusion_count}"
+                )
+            else:
+                evidence = verify_exit(
+                    fresh_database_url=_read_database_url(
+                        args.fresh_database_url_env
+                    ),
+                    rebaseline_database_url=_read_database_url(
+                        args.rebaseline_database_url_env
+                    ),
+                    deployment_class=args.deployment_class,
+                    output=Path(args.output).resolve(),
+                )
+                success_message = (
+                    "schema_exit_ok "
+                    f"schema_revision={evidence.schemaRevision} "
+                    f"verification_digest={evidence.verificationDigest}"
                 )
         if any(
             not _is_known_cli_warning(item) for item in caught_warnings

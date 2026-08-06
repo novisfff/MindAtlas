@@ -310,7 +310,27 @@ jobs:
             --database-url-env MINDATLAS_SCHEMA_GENERATOR_DATABASE_URL \
             --output alembic/versions/pre_ga_v1_0001_clean_baseline.py \
             --check --check-expected-manifest
-          alembic roots
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          revisions = tuple(Path("alembic/versions").glob("*.py"))
+          roots = []
+          for path in revisions:
+              tree = ast.parse(path.read_text(encoding="utf-8"))
+              values = {
+                  node.targets[0].id: node.value.value
+                  for node in tree.body
+                  if isinstance(node, ast.Assign)
+                  and len(node.targets) == 1
+                  and isinstance(node.targets[0], ast.Name)
+                  and node.targets[0].id in {"revision", "down_revision"}
+                  and isinstance(node.value, ast.Constant)
+              }
+              if values.get("down_revision") is None:
+                  roots.append(values.get("revision"))
+          assert roots == ["pre_ga_v1_0001"]
+          PY
           alembic heads
       - name: Run release-critical schema suites
         run: |
