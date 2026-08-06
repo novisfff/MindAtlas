@@ -1,4 +1,4 @@
-"""Test-only Alembic harness exposing only the staged clean root."""
+"""Test-only PostgreSQL database and clean-root Alembic harnesses."""
 
 from __future__ import annotations
 
@@ -19,10 +19,10 @@ from tests.postgres_destructive_guard import assert_disposable_postgres_target
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
-STAGED_ROOT = (
+CLEAN_ROOT = (
     BACKEND_ROOT
     / "alembic"
-    / "baseline_staging"
+    / "versions"
     / "pre_ga_v1_0001_clean_baseline.py"
 )
 _DATABASE_LABEL_PATTERN = re.compile(r"[a-z0-9_]+")
@@ -116,25 +116,7 @@ def temporary_postgres_databases(
             raise cleanup_error
 
 
-def upgrade_live_old_chain(database_url: str, revision: str) -> None:
-    environment = os.environ.copy()
-    environment["DATABASE_URL"] = database_url
-    environment["MINDATLAS_PLAN10_B2_TEST_OVERRIDE"] = "1"
-    environment["APP_ENV"] = "test"
-    environment.pop("MINDATLAS_DEPLOYMENT_CLASS", None)
-    result = subprocess.run(
-        [sys.executable, "-m", "alembic", "upgrade", revision],
-        cwd=BACKEND_ROOT,
-        env=environment,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        raise AssertionError("old chain upgrade failed") from None
-
-
-def build_staged_alembic_directory(root: Path) -> Path:
+def _build_alembic_directory(root: Path) -> tuple[Path, Path]:
     script_directory = root / "alembic"
     versions = script_directory / "versions"
     versions.mkdir(parents=True)
@@ -143,8 +125,6 @@ def build_staged_alembic_directory(root: Path) -> Path:
         BACKEND_ROOT / "alembic" / "script.py.mako",
         script_directory / "script.py.mako",
     )
-    shutil.copy2(STAGED_ROOT, versions / STAGED_ROOT.name)
-
     source_ini = (BACKEND_ROOT / "alembic.ini").read_text(encoding="utf-8")
     source_ini = source_ini.replace(
         "script_location = alembic",
@@ -152,6 +132,12 @@ def build_staged_alembic_directory(root: Path) -> Path:
         1,
     )
     (root / "alembic.ini").write_text(source_ini, encoding="utf-8")
+    return script_directory, versions
+
+
+def build_clean_root_alembic_directory(root: Path) -> Path:
+    _script_directory, versions = _build_alembic_directory(root)
+    shutil.copy2(CLEAN_ROOT, versions / CLEAN_ROOT.name)
     return root
 
 

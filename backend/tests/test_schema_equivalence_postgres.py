@@ -13,22 +13,18 @@ from app.schema.application_contract import (
     SchemaControlStage,
     project_logical_application_document,
 )
-from app.schema.canonical import compare_documents, normalize_document
-from app.schema.catalog import PostgresCatalogReader
-from app.schema.contracts import PRE_SQUASH_HEAD
+from app.schema.canonical import SchemaComparisonError, compare_documents
 from app.schema.application_contract import load_logical_application_contract
-from app.schema.sql_objects import load_exclusion_manifest
+from app.schema.sql_objects import load_pre_squash_snapshot
 from scripts.verify_pre_ga_schema import (
     EquivalenceVerification,
     SchemaVerificationError,
-    verify_equivalence,
 )
 from scripts import verify_pre_ga_schema as verifier
 from tests.schema_baseline_support import (
-    build_staged_alembic_directory,
+    build_clean_root_alembic_directory,
     run_staged_alembic,
     temporary_postgres_databases,
-    upgrade_live_old_chain,
 )
 from tests import schema_baseline_support
 
@@ -47,13 +43,21 @@ def _sqlalchemy_url(url: str) -> str:
     return url
 
 
-def test_old_head_normalized_equals_clean_root(tmp_path: Path) -> None:
+def _committed_old_logical_document():  # noqa: ANN202
+    return project_logical_application_document(
+        load_pre_squash_snapshot().normalized_application_document,
+        control_stage=SchemaControlStage.PRE_SQUASH_MIGRATED,
+    )
+
+
+def test_clean_root_matches_committed_normalized_old_snapshot(
+    tmp_path: Path,
+) -> None:
     with temporary_postgres_databases(
         _POSTGRES_URL,
-        labels=("old_chain", "clean_root"),
-    ) as (old_database_url, clean_database_url):
-        upgrade_live_old_chain(old_database_url, PRE_SQUASH_HEAD)
-        staged = build_staged_alembic_directory(tmp_path)
+        labels=("clean_root",),
+    ) as (clean_database_url,):
+        staged = build_clean_root_alembic_directory(tmp_path)
         clean_upgrade = run_staged_alembic(
             staged,
             "upgrade",
@@ -63,49 +67,31 @@ def test_old_head_normalized_equals_clean_root(tmp_path: Path) -> None:
         )
         assert clean_upgrade.returncode == 0, clean_upgrade.stderr
 
-        old_engine = create_engine(_sqlalchemy_url(old_database_url), future=True)
-        clean_engine = create_engine(
-            _sqlalchemy_url(clean_database_url),
-            future=True,
+        clean_document, _marker = verifier._read_clean_database(
+            clean_database_url
         )
-        try:
-            with old_engine.connect() as old_connection:
-                old_document = PostgresCatalogReader(
-                    old_connection
-                ).read_document()
-            with clean_engine.connect() as clean_connection:
-                clean_document = PostgresCatalogReader(
-                    clean_connection
-                ).read_document()
-        finally:
-            old_engine.dispose()
-            clean_engine.dispose()
 
-        old_without_legacy = normalize_document(
-            old_document,
-            manifest=load_exclusion_manifest(),
-            side="old",
-        )
-        logical_old = project_logical_application_document(
-            old_without_legacy,
-            control_stage=SchemaControlStage.PRE_SQUASH_MIGRATED,
-        )
+        logical_old = _committed_old_logical_document()
         logical_clean = project_logical_application_document(
             clean_document,
             control_stage=SchemaControlStage.CLEAN_ROOT_MIGRATED,
         )
 
         compare_documents(logical_old, logical_clean, exclusions=None)
+        compare_documents(
+            load_logical_application_contract().logical_application_document,
+            logical_clean,
+            exclusions=None,
+        )
 
-        result = verify_equivalence(
-            old_database_url=old_database_url,
+        result = verifier.verify_fresh(
             clean_database_url=clean_database_url,
+            deployment_class="rehearsal",
         )
         expected_fingerprint = (
             load_logical_application_contract().logical_application_fingerprint
         )
-        assert result.old_application_fingerprint == expected_fingerprint
-        assert result.clean_application_fingerprint == expected_fingerprint
+        assert result.application_fingerprint == expected_fingerprint
 
 
 @pytest.mark.parametrize(
@@ -167,10 +153,9 @@ def test_clean_root_semantic_drift_fails_exact_equivalence(
 ) -> None:
     with temporary_postgres_databases(
         _POSTGRES_URL,
-        labels=("old_chain", "clean_root"),
-    ) as (old_database_url, clean_database_url):
-        upgrade_live_old_chain(old_database_url, PRE_SQUASH_HEAD)
-        staged = build_staged_alembic_directory(tmp_path)
+        labels=("clean_root",),
+    ) as (clean_database_url,):
+        staged = build_clean_root_alembic_directory(tmp_path)
         clean_upgrade = run_staged_alembic(
             staged,
             "upgrade",
@@ -190,13 +175,22 @@ def test_clean_root_semantic_drift_fails_exact_equivalence(
         finally:
             clean_engine.dispose()
 
-        with pytest.raises(SchemaVerificationError) as exc:
-            verify_equivalence(
-                old_database_url=old_database_url,
-                clean_database_url=clean_database_url,
+        clean_document, _marker = verifier._read_clean_database(
+            clean_database_url
+        )
+
+        with pytest.raises(SchemaComparisonError) as exc:
+            logical_clean = project_logical_application_document(
+                clean_document,
+                control_stage=SchemaControlStage.CLEAN_ROOT_MIGRATED,
+            )
+            compare_documents(
+                _committed_old_logical_document(),
+                logical_clean,
+                exclusions=None,
             )
 
-        assert exc.value.safe_code == "logical_application_schema_difference"
+        assert exc.value.safe_code == "unmanifested_schema_difference"
 
 
 def test_equivalence_cli_prints_only_safe_verification_fields(
@@ -248,7 +242,7 @@ def test_fresh_verification_binds_expected_deployment_class(
         _POSTGRES_URL,
         labels=("clean_root",),
     ) as (clean_database_url,):
-        staged = build_staged_alembic_directory(tmp_path)
+        staged = build_clean_root_alembic_directory(tmp_path)
         clean_upgrade = run_staged_alembic(
             staged,
             "upgrade",
@@ -520,25 +514,13 @@ def test_temporary_database_cleanup_continues_after_first_drop_failure(
 
 
 @pytest.mark.parametrize(
-    ("side", "mutation_sql", "safe_code"),
+    ("mutation_sql", "safe_code"),
     (
         (
-            "old",
-            "UPDATE assistant_runtime_rollout_control SET state_revision = 1",
-            "legacy_exclusion_data_present",
-        ),
-        (
-            "old",
-            "ALTER TABLE entry_type ALTER COLUMN description SET NOT NULL",
-            "pre_squash_schema_drift",
-        ),
-        (
-            "clean",
             "CREATE TABLE assistant_runtime_migration_item (id integer)",
             "exclusion_object_present_in_clean_schema",
         ),
         (
-            "clean",
             """
             ALTER TABLE mindatlas_schema_identity
             DISABLE TRIGGER trg_mindatlas_schema_identity_guard
@@ -547,24 +529,20 @@ def test_temporary_database_cleanup_continues_after_first_drop_failure(
         ),
     ),
     ids=(
-        "old_non_inert_legacy_state",
-        "old_source_drift",
         "clean_legacy_object",
         "clean_control_drift",
     ),
 )
-def test_equivalence_rejects_invalid_side_before_comparison(
+def test_fresh_verification_rejects_invalid_clean_schema(
     tmp_path: Path,
-    side: str,
     mutation_sql: str,
     safe_code: str,
 ) -> None:
     with temporary_postgres_databases(
         _POSTGRES_URL,
-        labels=("old_chain", "clean_root"),
-    ) as (old_database_url, clean_database_url):
-        upgrade_live_old_chain(old_database_url, PRE_SQUASH_HEAD)
-        staged = build_staged_alembic_directory(tmp_path)
+        labels=("clean_root",),
+    ) as (clean_database_url,):
+        staged = build_clean_root_alembic_directory(tmp_path)
         clean_upgrade = run_staged_alembic(
             staged,
             "upgrade",
@@ -574,10 +552,7 @@ def test_equivalence_rejects_invalid_side_before_comparison(
         )
         assert clean_upgrade.returncode == 0, clean_upgrade.stderr
 
-        mutation_url = (
-            old_database_url if side == "old" else clean_database_url
-        )
-        engine = create_engine(_sqlalchemy_url(mutation_url), future=True)
+        engine = create_engine(_sqlalchemy_url(clean_database_url), future=True)
         try:
             with engine.begin() as connection:
                 connection.execute(text(mutation_sql))
@@ -585,8 +560,8 @@ def test_equivalence_rejects_invalid_side_before_comparison(
             engine.dispose()
 
         with pytest.raises(SchemaVerificationError) as exc:
-            verify_equivalence(
-                old_database_url=old_database_url,
+            verifier.verify_fresh(
                 clean_database_url=clean_database_url,
+                deployment_class="rehearsal",
             )
         assert exc.value.safe_code == safe_code

@@ -925,7 +925,7 @@ def test_generated_root_upgrade_matches_captured_clean_schema(
     from alembic.operations import Operations
 
     from scripts.generate_pre_ga_baseline import (
-        DEFAULT_STAGED_ROOT,
+        DEFAULT_CLEAN_ROOT,
         GeneratorContext,
         generate_baseline,
         main,
@@ -937,18 +937,18 @@ def test_generated_root_upgrade_matches_captured_clean_schema(
     generated_source = generate_baseline(
         GeneratorContext(database_url=_POSTGRES_URL)
     )
-    assert DEFAULT_STAGED_ROOT.read_bytes() == generated_source
+    assert DEFAULT_CLEAN_ROOT.read_bytes() == generated_source
     monkeypatch.setenv("STAGED_ROOT_TEST_DATABASE_URL", _POSTGRES_URL)
     assert main(
         [
             "--database-url-env",
             "STAGED_ROOT_TEST_DATABASE_URL",
             "--output",
-            str(DEFAULT_STAGED_ROOT),
+            str(DEFAULT_CLEAN_ROOT),
             "--check",
         ]
     ) == 0
-    source = DEFAULT_STAGED_ROOT.read_bytes()
+    source = DEFAULT_CLEAN_ROOT.read_bytes()
     namespace: dict[str, object] = {}
     exec(compile(source, "<generated-pre-ga-root>", "exec"), namespace)
 
@@ -987,7 +987,7 @@ def test_expected_manifest_is_generated_from_executed_clean_root(
 ) -> None:
     from app.schema.identity import DEFAULT_EXPECTED_SCHEMA_CONTRACT_PATH
     from scripts.generate_pre_ga_baseline import (
-        DEFAULT_STAGED_ROOT,
+        DEFAULT_CLEAN_ROOT,
         GeneratorContext,
         generate_expected_manifest,
         main,
@@ -1007,7 +1007,7 @@ def test_expected_manifest_is_generated_from_executed_clean_root(
             "--database-url-env",
             "EXPECTED_MANIFEST_GENERATOR_DATABASE_URL",
             "--output",
-            str(DEFAULT_STAGED_ROOT),
+            str(DEFAULT_CLEAN_ROOT),
             "--check",
             "--check-expected-manifest",
         ]
@@ -1028,11 +1028,11 @@ def test_expected_manifest_rejects_self_consistent_marker_contract_drift(
     engine = create_engine(_sqlalchemy_url(_POSTGRES_URL), future=True)
     reset_disposable_public_schema(engine)
     engine.dispose()
-    drifted = generator.DEFAULT_STAGED_ROOT.read_bytes().replace(
+    drifted = generator.DEFAULT_CLEAN_ROOT.read_bytes().replace(
         SEED_CONTRACT_DIGEST.encode("ascii"),
         ("f" * 64).encode("ascii"),
     )
-    assert drifted != generator.DEFAULT_STAGED_ROOT.read_bytes()
+    assert drifted != generator.DEFAULT_CLEAN_ROOT.read_bytes()
     monkeypatch.setattr(generator, "generate_baseline", lambda context: drifted)
 
     with pytest.raises(

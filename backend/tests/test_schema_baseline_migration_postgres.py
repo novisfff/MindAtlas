@@ -30,7 +30,7 @@ from app.schema.identity import (
 )
 from tests.postgres_destructive_guard import reset_disposable_public_schema
 from tests.schema_baseline_support import (
-    build_staged_alembic_directory,
+    build_clean_root_alembic_directory,
     run_staged_alembic,
 )
 
@@ -238,7 +238,7 @@ def test_marker_reader_does_not_chain_raw_malformed_values() -> None:
     reason="MINDATLAS_TEST_POSTGRES_URL is required for clean-root migration proof",
 )
 def test_staged_alembic_environment_has_only_clean_root_head(tmp_path: Path) -> None:
-    staged = build_staged_alembic_directory(tmp_path)
+    staged = build_clean_root_alembic_directory(tmp_path)
 
     result = run_staged_alembic(staged, "heads")
 
@@ -260,7 +260,7 @@ def test_clean_root_upgrades_empty_postgres_and_writes_exact_marker(
     tmp_path: Path,
     deployment_class: str,
 ) -> None:
-    staged = build_staged_alembic_directory(tmp_path)
+    staged = build_clean_root_alembic_directory(tmp_path)
 
     result = run_staged_alembic(
         staged,
@@ -307,7 +307,7 @@ def test_clean_root_refuses_missing_or_unknown_deployment_class(
     tmp_path: Path,
     deployment_class: str | None,
 ) -> None:
-    staged = build_staged_alembic_directory(tmp_path)
+    staged = build_clean_root_alembic_directory(tmp_path)
 
     result = run_staged_alembic(
         staged,
@@ -339,7 +339,7 @@ def test_schema_identity_control_is_exact_and_rejects_unsafe_mutation(
     empty_postgres_engine,
     tmp_path: Path,
 ) -> None:
-    staged = build_staged_alembic_directory(tmp_path)
+    staged = build_clean_root_alembic_directory(tmp_path)
     result = run_staged_alembic(
         staged,
         "upgrade",
@@ -410,7 +410,7 @@ def test_clean_root_controls_validate_before_exact_application_projection(
     empty_postgres_engine,
     tmp_path: Path,
 ) -> None:
-    staged = build_staged_alembic_directory(tmp_path)
+    staged = build_clean_root_alembic_directory(tmp_path)
     result = run_staged_alembic(
         staged,
         "upgrade",
@@ -449,7 +449,7 @@ def test_clean_root_projection_rejects_each_missing_or_drifted_control(
     empty_postgres_engine,
     tmp_path: Path,
 ) -> None:
-    staged = build_staged_alembic_directory(tmp_path)
+    staged = build_clean_root_alembic_directory(tmp_path)
     _upgrade_rehearsal(staged)
     with empty_postgres_engine.connect() as connection:
         raw = PostgresCatalogReader(connection).read_document()
@@ -518,7 +518,7 @@ def test_root_downgrade_refuses_without_test_guard(
     empty_postgres_engine,
     tmp_path: Path,
 ) -> None:
-    staged = build_staged_alembic_directory(tmp_path)
+    staged = build_clean_root_alembic_directory(tmp_path)
     _upgrade_rehearsal(staged)
 
     result = run_staged_alembic(
@@ -546,7 +546,7 @@ def test_root_downgrade_refuses_business_rows(
     empty_postgres_engine,
     tmp_path: Path,
 ) -> None:
-    staged = build_staged_alembic_directory(tmp_path)
+    staged = build_clean_root_alembic_directory(tmp_path)
     _upgrade_rehearsal(staged)
     with empty_postgres_engine.begin() as connection:
         connection.execute(
@@ -589,7 +589,7 @@ def test_root_downgrade_to_empty_is_test_only_and_reupgrade_is_exact(
     empty_postgres_engine,
     tmp_path: Path,
 ) -> None:
-    staged = build_staged_alembic_directory(tmp_path)
+    staged = build_clean_root_alembic_directory(tmp_path)
     _upgrade_rehearsal(staged)
 
     result = run_staged_alembic(

@@ -74,10 +74,10 @@ from app.schema.sql_objects import (  # noqa: E402
     validate_manifest_set,
 )
 
-DEFAULT_STAGED_ROOT = (
+DEFAULT_CLEAN_ROOT = (
     BACKEND_ROOT
     / "alembic"
-    / "baseline_staging"
+    / "versions"
     / "pre_ga_v1_0001_clean_baseline.py"
 )
 _EXPECTED_MANIFEST_FILENAME = "pre_ga_v1-expected.json"
