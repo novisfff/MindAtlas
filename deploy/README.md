@@ -352,3 +352,44 @@ If Setup-authorized initialization commits the singleton operator but initial-se
 ### Compose injection
 
 `deploy/docker-compose.yml` passes the four operator-auth variables and `CORS_ORIGINS` into the `api` service with empty defaults so local quick-start does not invent secrets. Production must supply real values via a secret store or deploy `.env` (see `deploy/.env.example` commented placeholders). Local development may keep them blank through `docker-compose.override.yml`.
+
+### Pre-GA schema rebaseline boundary
+
+The supported schema family starts at `pre_ga_v1_0001`. A fresh deployment resets
+or restores a compatible clean-family database and runs `alembic upgrade head`;
+it never downgrades or reconnects to the archived 60-revision lineage. The
+archived files under `backend/alembic/archive/pre_ga_v1_superseded/` are
+non-importable historical evidence, not an upgrade or restore source.
+
+The guarded rebaseline command is exceptional local maintenance only. It may
+run only when the process deployment class (`development` or `rehearsal`) and
+the exact database-local comment `mindatlas:deployment_class=<same-value>`
+agree, the database is writable/not in recovery, and the operator supplies the
+literal acknowledgement
+`I_ACKNOWLEDGE_THIS_IS_A_RESETTABLE_NON_PRODUCTION_DATABASE`. It verifies the
+old head, exact source fingerprint, exclusion definitions, retained-data
+invariants, and a keyed before/after snapshot before it stamps the clean root.
+Production, shared, unknown, drifted, or non-empty Legacy databases fail closed.
+
+Use `inspect` for a read-only preflight and `apply` only for the disposable
+database selected by the local maintenance procedure:
+
+```bash
+cd backend
+python scripts/rebaseline_pre_ga_v1.py inspect \
+  --database-url-env DATABASE_URL \
+  --report-file ../docs/superpowers/evidence/local-pre-ga-rebaseline-inspect.json
+
+python scripts/rebaseline_pre_ga_v1.py apply \
+  --database-url-env DATABASE_URL \
+  --report-file ../docs/superpowers/evidence/local-pre-ga-rebaseline-apply.json \
+  --acknowledge-local-maintenance \
+    I_ACKNOWLEDGE_THIS_IS_A_RESETTABLE_NON_PRODUCTION_DATABASE
+```
+
+The command has no `--force` or `--skip` escape hatch. A failed apply rolls back
+PostgreSQL DDL, seed deletion, stamp, and marker insertion together. Recovery
+before GA is database recreation or restoration of a backup already identified
+as the same clean family/revision; the clean root is not an operational
+rollback to Legacy. API/Worker incompatibility remains fail-closed until a
+compatible clean-family binary/schema/backup is deployed.

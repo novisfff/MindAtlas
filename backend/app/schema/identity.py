@@ -16,6 +16,7 @@ from app.schema.canonical import sha256_canonical_json
 from app.schema.contracts import (
     CLEAN_ROOT_REVISION,
     SCHEMA_FAMILY,
+    SCHEMA_IDENTITY_CONTRACT_VERSION,
     SCHEMA_IDENTITY_SINGLETON_KEY,
     DeploymentClass,
     JsonValue,
@@ -31,6 +32,38 @@ DEFAULT_EXPECTED_SCHEMA_CONTRACT_PATH = (
 SCHEMA_IDENTITY_CONTROL_FINGERPRINT = (
     "6bf3db9018a22c66055ade8d16a98dac2fdcf4fd0d97b03077da3bc5641dade7"
 )
+SCHEMA_IDENTITY_GUARD_SQL = """CREATE FUNCTION mindatlas_guard_schema_identity_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  expected_revision text;
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'schema identity deletion is forbidden';
+  END IF;
+  IF NEW.singleton_key <> OLD.singleton_key
+     OR NEW.schema_family <> OLD.schema_family
+     OR NEW.deployment_class <> OLD.deployment_class
+     OR NEW.created_at <> OLD.created_at
+     OR NEW.identity_contract_version < OLD.identity_contract_version THEN
+    RAISE EXCEPTION 'schema identity immutable field changed';
+  END IF;
+  expected_revision := current_setting(
+    'mindatlas.schema_migration_revision', true
+  );
+  IF expected_revision IS NULL OR expected_revision = ''
+     OR NEW.schema_revision <> expected_revision
+     OR NEW.schema_revision = OLD.schema_revision
+     OR NEW.updated_at <= OLD.updated_at THEN
+    RAISE EXCEPTION 'schema identity advance is not migration-authorized';
+  END IF;
+  RETURN NEW;
+END;
+$$"""
+SCHEMA_IDENTITY_TRIGGER_SQL = """CREATE TRIGGER trg_mindatlas_schema_identity_guard
+BEFORE UPDATE OR DELETE ON mindatlas_schema_identity
+FOR EACH ROW EXECUTE FUNCTION mindatlas_guard_schema_identity_mutation()"""
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 _EXPECTED_MANIFEST_KEYS = frozenset(
     {
@@ -289,6 +322,120 @@ def schema_runtime_identity_digest(
 ) -> str:
     """Hash every runtime identity dimension using canonical JSON."""
     return sha256_canonical_json(schema_runtime_identity_payload(material))
+
+
+def install_schema_identity_controls(connection) -> None:  # noqa: ANN001
+    """Install the exact clean-root marker control plane on one connection."""
+    try:
+        connection.execute(
+            text(
+                "CREATE TABLE mindatlas_schema_identity ("
+                "singleton_key VARCHAR(32) NOT NULL, "
+                "schema_family VARCHAR(32) NOT NULL, "
+                "schema_revision VARCHAR(64) NOT NULL, "
+                "structural_fingerprint CHAR(64) NOT NULL, "
+                "runtime_identity_digest CHAR(64) NOT NULL, "
+                "seed_contract_digest CHAR(64) NOT NULL, "
+                "deployment_class VARCHAR(16) NOT NULL, "
+                "runtime_contract_version INTEGER NOT NULL, "
+                "checkpoint_codec_version INTEGER NOT NULL, "
+                "capability_feature_digest CHAR(64) NOT NULL, "
+                "operator_auth_contract_version VARCHAR(64) NOT NULL, "
+                "identity_contract_version INTEGER NOT NULL, "
+                "created_at TIMESTAMPTZ NOT NULL, "
+                "updated_at TIMESTAMPTZ NOT NULL, "
+                "CONSTRAINT ck_schema_identity_singleton "
+                "CHECK (singleton_key = 'current'), "
+                "CONSTRAINT ck_schema_identity_family "
+                "CHECK (schema_family = 'pre_ga_v1'), "
+                "CONSTRAINT ck_schema_identity_deployment_class "
+                "CHECK (deployment_class IN "
+                "('development','rehearsal','production')), "
+                "CONSTRAINT ck_schema_identity_digest_shapes "
+                "CHECK (structural_fingerprint ~ '^[0-9a-f]{64}$' "
+                "AND runtime_identity_digest ~ '^[0-9a-f]{64}$' "
+                "AND seed_contract_digest ~ '^[0-9a-f]{64}$' "
+                "AND capability_feature_digest ~ '^[0-9a-f]{64}$'), "
+                "CONSTRAINT ck_schema_identity_positive_versions "
+                "CHECK (runtime_contract_version > 0 "
+                "AND checkpoint_codec_version > 0 "
+                "AND identity_contract_version > 0), "
+                "PRIMARY KEY (singleton_key)"
+                ")"
+            )
+        )
+        connection.execute(text(SCHEMA_IDENTITY_GUARD_SQL))
+        connection.execute(text(SCHEMA_IDENTITY_TRIGGER_SQL))
+    except SQLAlchemyError:
+        raise SchemaIdentityError("marker_control_install_failed") from None
+
+
+def insert_schema_identity(
+    connection,  # noqa: ANN001
+    *,
+    deployment_class: DeploymentClass,
+    expected: ExpectedSchemaContract,
+) -> SchemaIdentityRecord:
+    """Insert the one clean-root marker and return its validated record."""
+    from app.assistant.durable.codec import CURRENT_CHECKPOINT_CODEC_VERSION
+    from app.assistant.durable.worker_registry import (
+        RUNTIME_CONTRACT_VERSION,
+        default_capability_feature_digest,
+    )
+    from app.assistant.runtime.system_seed.expected import SEED_CONTRACT_DIGEST
+    from app.operator_auth.constants import OPERATOR_AUTH_CONTRACT_VERSION
+
+    material = SchemaRuntimeIdentityMaterial(
+        schema_family=expected.schema_family,
+        schema_revision=expected.schema_revision,
+        structural_fingerprint=expected.application_structural_fingerprint,
+        seed_contract_digest=SEED_CONTRACT_DIGEST,
+        deployment_class=deployment_class,
+        runtime_contract_version=RUNTIME_CONTRACT_VERSION,
+        checkpoint_codec_version=CURRENT_CHECKPOINT_CODEC_VERSION,
+        capability_feature_digest=default_capability_feature_digest(),
+        operator_auth_contract_version=OPERATOR_AUTH_CONTRACT_VERSION,
+    )
+    try:
+        connection.execute(
+            text(
+                "INSERT INTO mindatlas_schema_identity ("
+                "singleton_key, schema_family, schema_revision, "
+                "structural_fingerprint, runtime_identity_digest, "
+                "seed_contract_digest, deployment_class, "
+                "runtime_contract_version, checkpoint_codec_version, "
+                "capability_feature_digest, operator_auth_contract_version, "
+                "identity_contract_version, created_at, updated_at) VALUES ("
+                ":singleton_key, :schema_family, :schema_revision, "
+                ":structural_fingerprint, :runtime_identity_digest, "
+                ":seed_contract_digest, :deployment_class, "
+                ":runtime_contract_version, :checkpoint_codec_version, "
+                ":capability_feature_digest, :operator_auth_contract_version, "
+                ":identity_contract_version, CURRENT_TIMESTAMP, "
+                "CURRENT_TIMESTAMP)"
+            ),
+            {
+                "singleton_key": SCHEMA_IDENTITY_SINGLETON_KEY,
+                "schema_family": material.schema_family,
+                "schema_revision": material.schema_revision,
+                "structural_fingerprint": material.structural_fingerprint,
+                "runtime_identity_digest": schema_runtime_identity_digest(
+                    material
+                ),
+                "seed_contract_digest": material.seed_contract_digest,
+                "deployment_class": material.deployment_class.value,
+                "runtime_contract_version": material.runtime_contract_version,
+                "checkpoint_codec_version": material.checkpoint_codec_version,
+                "capability_feature_digest": material.capability_feature_digest,
+                "operator_auth_contract_version": (
+                    material.operator_auth_contract_version
+                ),
+                "identity_contract_version": SCHEMA_IDENTITY_CONTRACT_VERSION,
+            },
+        )
+    except SQLAlchemyError:
+        raise SchemaIdentityError("marker_insert_failed") from None
+    return read_schema_identity(connection)
 
 
 def read_schema_identity(db) -> SchemaIdentityRecord:  # noqa: ANN001
