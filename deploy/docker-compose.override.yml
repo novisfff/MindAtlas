@@ -10,3 +10,4 @@ services:
     environment:
       APP_ENV: ${APP_ENV:-development}
       APP_BUILD_REVISION: ${APP_BUILD_REVISION:-development}
+      MINDATLAS_DEPLOYMENT_CLASS: development

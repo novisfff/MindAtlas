@@ -94,6 +94,7 @@ services:
     entrypoint: [ "/bin/sh", "/migrate.sh" ]
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-mindatlas}
+      MINDATLAS_DEPLOYMENT_CLASS: ${MINDATLAS_DEPLOYMENT_CLASS:-development}
     depends_on:
       postgres:
         condition: service_healthy
@@ -121,6 +122,7 @@ services:
       APP_ENV: ${APP_ENV:-production}
       # Required substitution: do not default to development in this compose file.
       APP_BUILD_REVISION: ${APP_BUILD_REVISION:?Set APP_BUILD_REVISION to a deployment-immutable value}
+      MINDATLAS_DEPLOYMENT_CLASS: ${MINDATLAS_DEPLOYMENT_CLASS:-development}
       # Plan 03 live model capability probe (paid Provider call). Default-disabled.
       AI_MODEL_CAPABILITY_PROBE_ENABLED: ${AI_MODEL_CAPABILITY_PROBE_ENABLED:-false}
       # Plan 2 emergency process ceiling. Durable control must also allow new Runs.
@@ -197,6 +199,7 @@ services:
     environment:
       # Database
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-mindatlas}
+      MINDATLAS_DEPLOYMENT_CLASS: ${MINDATLAS_DEPLOYMENT_CLASS:-development}
       # Quick-start friendly defaults. Override these from `.env` in production if needed.
       AI_PROVIDER_FERNET_KEY: ${AI_PROVIDER_FERNET_KEY:-b98esSSrtceWc4IUOFGR-f_6I8FfnxtpjjYQZN51RCw=}
       LIGHTRAG_ENABLED: "${LIGHTRAG_ENABLED:-true}"
@@ -231,6 +234,7 @@ services:
     container_name: mindatlas-docling-worker
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-mindatlas}
+      MINDATLAS_DEPLOYMENT_CLASS: ${MINDATLAS_DEPLOYMENT_CLASS:-development}
       # Quick-start friendly defaults. Override these from `.env` in production if needed.
       AI_PROVIDER_FERNET_KEY: ${AI_PROVIDER_FERNET_KEY:-b98esSSrtceWc4IUOFGR-f_6I8FfnxtpjjYQZN51RCw=}
       MINIO_ENDPOINT: minio:9000
@@ -268,6 +272,7 @@ services:
     container_name: mindatlas-assistant-worker
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-mindatlas}
+      MINDATLAS_DEPLOYMENT_CLASS: ${MINDATLAS_DEPLOYMENT_CLASS:-development}
       AI_PROVIDER_FERNET_KEY: ${AI_PROVIDER_FERNET_KEY:-b98esSSrtceWc4IUOFGR-f_6I8FfnxtpjjYQZN51RCw=}
       APP_ENV: ${APP_ENV:-production}
       APP_BUILD_REVISION: ${APP_BUILD_REVISION:?Set APP_BUILD_REVISION to a deployment-immutable value}

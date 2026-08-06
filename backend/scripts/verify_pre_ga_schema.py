@@ -448,6 +448,8 @@ def main(argv: list[str] | None = None) -> int:
     fresh = subparsers.add_parser("fresh", allow_abbrev=False)
     fresh.add_argument("--clean-database-url-env", required=True)
     fresh.add_argument("--deployment-class", required=True)
+    runtime = subparsers.add_parser("runtime", allow_abbrev=False)
+    runtime.add_argument("--database-url-env", required=True)
     args = parser.parse_args(argv)
 
     try:
@@ -472,11 +474,18 @@ def main(argv: list[str] | None = None) -> int:
                     f"exclusions={result.exclusion_count}"
                 )
             else:
+                deployment_class = (
+                    os.environ.get("MINDATLAS_DEPLOYMENT_CLASS", "").strip()
+                    if args.mode == "runtime"
+                    else args.deployment_class
+                )
                 fresh_result = verify_fresh(
                     clean_database_url=_read_database_url(
-                        args.clean_database_url_env
+                        args.database_url_env
+                        if args.mode == "runtime"
+                        else args.clean_database_url_env
                     ),
-                    deployment_class=args.deployment_class,
+                    deployment_class=deployment_class,
                 )
                 success_message = (
                     "schema_fresh_ok "

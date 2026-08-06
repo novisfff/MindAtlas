@@ -171,8 +171,8 @@ jobs:
           print("operator-auth postgres gate: OK")
           PY
 
-  agent-skill-migration:
-    name: Agent Skill PostgreSQL Migration Gate
+  schema-release-critical:
+    name: Clean Schema Release-Critical PostgreSQL 15 Gate
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -183,22 +183,28 @@ jobs:
         env:
           POSTGRES_USER: mindatlas
           POSTGRES_PASSWORD: mindatlas
-          POSTGRES_DB: mindatlas_test_plan08_ci
+          POSTGRES_DB: mindatlas_test_plan3_schema_ci
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U mindatlas -d mindatlas_test_plan08_ci"
+          --health-cmd "pg_isready -U mindatlas -d mindatlas_test_plan3_schema_ci"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 10
     env:
-      # Disposable CI database only. PRE_PLAN01_HEAD=a7b8c9d0e1f2; Plan 01=acf208493c87.
-      DATABASE_URL: postgresql://mindatlas:mindatlas@localhost:5432/mindatlas_test_plan08_ci
-      MINDATLAS_TEST_POSTGRES_URL: postgresql://mindatlas:mindatlas@localhost:5432/mindatlas_test_plan08_ci
-      # Minimal app config required by settings import during alembic env.
+      DATABASE_URL: postgresql://mindatlas:mindatlas@localhost:5432/mindatlas_test_plan3_schema_ci
+      MINDATLAS_TEST_POSTGRES_URL: postgresql://mindatlas:mindatlas@localhost:5432/mindatlas_test_plan3_schema_ci
+      MINDATLAS_SCHEMA_GENERATOR_DATABASE_URL: postgresql://mindatlas:mindatlas@localhost:5432/mindatlas_test_plan3_schema_generator
+      MINDATLAS_SCHEMA_FRESH_DATABASE_URL: postgresql://mindatlas:mindatlas@localhost:5432/mindatlas_test_plan3_schema_fresh
+      MINDATLAS_SCHEMA_COMPATIBILITY_DATABASE_URL: postgresql://mindatlas:mindatlas@localhost:5432/mindatlas_test_plan3_schema_compatibility
+      MINDATLAS_SCHEMA_REBASELINE_SOURCE_URL: postgresql://mindatlas:mindatlas@localhost:5432/mindatlas_test_plan3_schema_source
+      MINDATLAS_REQUIRE_SCHEMA_POSTGRES: "1"
+      MINDATLAS_DEPLOYMENT_CLASS: rehearsal
+      MINDATLAS_TEST_POSTGRES_DESTRUCTIVE: "1"
       AI_PROVIDER_FERNET_KEY: "07v02gVBdreNrXjLJZkIMdohHtgy6aDFKBHxakHjbrQ="
       # Plan 2 downgrade is intentionally permitted only in an explicit test env.
       APP_ENV: test
+      APP_BUILD_REVISION: ci-clean-schema
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -229,23 +235,93 @@ jobs:
       - name: Alembic fresh upgrade gate
         run: |
           set -euo pipefail
-          alembic upgrade 027869a00a47
+          alembic upgrade head
           alembic current
 
       - name: PostgreSQL migration preservation and guard tests
         env:
           MINDATLAS_TEST_POSTGRES_DESTRUCTIVE: "1"
-          # Plan 1 tip refuses destructive downgrade outside disposable non-prod
-          # DBs — same ACK used by the upgrade/downgrade/upgrade gate above.
-          MINDATLAS_TEST_DESTRUCTIVE_DOWNGRADE: "1"
-          # Do NOT set PLAN09_EVAL / PLAN08 ledger ACKs here — guarded-downgrade
-          # tests must observe blocked paths. Suites set ACKs only around intentional
-          # cleanup/downgrade helpers.
         run: |
           python -m pytest tests/test_agent_skill_postgres_migration.py tests/test_provider_model_probe_postgres.py tests/test_main_agent_postgres_migration.py tests/test_capability_call_migration_postgres.py tests/test_agent_skill_admin_postgres_migration.py tests/test_skill_eval_repository_postgres.py tests/test_plan09_lifecycle_postgres.py -q
 
       - name: System tool golden digest smoke
         run: python -m pytest tests/test_binding_json_schema.py::test_system_tool_golden_schemas_and_contract_set_digest_are_stable -q
+
+  schema-release-critical:
+    name: Clean Schema Release-Critical PostgreSQL 15 Gate
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: mindatlas
+          POSTGRES_PASSWORD: mindatlas
+          POSTGRES_DB: mindatlas_test_plan3_schema_ci
+        ports:
+          - 5430:5432
+        options: >-
+          --health-cmd "pg_isready -U mindatlas -d mindatlas_test_plan3_schema_ci"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://mindatlas:mindatlas@localhost:5430/mindatlas_test_plan3_schema_ci
+      MINDATLAS_TEST_POSTGRES_URL: postgresql://mindatlas:mindatlas@localhost:5430/mindatlas_test_plan3_schema_ci
+      MINDATLAS_SCHEMA_GENERATOR_DATABASE_URL: postgresql://mindatlas:mindatlas@localhost:5430/mindatlas_test_plan3_schema_generator
+      MINDATLAS_SCHEMA_FRESH_DATABASE_URL: postgresql://mindatlas:mindatlas@localhost:5430/mindatlas_test_plan3_schema_fresh
+      MINDATLAS_SCHEMA_COMPATIBILITY_DATABASE_URL: postgresql://mindatlas:mindatlas@localhost:5430/mindatlas_test_plan3_schema_compatibility
+      MINDATLAS_SCHEMA_REBASELINE_SOURCE_URL: postgresql://mindatlas:mindatlas@localhost:5430/mindatlas_test_plan3_schema_source
+      MINDATLAS_REQUIRE_SCHEMA_POSTGRES: "1"
+      MINDATLAS_DEPLOYMENT_CLASS: rehearsal
+      MINDATLAS_TEST_POSTGRES_DESTRUCTIVE: "1"
+      APP_ENV: test
+      APP_BUILD_REVISION: ci-clean-schema
+      AI_PROVIDER_FERNET_KEY: "07v02gVBdreNrXjLJZkIMdohHtgy6aDFKBHxakHjbrQ="
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - name: Install backend dependencies
+        run: python -m pip install -r requirements.txt pytest
+      - name: Create disposable schema databases
+        run: |
+          set -euo pipefail
+          export PGPASSWORD=mindatlas
+          for database in \
+            mindatlas_test_plan3_schema_generator \
+            mindatlas_test_plan3_schema_fresh \
+            mindatlas_test_plan3_schema_compatibility \
+            mindatlas_test_plan3_schema_source; do
+            createdb -h localhost -p 5430 -U mindatlas "$database"
+          done
+      - name: Verify clean schema artifacts
+        run: |
+          set -euo pipefail
+          python scripts/archive_pre_ga_lineage.py --check
+          python scripts/generate_pre_ga_baseline.py \
+            --database-url-env MINDATLAS_SCHEMA_GENERATOR_DATABASE_URL \
+            --output alembic/versions/pre_ga_v1_0001_clean_baseline.py \
+            --check --check-expected-manifest
+          alembic roots
+          alembic heads
+      - name: Run release-critical schema suites
+        run: |
+          set -euo pipefail
+          python -m pytest -q \
+            tests/test_schema_catalog_postgres.py \
+            tests/test_schema_baseline_migration_postgres.py \
+            tests/test_schema_equivalence_postgres.py \
+            tests/test_schema_rebaseline_postgres.py \
+            tests/test_runtime_schema_compatibility_postgres.py \
+            tests/test_deploy_migrate_clean_only.py
 
   assistant-readiness:
     name: Assistant Seed And Readiness Gates
@@ -429,7 +505,7 @@ jobs:
           assert payload["activeRuntimeKind"] == "main_agent"
           assert payload["chatRunCount"] == 1
           assert payload["chatTerminalStatus"] == "completed"
-          assert payload["alembicHead"] == "b6e2d4f8a901"
+          assert payload["alembicHead"] == "pre_ga_v1_0001"
           print("main agent bootstrap evidence: OK")
           PY
 
