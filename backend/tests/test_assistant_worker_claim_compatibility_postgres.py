@@ -287,11 +287,16 @@ class _PostgresRuntime:
     def claim(self, worker):
         from app.assistant.durable.leases import RunLeaseService
 
+        class _Schema:
+            def is_compatible(self, db):  # noqa: ANN001, ARG002
+                return True
+
         with _session(self.engine) as s:
             svc = RunLeaseService(
                 s,
                 identity=worker,
                 lease_ttl=timedelta(seconds=30),
+                schema_compatibility=_Schema(),
             )
             return svc.claim_next()
 
@@ -363,11 +368,16 @@ def test_two_compatible_workers_race_one_lease_generation(postgres_runtime):
         identity = postgres_runtime.worker_identity_with(worker_id=name)
         from app.assistant.durable.leases import RunLeaseService
 
+        class _Schema:
+            def is_compatible(self, db):  # noqa: ANN001, ARG002
+                return True
+
         with _session(postgres_runtime.engine) as s:
             svc = RunLeaseService(
                 s,
                 identity=identity,
                 lease_ttl=timedelta(seconds=30),
+                schema_compatibility=_Schema(),
             )
             barrier.wait(timeout=10)
             claimed = svc.claim_next()

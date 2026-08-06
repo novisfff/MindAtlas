@@ -116,10 +116,12 @@ class RunLeaseService:
         lease_ttl: timedelta | None = None,
         retry_base_ms: int | None = None,
         retry_max_ms: int | None = None,
+        schema_compatibility: Any | None = None,
     ) -> None:
         self.db = db
         self.identity = identity
         self.repo = DurableRunRepository(db)
+        self.schema_compatibility = schema_compatibility
         s = get_settings()
         self.lease_ttl = lease_ttl or timedelta(
             seconds=int(s.assistant_worker_lease_ttl_sec)
@@ -147,14 +149,24 @@ class RunLeaseService:
         if draining:
             return None
 
+        if not self._schema_is_compatible():
+            self.db.rollback()
+            return None
+
         now = self._db_now()
         candidate = self._select_eligible_run(now=now)
         if candidate is None:
+            return None
+        if not self._schema_is_compatible():
+            self.db.rollback()
             return None
         return self._claim_selected(candidate, now=now)
 
     def claim_run(self, run_id: UUID) -> ClaimedLease | None:
         """Claim a specific Run if eligible and compatible (test/helper path)."""
+        if not self._schema_is_compatible():
+            self.db.rollback()
+            return None
         now = self._db_now()
         run = self.repo.get_run(run_id, for_update=True)
         if run is None:
@@ -166,7 +178,24 @@ class RunLeaseService:
         if not self._is_compatible(run):
             self.db.rollback()
             return None
+        if not self._schema_is_compatible():
+            self.db.rollback()
+            return None
         return self._claim_selected(run, now=now)
+
+    def _schema_is_compatible(self) -> bool:
+        """Recheck family-bound schema before and after candidate locking."""
+        bind = getattr(self.db, "bind", None)
+        if getattr(getattr(bind, "dialect", None), "name", None) != "postgresql":
+            return True
+        try:
+            if self.schema_compatibility is not None:
+                return bool(self.schema_compatibility.is_compatible(self.db))
+            from app.schema.compatibility import runtime_schema_compatibility
+
+            return runtime_schema_compatibility().is_compatible(self.db)
+        except Exception:
+            return False
 
     def _select_eligible_run(self, *, now: datetime) -> AssistantChatRun | None:
         """Select earliest eligible compatible Main Agent Run with SKIP LOCKED.

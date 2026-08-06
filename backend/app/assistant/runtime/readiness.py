@@ -49,6 +49,15 @@ class RuntimeSchemaCompatibility(Protocol):
     def is_compatible(self, db: Session) -> bool: ...
 
 
+class Plan2AlembicHeadCompatibility:
+    """Compatibility import shim backed by the family-bound Plan 3 service."""
+
+    def is_compatible(self, db: Session) -> bool:
+        from app.schema.compatibility import runtime_schema_compatibility
+
+        return runtime_schema_compatibility().is_compatible(db)
+
+
 def read_single_alembic_version(db: Session) -> str | None:
     """Return the sole alembic_version row, or None if missing/ambiguous."""
     try:
@@ -59,15 +68,6 @@ def read_single_alembic_version(db: Session) -> str | None:
         return None
     value = rows[0][0]
     return str(value) if value is not None else None
-
-
-class Plan2AlembicHeadCompatibility:
-    """Interim Plan 2 schema gate; Plan 3 replaces with pre_ga_v1 identity."""
-
-    expected_head = "b6e2d4f8a901"
-
-    def is_compatible(self, db: Session) -> bool:
-        return read_single_alembic_version(db) == self.expected_head
 
 
 class _DefaultSeedProbe:

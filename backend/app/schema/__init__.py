@@ -12,6 +12,12 @@ from app.schema.contracts import (
     SchemaCompatibilitySnapshot,
     SchemaRuntimeIdentityMaterial,
 )
+from app.schema.compatibility import (
+    FamilyBoundRuntimeSchemaCompatibility,
+    PLAN3_SCHEMA_REQUIREMENT,
+    SchemaCompatibilityRequirement,
+    runtime_schema_compatibility,
+)
 
 __all__ = (
     "ARCHIVED_REVISION_COUNT",
@@ -24,4 +30,8 @@ __all__ = (
     "SCHEMA_IDENTITY_SINGLETON_KEY",
     "SchemaCompatibilitySnapshot",
     "SchemaRuntimeIdentityMaterial",
+    "FamilyBoundRuntimeSchemaCompatibility",
+    "PLAN3_SCHEMA_REQUIREMENT",
+    "SchemaCompatibilityRequirement",
+    "runtime_schema_compatibility",
 )

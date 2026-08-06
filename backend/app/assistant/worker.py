@@ -504,9 +504,9 @@ class AssistantWorker:
         ``schema_incompatible``.
         """
         try:
-            from app.assistant.runtime.readiness import Plan2AlembicHeadCompatibility
+            from app.schema.compatibility import runtime_schema_compatibility
 
-            return bool(Plan2AlembicHeadCompatibility().is_compatible(db))
+            return bool(runtime_schema_compatibility().is_compatible(db))
         except Exception:
             logger.exception("assistant_worker_schema_probe_failed")
             return False
