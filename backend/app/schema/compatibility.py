@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+from threading import Lock
 from typing import Mapping
 
 from sqlalchemy import text
@@ -18,9 +19,11 @@ from app.schema.application_contract import (
 from app.schema.catalog import CatalogReadError, PostgresCatalogReader
 from app.schema.canonical import structural_fingerprint
 from app.schema.contracts import (
+    CanonicalSchemaDocument,
     CLEAN_ROOT_REVISION,
     DeploymentClass,
     SchemaCompatibilitySnapshot,
+    SCHEMA_IDENTITY_CONTRACT_VERSION,
 )
 from app.schema.exclusions import LEGACY_TABLE_NAMES
 from app.schema.identity import (
@@ -66,7 +69,33 @@ def _load_requirement() -> SchemaCompatibilityRequirement:
     )
 
 
-PLAN3_SCHEMA_REQUIREMENT = _load_requirement()
+class _LazyRequirement:
+    def __init__(self) -> None:
+        self._value: SchemaCompatibilityRequirement | None = None
+        self._lock = Lock()
+
+    def __getattr__(self, name: str):  # noqa: ANN001
+        value = self._value
+        if value is None:
+            with self._lock:
+                value = self._value
+                if value is None:
+                    try:
+                        value = _load_requirement()
+                    except Exception:
+                        raise AttributeError("schema requirement unavailable") from None
+                    self._value = value
+        return getattr(value, name)
+
+
+PLAN3_SCHEMA_REQUIREMENT = _LazyRequirement()
+
+
+def _requirement() -> SchemaCompatibilityRequirement | None:
+    try:
+        return _load_requirement()
+    except Exception:
+        return None
 
 
 def _incompatible_snapshot(code: str) -> SchemaCompatibilitySnapshot:
@@ -102,6 +131,9 @@ class FamilyBoundRuntimeSchemaCompatibility:
         return self.evaluate(db).compatible
 
     def _evaluate(self, db) -> SchemaCompatibilitySnapshot:  # noqa: ANN001
+        requirement = _requirement()
+        if requirement is None:
+            return _incompatible_snapshot("schema_manifest_invalid")
         db.execute(text("SET LOCAL search_path = public"))
         rows = tuple(
             str(value)
@@ -117,12 +149,12 @@ class FamilyBoundRuntimeSchemaCompatibility:
         if len(rows) != 1:
             return _incompatible_snapshot("head_ambiguous")
         revision = rows[0]
-        ordinal = PLAN3_SCHEMA_REQUIREMENT.compatible_revisions.get(revision)
-        if ordinal is None or ordinal < PLAN3_SCHEMA_REQUIREMENT.minimum_revision_ordinal:
+        ordinal = requirement.compatible_revisions.get(revision)
+        if ordinal is None or ordinal < requirement.minimum_revision_ordinal:
             return _incompatible_snapshot("revision_incompatible")
 
         marker = read_schema_identity(db)
-        if marker.schema_family != PLAN3_SCHEMA_REQUIREMENT.schema_family:
+        if marker.schema_family != requirement.schema_family:
             return _incompatible_snapshot("family_mismatch")
         if marker.schema_revision != revision:
             return _incompatible_snapshot("revision_incompatible")
@@ -151,22 +183,29 @@ class FamilyBoundRuntimeSchemaCompatibility:
         except LogicalApplicationContractError:
             return _incompatible_snapshot("marker_control_mismatch")
         fingerprint = structural_fingerprint(projected)
-        expected_fingerprint = PLAN3_SCHEMA_REQUIREMENT.expected_application_fingerprints[
-            revision
-        ]
+        expected_fingerprint = requirement.expected_application_fingerprints[revision]
         if fingerprint != expected_fingerprint:
             return _incompatible_snapshot("fingerprint_mismatch")
 
         expected = load_expected_schema_contract()
-        if marker.seed_contract_digest != PLAN3_SCHEMA_REQUIREMENT.seed_contract_digest:
+        logical_keys = {item.key for item in projected.objects}
+        controls = tuple(item for item in document.objects if item.key not in logical_keys)
+        control_fingerprint = structural_fingerprint(
+            CanonicalSchemaDocument(1, document.postgres_major, controls)
+        )
+        if control_fingerprint != requirement.expected_marker_control_fingerprints[revision]:
+            return _incompatible_snapshot("marker_control_mismatch")
+        if marker.identity_contract_version != SCHEMA_IDENTITY_CONTRACT_VERSION:
+            return _incompatible_snapshot("identity_contract_mismatch")
+        if marker.seed_contract_digest != requirement.seed_contract_digest:
             return _incompatible_snapshot("seed_contract_mismatch")
-        if marker.runtime_contract_version != PLAN3_SCHEMA_REQUIREMENT.runtime_contract_version:
+        if marker.runtime_contract_version != requirement.runtime_contract_version:
             return _incompatible_snapshot("runtime_contract_mismatch")
-        if marker.checkpoint_codec_version != PLAN3_SCHEMA_REQUIREMENT.checkpoint_codec_version:
+        if marker.checkpoint_codec_version != requirement.checkpoint_codec_version:
             return _incompatible_snapshot("checkpoint_codec_mismatch")
-        if marker.capability_feature_digest != PLAN3_SCHEMA_REQUIREMENT.capability_feature_digest:
+        if marker.capability_feature_digest != requirement.capability_feature_digest:
             return _incompatible_snapshot("capability_feature_mismatch")
-        if marker.operator_auth_contract_version != PLAN3_SCHEMA_REQUIREMENT.operator_auth_contract_version:
+        if marker.operator_auth_contract_version != requirement.operator_auth_contract_version:
             return _incompatible_snapshot("operator_auth_contract_mismatch")
         if schema_runtime_identity_digest(marker.to_identity_material()) != marker.runtime_identity_digest:
             return _incompatible_snapshot("runtime_identity_mismatch")

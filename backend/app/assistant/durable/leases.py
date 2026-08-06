@@ -350,18 +350,20 @@ class RunLeaseService:
     ) -> ClaimedLease | None:
         """Apply the status-appropriate claim/takeover transition.
 
-        The row is already locked via FOR UPDATE. We release the lock by
-        rolling back the selection transaction and re-running the CAS path
-        through DurableRunRepository so state_revision/event rules stay
-        centralized — but only after capturing the snapshot needed for CAS.
+        The row is already locked via FOR UPDATE. The compatibility gate runs
+        while that lock is held, and the repository CAS path keeps
+        state_revision/event rules centralized in the same transaction.
         """
         run_id = run.id
         expected_revision = int(run.state_revision)
         status = str(run.status)
         worker_id = self.identity.worker_id
 
-        # Drop the SELECT FOR UPDATE lock; repository claim re-acquires it.
-        self.db.rollback()
+        # Keep the selected FOR UPDATE lock and recheck schema compatibility in
+        # this same transaction immediately before the repository CAS mutation.
+        if not self._schema_is_compatible():
+            self.db.rollback()
+            return None
 
         try:
             if status == STATUS_QUEUED:

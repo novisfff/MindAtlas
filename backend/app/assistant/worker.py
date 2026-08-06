@@ -508,7 +508,9 @@ class AssistantWorker:
 
             return bool(runtime_schema_compatibility().is_compatible(db))
         except Exception:
-            logger.exception("assistant_worker_schema_probe_failed")
+            logger.error(
+                "assistant_worker_schema_probe_failed diagnostic=schema_incompatible"
+            )
             return False
 
     def _register(self) -> int:

@@ -53,9 +53,12 @@ class Plan2AlembicHeadCompatibility:
     """Compatibility import shim backed by the family-bound Plan 3 service."""
 
     def is_compatible(self, db: Session) -> bool:
-        from app.schema.compatibility import runtime_schema_compatibility
+        try:
+            from app.schema.compatibility import runtime_schema_compatibility
 
-        return runtime_schema_compatibility().is_compatible(db)
+            return runtime_schema_compatibility().is_compatible(db)
+        except Exception:
+            return False
 
 
 def read_single_alembic_version(db: Session) -> str | None:

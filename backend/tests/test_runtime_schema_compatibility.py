@@ -8,6 +8,7 @@ from app.schema.compatibility import (
     PLAN3_SCHEMA_REQUIREMENT,
     runtime_schema_compatibility,
 )
+from app.schema import compatibility as compatibility_module
 
 
 def test_runtime_schema_compatibility_is_family_bound_singleton() -> None:
@@ -75,3 +76,18 @@ def test_compatible_snapshot_shape_is_bounded() -> None:
 
     assert snapshot.compatible is True
     assert snapshot.safe_reason is None
+
+
+def test_manifest_load_failure_is_bounded_at_evaluate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unavailable():
+        raise RuntimeError("raw manifest details")
+
+    monkeypatch.setattr(compatibility_module, "_load_requirement", unavailable)
+
+    snapshot = FamilyBoundRuntimeSchemaCompatibility().evaluate(object())
+
+    assert snapshot.compatible is False
+    assert snapshot.safe_reason == "schema_incompatible"
+    assert snapshot.diagnostic_code == "schema_manifest_invalid"
