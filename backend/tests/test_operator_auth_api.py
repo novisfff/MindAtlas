@@ -125,9 +125,9 @@ def session_factory() -> Iterator[sessionmaker]:
         OperatorAuditEvent.__table__,
         AppSetting.__table__,
     ]
-    from app.database import Base  # noqa: E402
+    from tests._db import create_sqlite_schema  # noqa: E402
 
-    Base.metadata.create_all(engine, tables=tables)
+    create_sqlite_schema(engine, tables=tables)
     factory = sessionmaker(
         bind=engine,
         autoflush=False,
@@ -846,8 +846,7 @@ def uninitialized_session_factory() -> Iterator[sessionmaker]:
     import app.entry.models  # noqa: F401 — resolve Relation→Entry mapper
     import app.operator_auth.models  # noqa: F401 — register tables
     import app.report.models  # noqa: F401 — register before full create_all
-    from app.database import Base  # noqa: E402
-    from tests._db import _normalize_report_tables_for_sqlite  # noqa: E402
+    from tests._db import create_sqlite_schema  # noqa: E402
 
     os.environ.setdefault(
         "AI_PROVIDER_FERNET_KEY",
@@ -872,8 +871,7 @@ def uninitialized_session_factory() -> Iterator[sessionmaker]:
         cursor.close()
 
     # Full metadata so AI/entry/assistant tables exist for coordinator staging.
-    _normalize_report_tables_for_sqlite()
-    Base.metadata.create_all(engine)
+    create_sqlite_schema(engine)
     factory = sessionmaker(
         bind=engine,
         autoflush=False,

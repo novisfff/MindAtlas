@@ -177,6 +177,19 @@ def _apply_global_factory(factory: Any, engine: Any) -> None:
     _install_module_sessionlocals(factory)
 
 
+def create_sqlite_schema(engine: Any, *, tables: Any = None) -> None:
+    """Create current live metadata with the SQLite compatibility shims."""
+    from app.database import Base
+    from app.model_registry import load_all_live_models
+
+    load_all_live_models()
+    with _sqlite_metadata_compatibility(Base.metadata):
+        if tables is None:
+            Base.metadata.create_all(engine)
+        else:
+            Base.metadata.create_all(engine, tables=tables)
+
+
 def _latest_active_binding() -> dict[str, Any] | None:
     """Most recently created still-active binding (creation order)."""
     if not _ACTIVE_BINDINGS:

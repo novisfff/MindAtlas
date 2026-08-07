@@ -447,8 +447,7 @@ def session_factory() -> Iterator[sessionmaker]:
 
     from sqlalchemy import create_engine, event
 
-    import tests._db  # noqa: F401  # register JSONB→JSON compiler for SQLite
-    from app.database import Base
+    from tests._db import create_sqlite_schema
     import app.operator_auth.models  # noqa: F401
     import app.system_settings.models  # noqa: F401
 
@@ -469,7 +468,7 @@ def session_factory() -> Iterator[sessionmaker]:
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.close()
 
-    Base.metadata.create_all(engine)
+    create_sqlite_schema(engine)
     factory = sessionmaker(
         bind=engine,
         autoflush=False,

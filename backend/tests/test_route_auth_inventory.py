@@ -369,7 +369,7 @@ def authority_client(tmp_path, monkeypatch):
     from app.common.exceptions import register_exception_handlers
     from app.common.request_context import reset_request_id, set_request_id
     from app.config import Settings, get_settings
-    from app.database import Base, get_db
+    from app.database import get_db
     from app.openclaw_integration.router import runtime_router, settings_router
     from app.operator_auth.constants import CSRF_COOKIE_NAME, SESSION_COOKIE_NAME
     from app.operator_auth.models import (
@@ -443,7 +443,9 @@ def authority_client(tmp_path, monkeypatch):
         OperatorAuditEvent.__table__,
         AppSetting.__table__,
     ]
-    Base.metadata.create_all(engine, tables=tables)
+    from tests._db import create_sqlite_schema
+
+    create_sqlite_schema(engine, tables=tables)
     factory = sessionmaker(
         bind=engine,
         autoflush=False,

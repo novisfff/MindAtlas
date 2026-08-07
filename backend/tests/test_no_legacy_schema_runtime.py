@@ -143,5 +143,7 @@ def test_ci_does_not_execute_the_retired_plan10_upgrade_path() -> None:
     assert "full-postgres-backend:" not in workflow
     assert "alembic upgrade b6e2d4f8a901" not in workflow
     assert "alembic upgrade 9f3c1a7e2b40" not in workflow
-    assert "alembic upgrade 027869a00a47" in workflow
+    assert "alembic upgrade 027869a00a47" not in workflow
+    assert "tests/test_schema_baseline_migration_postgres.py" in workflow
+    assert "archive_pre_ga_lineage.py --check" in workflow
     assert "MINDATLAS_PLAN10_" not in workflow

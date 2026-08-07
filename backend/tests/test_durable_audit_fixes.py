@@ -258,25 +258,6 @@ class OrphanGcCompletedReadyForMemoryTests(unittest.TestCase):
         test_orphan_scanner_deletes_terminal_run_with_historical_nonterminal_checkpoints()
 
 
-class MigrationDowngradeEmptyDbLogicTests(unittest.TestCase):
-    def test_downgrade_source_allows_empty_without_ack(self) -> None:
-        from pathlib import Path
-
-        src = (
-            Path(__file__).resolve().parents[1]
-            / "alembic"
-            / "versions"
-            / "6af373ef040f_add_durable_agent_run_foundation.py"
-        ).read_text()
-        # Unconditional empty-DB ack raise must be gone.
-        self.assertNotIn(
-            "set {DOWNGRADE_ACK_ENV}=1 to acknowledge",
-            src,
-        )
-        self.assertIn("if has_data:", src)
-        self.assertIn("durable Main Agent Run/history", src)
-
-
 class FinalizerEmitsPublicEventsTests(unittest.TestCase):
     def setUp(self) -> None:
         self.db = _make_session()
