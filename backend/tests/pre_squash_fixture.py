@@ -137,9 +137,14 @@ def _install_legacy_objects(connection) -> None:  # noqa: ANN001
     manifest = load_exclusion_manifest()
     table_items = [item for item in manifest.objects if item.key.kind == "table"]
     for item in sorted(table_items, key=lambda value: value.key.name):
-        connection.exec_driver_sql(
-            render_table_ddl(item.key.schema, item.key.name, item.definition)
-        )
+        try:
+            connection.exec_driver_sql(
+                render_table_ddl(item.key.schema, item.key.name, item.definition)
+            )
+        except Exception:
+            raise PreSquashFixtureError(
+                f"legacy_table_{item.key.name}"
+            ) from None
 
     # Foreign keys may refer to a legacy table that sorts later, so add every
     # captured constraint only after all legacy tables exist.
@@ -148,9 +153,14 @@ def _install_legacy_objects(connection) -> None:  # noqa: ANN001
         for constraint in constraints:
             if constraint.get("type") != "f":
                 continue
-            connection.exec_driver_sql(
-                _render_constraint(item.key.schema, item.key.name, constraint)
-            )
+            try:
+                connection.exec_driver_sql(
+                    _render_constraint(item.key.schema, item.key.name, constraint)
+                )
+            except Exception:
+                raise PreSquashFixtureError(
+                    f"legacy_fk_{constraint.get('name', 'unknown')}"
+                ) from None
 
     for item in manifest.objects:
         if item.key.kind != "function":
@@ -158,7 +168,12 @@ def _install_legacy_objects(connection) -> None:  # noqa: ANN001
         definition = item.definition.get("definition")
         if not isinstance(definition, str):
             raise ValueError("fixture function definition is invalid")
-        connection.exec_driver_sql(definition)
+        try:
+            connection.exec_driver_sql(definition)
+        except Exception:
+            raise PreSquashFixtureError(
+                f"legacy_function_{item.key.name}"
+            ) from None
 
     for item in table_items:
         indexes = item.definition.get("indexes", [])
@@ -177,7 +192,12 @@ def _install_legacy_objects(connection) -> None:  # noqa: ANN001
             # constraints.  Recreating them would produce duplicate names.
             if bool(index.get("primary")) or name in constraint_names:
                 continue
-            connection.exec_driver_sql(definition)
+            try:
+                connection.exec_driver_sql(definition)
+            except Exception:
+                raise PreSquashFixtureError(
+                    f"legacy_index_{name}"
+                ) from None
 
     for item in manifest.objects:
         if item.key.kind != "trigger":
@@ -185,7 +205,12 @@ def _install_legacy_objects(connection) -> None:  # noqa: ANN001
         definition = item.definition.get("definition")
         if not isinstance(definition, str):
             raise ValueError("fixture trigger definition is invalid")
-        connection.exec_driver_sql(definition)
+        try:
+            connection.exec_driver_sql(definition)
+        except Exception:
+            raise PreSquashFixtureError(
+                f"legacy_trigger_{item.key.name}"
+            ) from None
 
     connection.execute(
         text(
@@ -238,6 +263,8 @@ def install_pre_squash_fixture(
                     f'COMMENT ON DATABASE {_quote(database_name)} IS %s',
                     (f"mindatlas:deployment_class={deployment_class}",),
                 )
+        except PreSquashFixtureError:
+            raise
         except Exception:
             raise PreSquashFixtureError("legacy_install_failed") from None
 
