@@ -227,9 +227,9 @@ def _install_source_snapshot(connection, snapshot) -> None:  # noqa: ANN001
             connection.exec_driver_sql(
                 render_table_ddl(item.key.schema, item.key.name, item.definition)
             )
-        except Exception:
+        except Exception as exc:
             raise PreSquashFixtureError(
-                f"legacy_table_{item.key.name}"
+                f"legacy_table_{item.key.name}_{_postgres_error_suffix(exc)}"
             ) from None
 
     # Foreign keys may refer to a table that sorts later, so add every captured
@@ -243,9 +243,10 @@ def _install_source_snapshot(connection, snapshot) -> None:  # noqa: ANN001
                 connection.exec_driver_sql(
                     _render_constraint(item.key.schema, item.key.name, constraint)
                 )
-            except Exception:
+            except Exception as exc:
                 raise PreSquashFixtureError(
-                    f"legacy_fk_{constraint.get('name', 'unknown')}"
+                    f"legacy_fk_{constraint.get('name', 'unknown')}_"
+                    f"{_postgres_error_suffix(exc)}"
                 ) from None
 
     for item in snapshot.source_document.objects:
@@ -286,9 +287,9 @@ def _install_source_snapshot(connection, snapshot) -> None:  # noqa: ANN001
                 continue
             try:
                 connection.exec_driver_sql(definition)
-            except Exception:
+            except Exception as exc:
                 raise PreSquashFixtureError(
-                    f"legacy_index_{name}"
+                    f"legacy_index_{name}_{_postgres_error_suffix(exc)}"
                 ) from None
 
     for item in snapshot.source_document.objects:
@@ -299,9 +300,9 @@ def _install_source_snapshot(connection, snapshot) -> None:  # noqa: ANN001
             raise ValueError("fixture trigger definition is invalid")
         try:
             connection.exec_driver_sql(definition)
-        except Exception:
+        except Exception as exc:
             raise PreSquashFixtureError(
-                f"legacy_trigger_{item.key.name}"
+                f"legacy_trigger_{item.key.name}_{_postgres_error_suffix(exc)}"
             ) from None
 
     # The source catalog intentionally contains this one inert Plan 10 control
