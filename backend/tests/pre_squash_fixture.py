@@ -79,6 +79,11 @@ def _quote(identifier: str) -> str:
     return '"' + identifier.replace('"', '""') + '"'
 
 
+def _exec_literal(connection, statement: str) -> None:  # noqa: ANN001
+    """Execute committed DDL without DBAPI percent-parameter expansion."""
+    connection.execution_options(no_parameters=True).exec_driver_sql(statement)
+
+
 def _constraint_name(constraint: Mapping[str, Any]) -> str:
     name = constraint.get("name")
     if not isinstance(name, str) or not name:
@@ -183,7 +188,8 @@ def _install_source_snapshot(connection, snapshot) -> None:  # noqa: ANN001
             raise ValueError("fixture enum definition is invalid")
         label_sql = ", ".join("'" + label + "'" for label in labels)
         try:
-            connection.exec_driver_sql(
+            _exec_literal(
+                connection,
                 f"CREATE TYPE {_quote(item.key.schema)}.{_quote(item.key.name)} "
                 f"AS ENUM ({label_sql})"
             )
@@ -207,7 +213,8 @@ def _install_source_snapshot(connection, snapshot) -> None:  # noqa: ANN001
             maximum = int(definition["maximum"])
             cache = int(definition["cache"])
             cycle = "CYCLE" if definition.get("cycle") else "NO CYCLE"
-            connection.exec_driver_sql(
+            _exec_literal(
+                connection,
                 f"CREATE SEQUENCE {_quote(item.key.schema)}.{_quote(item.key.name)} "
                 f"AS {sequence_type} START WITH {start} INCREMENT BY {increment} "
                 f"MINVALUE {minimum} MAXVALUE {maximum} CACHE {cache} {cycle}"
@@ -224,7 +231,8 @@ def _install_source_snapshot(connection, snapshot) -> None:  # noqa: ANN001
     ]
     for item in sorted(table_items, key=lambda value: value.key.name):
         try:
-            connection.exec_driver_sql(
+            _exec_literal(
+                connection,
                 render_table_ddl(item.key.schema, item.key.name, item.definition)
             )
         except Exception as exc:
@@ -240,7 +248,8 @@ def _install_source_snapshot(connection, snapshot) -> None:  # noqa: ANN001
             if constraint.get("type") != "f":
                 continue
             try:
-                connection.exec_driver_sql(
+                _exec_literal(
+                    connection,
                     _render_constraint(item.key.schema, item.key.name, constraint)
                 )
             except Exception as exc:
@@ -260,9 +269,7 @@ def _install_source_snapshot(connection, snapshot) -> None:  # noqa: ANN001
             # (``%``).  Bypass SQLAlchemy's DBAPI parameter mapping explicitly;
             # otherwise psycopg2 treats those literal placeholders as a Python
             # format string when an empty parameter mapping is supplied.
-            connection.execution_options(no_parameters=True).exec_driver_sql(
-                definition
-            )
+            _exec_literal(connection, definition)
         except Exception as exc:
             raise PreSquashFixtureError(
                 f"legacy_function_{item.key.name}_{_postgres_error_suffix(exc)}"
@@ -286,7 +293,7 @@ def _install_source_snapshot(connection, snapshot) -> None:  # noqa: ANN001
             if bool(index.get("primary")) or name in constraint_names:
                 continue
             try:
-                connection.exec_driver_sql(definition)
+                _exec_literal(connection, definition)
             except Exception as exc:
                 raise PreSquashFixtureError(
                     f"legacy_index_{name}_{_postgres_error_suffix(exc)}"
@@ -299,7 +306,7 @@ def _install_source_snapshot(connection, snapshot) -> None:  # noqa: ANN001
         if not isinstance(definition, str):
             raise ValueError("fixture trigger definition is invalid")
         try:
-            connection.exec_driver_sql(definition)
+            _exec_literal(connection, definition)
         except Exception as exc:
             raise PreSquashFixtureError(
                 f"legacy_trigger_{item.key.name}_{_postgres_error_suffix(exc)}"
@@ -338,7 +345,8 @@ def _install_source_snapshot(connection, snapshot) -> None:  # noqa: ANN001
         owned_by = sequence_item.definition.get("ownedBy")
         if isinstance(owned_by, Mapping):
             try:
-                connection.exec_driver_sql(
+                _exec_literal(
+                    connection,
                     f"ALTER SEQUENCE {_quote(sequence_item.key.schema)}."
                     f"{_quote(sequence_item.key.name)} OWNED BY "
                     f"{_quote(str(owned_by['schema']))}."
