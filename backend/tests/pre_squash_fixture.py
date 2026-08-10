@@ -173,6 +173,10 @@ def _constraint_definition(constraint: Mapping[str, Any]) -> str:
     return definition
 
 
+def _dropped_column_name(ordinal: int) -> str:
+    return f"__mindatlas_fixture_dropped_{ordinal}"
+
+
 def render_table_ddl(
     schema: str,
     table_name: str,
@@ -185,8 +189,15 @@ def render_table_ddl(
     constraints = definition.get("constraints")
     if not isinstance(columns, list) or not isinstance(constraints, list):
         raise ValueError("fixture table definition is invalid")
+    columns_by_ordinal = {int(column["ordinal"]): column for column in columns}
     rendered_columns: list[str] = []
-    for column in sorted(columns, key=lambda item: int(item["ordinal"])):
+    for ordinal in range(1, max(columns_by_ordinal) + 1):
+        column = columns_by_ordinal.get(ordinal)
+        if column is None:
+            rendered_columns.append(
+                f"{_quote(_dropped_column_name(ordinal))} text"
+            )
+            continue
         if not isinstance(column, Mapping):
             raise ValueError("fixture column definition is invalid")
         name = column.get("name")
@@ -247,13 +258,8 @@ def _install_column_gaps(connection, item) -> None:  # noqa: ANN001
     for ordinal in range(1, max(ordinals) + 1):
         if ordinal in ordinals:
             continue
-        dropped_name = f"__mindatlas_fixture_dropped_{ordinal}"
+        dropped_name = _dropped_column_name(ordinal)
         try:
-            _exec_literal(
-                connection,
-                f"ALTER TABLE {_quote(item.key.schema)}.{_quote(item.key.name)} "
-                f"ADD COLUMN {_quote(dropped_name)} text",
-            )
             _exec_literal(
                 connection,
                 f"ALTER TABLE {_quote(item.key.schema)}.{_quote(item.key.name)} "
