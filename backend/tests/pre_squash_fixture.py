@@ -195,6 +195,32 @@ def _constraint_definition(constraint: Mapping[str, Any]) -> str:
     return definition
 
 
+def _legacy_source_constraint_definition(
+    constraint: Mapping[str, Any],
+) -> str:
+    """Undo PostgreSQL's deparser casts to obtain a stable source expression."""
+    definition = _constraint_definition(constraint)
+    if constraint.get("type") != "c" or not definition.startswith("CHECK ("):
+        return definition
+    body = definition[len("CHECK (") : -1]
+    any_pattern = re.compile(
+        r"(?P<column>[a-z_][a-z0-9_]*)::text\s*=\s*ANY\s*"
+        r"\(\s*\(?ARRAY\[(?P<values>[^\]]+)\]::text\[\]\)?\s*\)"
+    )
+
+    def replace_any(match: re.Match[str]) -> str:
+        values = re.findall(r"'((?:''|[^'])*)'", match.group("values"))
+        if not values:
+            return match.group(0)
+        literals = ", ".join("'" + value.replace("''", "''''") + "'" for value in values)
+        return f"{match.group('column')} IN ({literals})"
+
+    body = any_pattern.sub(replace_any, body)
+    body = re.sub(r"\b([a-z_][a-z0-9_]*)::text\b", r"\1", body)
+    body = re.sub(r"'((?:''|[^'])*)'::character varying", r"'\1'", body)
+    return f"CHECK ({body})"
+
+
 def _dropped_column_name(ordinal: int) -> str:
     return f"__mindatlas_fixture_dropped_{ordinal}"
 
@@ -442,6 +468,15 @@ def _install_source_snapshot(
         if item.key.kind == "table"
     ]
     for item in sorted(table_items, key=lambda value: value.key.name):
+        constraint_definitions = live_constraints.get(item.key.name)
+        if constraint_definitions is None:
+            constraint_definitions = {
+                _constraint_name(constraint): _legacy_source_constraint_definition(
+                    constraint
+                )
+                for constraint in item.definition.get("constraints", [])
+                if isinstance(constraint, Mapping)
+            }
         try:
             _exec_literal(
                 connection,
@@ -449,7 +484,7 @@ def _install_source_snapshot(
                     item.key.schema,
                     item.key.name,
                     item.definition,
-                    constraint_definitions=live_constraints.get(item.key.name),
+                    constraint_definitions=constraint_definitions,
                 )
             )
             _install_column_gaps(connection, item)
@@ -472,7 +507,7 @@ def _install_source_snapshot(
                         item.key.schema,
                         item.key.name,
                         constraint,
-                        constraint_definitions=live_constraints.get(item.key.name),
+                        constraint_definitions=constraint_definitions,
                     )
                 )
             except Exception as exc:
