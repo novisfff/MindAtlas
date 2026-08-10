@@ -167,6 +167,38 @@ def test_report_reservation_failure_happens_before_database_connection(
     assert destination.read_bytes() == b"not-a-report"
 
 
+def test_report_path_failure_is_bounded_before_database_connection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    connected = False
+
+    def unexpected_create_engine(*args, **kwargs):  # noqa: ANN001, ANN002
+        nonlocal connected
+        connected = True
+        raise AssertionError("database must not be opened")
+
+    monkeypatch.setattr(rebaseline_script, "create_engine", unexpected_create_engine)
+    monkeypatch.setenv("MINDATLAS_DEPLOYMENT_CLASS", "development")
+    monkeypatch.setenv("APP_BUILD_REVISION", "build-1")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://user:password@host/db")
+
+    result = rebaseline_script.main(
+        [
+            "inspect",
+            "--database-url-env",
+            "DATABASE_URL",
+            "--report-file",
+            str(tmp_path / "missing-parent" / "report.json"),
+        ]
+    )
+
+    assert result == 2
+    assert capsys.readouterr().err.strip() == "report_path_invalid"
+    assert connected is False
+
+
 def test_database_setup_failure_is_bounded_and_does_not_leak_url(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
