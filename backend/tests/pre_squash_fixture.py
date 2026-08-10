@@ -238,6 +238,34 @@ def _render_constraint(
     )
 
 
+def _install_column_gaps(connection, item) -> None:  # noqa: ANN001
+    """Preserve captured attnum gaps caused by historical dropped columns."""
+    columns = item.definition.get("columns", [])
+    ordinals = {int(column["ordinal"]) for column in columns}
+    if not ordinals:
+        return
+    for ordinal in range(1, max(ordinals) + 1):
+        if ordinal in ordinals:
+            continue
+        dropped_name = f"__mindatlas_fixture_dropped_{ordinal}"
+        try:
+            _exec_literal(
+                connection,
+                f"ALTER TABLE {_quote(item.key.schema)}.{_quote(item.key.name)} "
+                f"ADD COLUMN {_quote(dropped_name)} text",
+            )
+            _exec_literal(
+                connection,
+                f"ALTER TABLE {_quote(item.key.schema)}.{_quote(item.key.name)} "
+                f"DROP COLUMN {_quote(dropped_name)}",
+            )
+        except Exception as exc:
+            raise PreSquashFixtureError(
+                f"legacy_column_gap_{item.key.name}_{ordinal}_"
+                f"{_postgres_error_suffix(exc)}"
+            ) from None
+
+
 def _live_constraint_definitions(snapshot) -> dict[str, dict[str, str]]:  # noqa: ANN001
     """Render current ORM constraints so PostgreSQL deparses them canonically."""
     from sqlalchemy import CheckConstraint, ForeignKeyConstraint, PrimaryKeyConstraint
@@ -363,6 +391,7 @@ def _install_source_snapshot(
                     constraint_definitions=live_constraints.get(item.key.name),
                 )
             )
+            _install_column_gaps(connection, item)
         except Exception as exc:
             raise PreSquashFixtureError(
                 f"legacy_table_{item.key.name}_{_postgres_error_suffix(exc)}"
