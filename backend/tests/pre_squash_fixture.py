@@ -31,6 +31,14 @@ _SUPPORTED_COLUMN_TYPE = re.compile(
 )
 
 
+class PreSquashFixtureError(RuntimeError):
+    """Bounded fixture reconstruction failure for PostgreSQL CI output."""
+
+    def __init__(self, safe_code: str) -> None:
+        super().__init__(safe_code)
+        self.safe_code = safe_code
+
+
 def _quote(identifier: str) -> str:
     if not isinstance(identifier, str) or not identifier:
         raise ValueError("fixture identifier is invalid")
@@ -198,48 +206,62 @@ def install_pre_squash_fixture(
     build_revision: str = "test-pre-squash-fixture",
 ) -> None:
     """Install and validate the committed pre-squash source fixture."""
-    upgrade_clean_root_checked(
-        database_url,
-        deployment_class=deployment_class,
-        app_env=app_env,
-        build_revision=build_revision,
-    )
-    engine = create_engine(_sqlalchemy_url(database_url), future=True)
     try:
-        with engine.begin() as connection:
-            _drop_identity_controls(connection)
-            _install_legacy_objects(connection)
-            connection.execute(
-                text(
-                    "UPDATE \"public\".\"alembic_version\" "
-                    "SET version_num = :revision"
-                ),
-                {"revision": PRE_SQUASH_HEAD},
-            )
-            database_name = connection.scalar(text("SELECT current_database()"))
-            if not isinstance(database_name, str):
-                raise ValueError("fixture database identity is unavailable")
-            connection.exec_driver_sql(
-                f'COMMENT ON DATABASE {_quote(database_name)} IS %s',
-                (f"mindatlas:deployment_class={deployment_class}",),
-            )
+        upgrade_clean_root_checked(
+            database_url,
+            deployment_class=deployment_class,
+            app_env=app_env,
+            build_revision=build_revision,
+        )
+    except Exception:
+        raise PreSquashFixtureError("clean_root_upgrade_failed") from None
+    try:
+        engine = create_engine(_sqlalchemy_url(database_url), future=True)
+    except Exception:
+        raise PreSquashFixtureError("fixture_database_unavailable") from None
+    try:
+        try:
+            with engine.begin() as connection:
+                _drop_identity_controls(connection)
+                _install_legacy_objects(connection)
+                connection.execute(
+                    text(
+                        "UPDATE \"public\".\"alembic_version\" "
+                        "SET version_num = :revision"
+                    ),
+                    {"revision": PRE_SQUASH_HEAD},
+                )
+                database_name = connection.scalar(text("SELECT current_database()"))
+                if not isinstance(database_name, str):
+                    raise ValueError("fixture database identity is unavailable")
+                connection.exec_driver_sql(
+                    f'COMMENT ON DATABASE {_quote(database_name)} IS %s',
+                    (f"mindatlas:deployment_class={deployment_class}",),
+                )
+        except Exception:
+            raise PreSquashFixtureError("legacy_install_failed") from None
 
         snapshot = load_pre_squash_snapshot()
-        with engine.connect() as connection:
-            from app.schema.catalog import PostgresCatalogReader
+        try:
+            with engine.connect() as connection:
+                from app.schema.catalog import PostgresCatalogReader
 
-            actual = PostgresCatalogReader(connection).read_document()
+                actual = PostgresCatalogReader(connection).read_document()
+        except Exception:
+            raise PreSquashFixtureError("fixture_catalog_read_failed") from None
         if (
             structural_fingerprint(actual)
             != snapshot.source_structural_fingerprint
             or canonical_json_bytes(actual.to_payload())
             != canonical_json_bytes(snapshot.source_document.to_payload())
         ):
-            raise AssertionError("pre-squash fixture does not match committed snapshot")
-    except Exception:
-        raise
+            raise PreSquashFixtureError("fixture_snapshot_mismatch")
     finally:
         engine.dispose()
 
 
-__all__ = ["install_pre_squash_fixture", "render_table_ddl"]
+__all__ = [
+    "PreSquashFixtureError",
+    "install_pre_squash_fixture",
+    "render_table_ddl",
+]
