@@ -258,7 +258,7 @@ There is no graph edge between `b6e2d4f8a901` and `pre_ga_v1_0001`. The guarded 
 | `backend/tests/test_schema_baseline_migration_postgres.py` | Fresh root upgrade, marker, sole head, and test-only downgrade guard. |
 | `backend/tests/test_schema_equivalence_postgres.py` | Database A/B canonical equivalence and expected identity. |
 | `backend/tests/test_schema_archive.py` | 60-file chain/digest/config/import isolation verification. |
-| `backend/tests/test_schema_rebaseline_postgres.py` | Accept exact non-production old head; reject production, drift, Legacy data, unknown head, and changed data. |
+| `backend/tests/test_schema_rebaseline_postgres.py` | Verify clean-root idempotence and reject clean-root databases as historical rebaseline sources without executing archived revisions. |
 | `backend/tests/test_runtime_schema_compatibility.py` | Marker/runtime identity unit matrix and safe failures. |
 | `backend/tests/test_runtime_schema_compatibility_postgres.py` | API/Worker family, fingerprint, deployment, and claim checks. |
 | `backend/tests/test_deploy_migrate_clean_only.py` | Fresh upgrade and non-empty unversioned database refusal. |
@@ -2977,14 +2977,18 @@ The optional guarded rebaseline remains a separately invoked maintenance command
 
 - [ ] **Step 5: Set explicit Compose deployment identity**
 
-Development Compose sets:
+The production-like Compose base leaves the deployment identity empty so
+missing configuration fails closed. Development Compose sets the value only
+through the local override:
 
 ```yaml
 environment:
   MINDATLAS_DEPLOYMENT_CLASS: development
 ```
 
-The release/rehearsal overlay introduced in Plan 4 sets `rehearsal` or `production` explicitly. No image default is production. Postgres/API/Worker services receive the same value; tests assert disagreement makes runtime compatibility false.
+The main-agent smoke overlay sets `rehearsal` explicitly. No image default is
+production. Postgres/API/Worker services receive the same value; tests assert
+disagreement makes runtime compatibility false.
 
 - [ ] **Step 6: Convert post-archive equivalence to snapshot-vs-root proof**
 
@@ -3344,17 +3348,43 @@ MINDATLAS_SCHEMA_GENERATOR_DATABASE_URL="$MINDATLAS_SCHEMA_GENERATOR_DATABASE_UR
     --database-url-env MINDATLAS_SCHEMA_GENERATOR_DATABASE_URL \
     --output alembic/versions/pre_ga_v1_0001_clean_baseline.py \
     --check --check-expected-manifest
-.venv-plan3-exit/bin/alembic roots
 .venv-plan3-exit/bin/alembic heads
+.venv-plan3-exit/bin/python - <<'PY'
+import ast
+from pathlib import Path
+
+roots = []
+for path in Path("alembic/versions").glob("*.py"):
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    values = {
+        node.targets[0].id: node.value.value
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+        and node.targets[0].id in {"revision", "down_revision"}
+        and isinstance(node.value, ast.Constant)
+    }
+    if values.get("down_revision") is None:
+        roots.append(values.get("revision"))
+assert roots == ["pre_ga_v1_0001"]
+PY
+.venv-plan3-exit/bin/python -m pytest -q
 MINDATLAS_TEST_POSTGRES_URL="$MINDATLAS_TEST_POSTGRES_URL" \
 MINDATLAS_REQUIRE_SCHEMA_POSTGRES=1 \
-  .venv-plan3-exit/bin/python -m pytest -q
-MINDATLAS_SCHEMA_CLEAN_DATABASE_URL="$MINDATLAS_SCHEMA_CLEAN_DATABASE_URL" \
-MINDATLAS_SCHEMA_REBASELINE_DATABASE_URL="$MINDATLAS_SCHEMA_REBASELINE_DATABASE_URL" \
+  .venv-plan3-exit/bin/python -m pytest -q \
+    tests/test_schema_catalog_postgres.py \
+    tests/test_schema_baseline_migration_postgres.py \
+    tests/test_schema_equivalence_postgres.py \
+    tests/test_schema_rebaseline_postgres.py \
+    tests/test_runtime_schema_compatibility_postgres.py \
+    tests/test_deploy_migrate_clean_only.py
+MINDATLAS_SCHEMA_FRESH_DATABASE_URL="$MINDATLAS_SCHEMA_FRESH_DATABASE_URL" \
+MINDATLAS_SCHEMA_REBASELINE_SOURCE_URL="$MINDATLAS_SCHEMA_REBASELINE_SOURCE_URL" \
 MINDATLAS_DEPLOYMENT_CLASS=rehearsal \
   .venv-plan3-exit/bin/python scripts/verify_pre_ga_schema.py exit \
-    --fresh-database-url-env MINDATLAS_SCHEMA_CLEAN_DATABASE_URL \
-    --rebaseline-database-url-env MINDATLAS_SCHEMA_REBASELINE_DATABASE_URL \
+    --fresh-database-url-env MINDATLAS_SCHEMA_FRESH_DATABASE_URL \
+    --rebaseline-database-url-env MINDATLAS_SCHEMA_REBASELINE_SOURCE_URL \
     --deployment-class rehearsal \
     --output ../docs/superpowers/evidence/2026-07-28-pre-ga-clean-baseline.json
 cd ../frontend
@@ -3383,6 +3413,39 @@ Expected:
 - full backend/frontend tests and frontend build pass;
 - evidence contains only allowlisted safe fields and verifies its own digest;
 - `git diff --check` is clean.
+
+## Post-Audit Completion Record (2026-08-10)
+
+The external PR audit was checked against the live tree. The following
+release-facing gaps are now closed:
+
+- [x] Unified all destructive PostgreSQL fixtures, CI services, and temporary
+  databases under the `mindatlas_test_pre_ga_v1_` prefix.
+- [x] Moved operator, readiness, activation, admission, lease, worker-claim,
+  health, and initialization PostgreSQL fixtures to an empty clean-root
+  upgrade (`pre_ga_v1_0001`); archived lineage is never executed by these
+  gates.
+- [x] Replaced the old-head schema rebaseline/compatibility PostgreSQL gates
+  with clean-root boundary tests and retained only static historical evidence
+  for the archived lineage.
+- [x] Made the smoke runner and operator-control-plane evidence runner import
+  and compare `CLEAN_ROOT_REVISION`, accept opaque Alembic IDs, and fail on any
+  non-exact head; the operator evidence runner now runs in CI and is uploaded
+  with PR-head build binding.
+- [x] Removed the development deployment-class fallback from the production-like
+  Compose base; local override and main-agent smoke files set `development`
+  and `rehearsal` explicitly, respectively.
+- [x] Consolidated build identity on `APP_BUILD_REVISION` and wired schema and
+  operator evidence to the checked-out/PR head identity.
+- [x] Added PostgreSQL shell integration coverage for empty, versioned,
+  non-empty-unversioned, old-head, wrong-family, invalid-class, and connection
+  failure migration states.
+- [x] Added the CI `verify_pre_ga_schema.py exit` invocation, evidence binding
+  validation, and sanitized artifact upload.
+
+The local Docker daemon was unavailable during this audit pass; PostgreSQL
+integration remains enforced by the dedicated CI jobs with
+`MINDATLAS_REQUIRE_POSTGRES=1` / `MINDATLAS_REQUIRE_SCHEMA_POSTGRES=1`.
 
 ## Rollback Boundary
 

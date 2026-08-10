@@ -20,6 +20,8 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from tests._bootstrap import bootstrap_backend_imports, reset_caches
+from tests.postgres_destructive_guard import reset_disposable_public_schema
+from tests.schema_baseline_support import upgrade_clean_root_checked
 
 bootstrap_backend_imports()
 reset_caches()
@@ -69,7 +71,7 @@ def _as_sqlalchemy_url(url: str) -> str:
 
 def _configure_database_env(url: str, *, build: str) -> None:
     os.environ["DATABASE_URL"] = url
-    os.environ.setdefault("MINDATLAS_PLAN10_B2_TEST_OVERRIDE", "1")
+    os.environ["MINDATLAS_DEPLOYMENT_CLASS"] = "rehearsal"
     os.environ.setdefault("APP_ENV", "test")
     os.environ["APP_BUILD_REVISION"] = build
     os.environ["ASSISTANT_NEW_RUNS_ENABLED"] = "true"
@@ -104,19 +106,15 @@ def _session(engine: Engine) -> Iterator[Session]:
         session.close()
 
 
-def _ensure_schema(engine: Engine) -> None:
-    from app.database import Base
-
-    import app.assistant.models  # noqa: F401
-    import app.assistant.durable.models  # noqa: F401
-    import app.assistant.runtime.models  # noqa: F401
-    import app.assistant.skills.models  # noqa: F401
-    import app.ai_registry.models  # noqa: F401
-    import app.ai_provider.models  # noqa: F401
-    import app.operator_auth.models  # noqa: F401
-    import app.system_settings.models  # noqa: F401
-
-    Base.metadata.create_all(bind=engine)
+def _ensure_schema(engine: Engine, *, build: str) -> None:
+    """Install the clean root instead of synthesizing schema via ORM metadata."""
+    reset_disposable_public_schema(engine)
+    upgrade_clean_root_checked(
+        _POSTGRES_URL,
+        deployment_class="rehearsal",
+        app_env="test",
+        build_revision=build,
+    )
 
 
 def _seed_profile_version(db: Session, *, content_digest: str = DIGEST_A):
@@ -335,7 +333,7 @@ def postgres_runtime():
     # suites sharing the disposable Postgres database.
     build = f"claim-compat-{uuid.uuid4().hex[:12]}"
     with _engine(build=build) as engine:
-        _ensure_schema(engine)
+        _ensure_schema(engine, build=build)
         yield _PostgresRuntime(engine, build=build)
 
 

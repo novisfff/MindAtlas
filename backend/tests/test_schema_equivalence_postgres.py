@@ -504,7 +504,7 @@ def test_temporary_database_cleanup_continues_after_first_drop_failure(
     with pytest.raises(OSError, match="injected first cleanup failure"):
         with temporary_postgres_databases(
             "postgresql://user:password@127.0.0.1/"
-            "mindatlas_test_plan08_cleanup",
+            "mindatlas_test_pre_ga_v1_cleanup",
             labels=("old_chain", "clean_root"),
         ):
             pass

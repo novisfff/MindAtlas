@@ -23,11 +23,14 @@ from sqlalchemy.orm import sessionmaker
 
 from tests._bootstrap import bootstrap_backend_imports, reset_caches
 from tests.postgres_destructive_guard import reset_disposable_public_schema
+from tests.schema_baseline_support import upgrade_clean_root_checked
 
 bootstrap_backend_imports()
 reset_caches()
 
-PLAN2_HEAD = "b6e2d4f8a901"
+from app.schema.contracts import CLEAN_ROOT_REVISION  # noqa: E402
+
+CLEAN_SCHEMA_HEAD = CLEAN_ROOT_REVISION
 BUILD = "test-build-admission-pg-task8"
 PASSWORD = "correct horse battery"
 
@@ -66,13 +69,13 @@ def _as_sqlalchemy_url(url: str) -> str:
 
 def _configure_database_env(url: str) -> None:
     os.environ["DATABASE_URL"] = url
-    os.environ.setdefault("MINDATLAS_PLAN10_B2_TEST_OVERRIDE", "1")
+    os.environ["MINDATLAS_DEPLOYMENT_CLASS"] = "rehearsal"
     os.environ.setdefault("APP_ENV", "test")
     os.environ["APP_BUILD_REVISION"] = BUILD
     os.environ["ASSISTANT_NEW_RUNS_ENABLED"] = "true"
     os.environ.setdefault(
         "AI_PROVIDER_FERNET_KEY",
-        "07v02gVBdreNrXjLJZkIMdohHtgy6aDFKBHxakHjbrQ=",
+        "b98esSSrtceWc4IUOFGR-f_6I8FfnxtpjjYQZN51RCw=",
     )
     reset_caches()
     try:
@@ -86,7 +89,7 @@ def _configure_database_env(url: str) -> None:
 def _alembic_env() -> dict[str, str]:
     env = os.environ.copy()
     env["DATABASE_URL"] = _POSTGRES_URL
-    env["MINDATLAS_PLAN10_B2_TEST_OVERRIDE"] = "1"
+    env["MINDATLAS_DEPLOYMENT_CLASS"] = "rehearsal"
     env.setdefault("APP_ENV", "test")
     env["APP_BUILD_REVISION"] = BUILD
     return env
@@ -109,23 +112,13 @@ def _drop_public_schema(engine: Engine) -> None:
     reset_disposable_public_schema(engine)
 
 
-def _upgrade_to_plan2_head() -> None:
-    import subprocess
-    import sys
-
-    result = subprocess.run(
-        [sys.executable, "-m", "alembic", "upgrade", PLAN2_HEAD],
-        cwd=str(_BACKEND_DIR),
-        env=_alembic_env(),
-        capture_output=True,
-        text=True,
-        check=False,
+def _upgrade_to_clean_root() -> None:
+    upgrade_clean_root_checked(
+        _POSTGRES_URL,
+        deployment_class="rehearsal",
+        app_env="test",
+        build_revision=BUILD,
     )
-    if result.returncode != 0:
-        raise AssertionError(
-            f"alembic upgrade {PLAN2_HEAD} failed:\n"
-            f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-        )
 
 
 def _make_key_ring():
@@ -266,15 +259,15 @@ class _PostgresRuntime:
         from app.assistant.runtime.admission import AssistantChatAdmissionService
         from app.assistant.runtime.readiness import (
             AssistantReadinessService,
-            Plan2AlembicHeadCompatibility,
         )
+        from app.schema.compatibility import runtime_schema_compatibility
 
         db = self.Session()
         try:
             readiness = AssistantReadinessService(
                 db,
                 settings=_settings(),
-                schema_compatibility=Plan2AlembicHeadCompatibility(),
+                schema_compatibility=runtime_schema_compatibility(),
                 key_ring=_make_key_ring(),
             )
             service = AssistantChatAdmissionService(
@@ -396,8 +389,8 @@ def concurrently_admit(
     )
     from app.assistant.runtime.readiness import (
         AssistantReadinessService,
-        Plan2AlembicHeadCompatibility,
     )
+    from app.schema.compatibility import runtime_schema_compatibility
 
     barrier = threading.Barrier(len(messages))
     outcomes: list[dict[str, Any]] = []
@@ -409,7 +402,7 @@ def concurrently_admit(
             readiness = AssistantReadinessService(
                 db,
                 settings=_settings(),
-                schema_compatibility=Plan2AlembicHeadCompatibility(),
+                schema_compatibility=runtime_schema_compatibility(),
                 key_ring=_make_key_ring(),
             )
             service = AssistantChatAdmissionService(
@@ -460,7 +453,7 @@ def concurrently_admit(
 def postgres_runtime():
     with _engine() as engine:
         _drop_public_schema(engine)
-        _upgrade_to_plan2_head()
+        _upgrade_to_clean_root()
         runtime = _PostgresRuntime(engine)
         yield runtime
 

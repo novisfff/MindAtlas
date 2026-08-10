@@ -6,7 +6,7 @@ SQLite cannot exercise the PL/pgSQL lifecycle trigger covered here.
 Local invocation (the database must be independently created and disposable)::
 
     MINDATLAS_TEST_POSTGRES_DESTRUCTIVE=1 \
-    MINDATLAS_TEST_POSTGRES_URL=postgresql://.../mindatlas_test_plan08_<suffix> \
+    MINDATLAS_TEST_POSTGRES_URL=postgresql://.../mindatlas_test_pre_ga_v1_<suffix> \
     python -m pytest tests/test_capability_call_migration_postgres.py -q
 """
 
@@ -427,7 +427,7 @@ def test_disposable_database_guard_requires_explicit_opt_in(monkeypatch) -> None
     monkeypatch.delenv(DESTRUCTIVE_OPT_IN_ENV, raising=False)
     with pytest.raises(RuntimeError, match=DESTRUCTIVE_OPT_IN_ENV):
         assert_disposable_postgres_target(
-            "postgresql://localhost/mindatlas_test_plan08_guard"
+            "postgresql://localhost/mindatlas_test_pre_ga_v1_guard"
         )
 
 
@@ -435,12 +435,12 @@ def test_disposable_database_guard_requires_explicit_opt_in(monkeypatch) -> None
     ("url", "expected_message"),
     (
         (
-            "sqlite:///mindatlas_test_plan08_guard.db",
+            "sqlite:///mindatlas_test_pre_ga_v1_guard.db",
             "PostgreSQL backend",
         ),
         (
             "postgresql://localhost/production_test",
-            "database beginning with 'mindatlas_test_plan08_'",
+            "database beginning with 'mindatlas_test_pre_ga_v1_'",
         ),
     ),
 )

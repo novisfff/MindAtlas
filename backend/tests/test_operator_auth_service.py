@@ -16,6 +16,8 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from tests._bootstrap import bootstrap_backend_imports, reset_caches
+from tests.postgres_destructive_guard import reset_disposable_public_schema
+from tests.schema_baseline_support import upgrade_clean_root_checked
 
 bootstrap_backend_imports()
 reset_caches()
@@ -219,45 +221,21 @@ def _pg_engine() -> Iterator[Engine]:
 
 
 def _ensure_operator_schema(engine: Engine) -> None:
-    """Ensure Task 2 head is present; truncate operator tables for isolation.
+    """Install the supported clean root and isolate the operator tables.
 
-    The disposable operator-auth DB is stamped at parent then upgraded only
-    through ``9f3c1a7e2b40``, so ``app_setting`` may be absent. Create a
-    minimal table so ``lock_initialization`` can row-lock the marker.
+    This suite used to depend on a retired migration head and hand-created a
+    partial ``app_setting`` table.  Release gates must exercise the same
+    clean-root schema as production; the root migration already creates the
+    marker table and its control trigger.
     """
-    with engine.begin() as conn:
-        rev = None
-        try:
-            rev = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
-        except Exception:
-            rev = None
-        if rev != "9f3c1a7e2b40":
-            pytest.fail(
-                f"operator auth schema not at 9f3c1a7e2b40 (got {rev!r}); "
-                "run postgres suite / upgrade to 9f3c1a7e2b40 first — "
-                "PostgreSQL security gates must not soft-skip when misconfigured"
-            )
-        # Minimal app_setting so FOR UPDATE on the initialization marker works.
-        conn.execute(
-            text(
-                """
-                CREATE TABLE IF NOT EXISTS app_setting (
-                    id UUID PRIMARY KEY,
-                    key VARCHAR(128) NOT NULL UNIQUE,
-                    value_json JSONB NOT NULL,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-                )
-                """
-            )
-        )
-        conn.execute(
-            text(
-                "TRUNCATE operator_audit_event, operator_session, "
-                "operator_account RESTART IDENTITY CASCADE"
-            )
-        )
-        # Leave app_setting empty (uninitialized) but present for row locks.
+    assert _POSTGRES_URL
+    reset_disposable_public_schema(engine)
+    upgrade_clean_root_checked(
+        _POSTGRES_URL,
+        deployment_class="rehearsal",
+        app_env="test",
+        build_revision="test-operator-auth-service-clean-root",
+    )
 
 
 def count_enabled_operator_accounts(session_factory: sessionmaker) -> int:

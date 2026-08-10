@@ -521,9 +521,7 @@ def main(argv: list[str] | None = None) -> int:
                     if args.command == "apply"
                     else MAINTENANCE_ACKNOWLEDGEMENT
                 ),
-                build_revision=os.environ.get(
-                    "MINDATLAS_BUILD_REVISION", "unknown"
-                ),
+                build_revision=os.environ.get("APP_BUILD_REVISION", "unknown"),
                 operation_id=operation_id,
             )
         except ValueError:

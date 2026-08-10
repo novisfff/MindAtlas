@@ -10,7 +10,11 @@ from sqlalchemy.engine.url import make_url
 from sqlalchemy.exc import ArgumentError
 
 
-_DISPOSABLE_DATABASE_PREFIX = "mindatlas_test_plan08_"
+# Every destructive PostgreSQL test target must identify itself as a disposable
+# database in the currently supported clean schema family.  Keep this prefix
+# shared with CI and the temporary-database helpers so a typo cannot turn a
+# release-critical reset into an immediate guard failure.
+_DISPOSABLE_DATABASE_PREFIX = "mindatlas_test_pre_ga_v1_"
 _DESTRUCTIVE_OPT_IN_ENV = "MINDATLAS_TEST_POSTGRES_DESTRUCTIVE"
 _ALLOWED_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "postgres"})
 

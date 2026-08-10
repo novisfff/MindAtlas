@@ -3,7 +3,24 @@
 # Production deploys should set APP_ENV/APP_BUILD_REVISION in the environment
 # or .env and may omit this override.
 services:
+  db-migrate:
+    environment:
+      MINDATLAS_DEPLOYMENT_CLASS: development
   api:
+    build:
+      args:
+        APP_BUILD_REVISION: ${APP_BUILD_REVISION:-development}
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      APP_BUILD_REVISION: ${APP_BUILD_REVISION:-development}
+      MINDATLAS_DEPLOYMENT_CLASS: development
+  lightrag-worker:
+    environment:
+      MINDATLAS_DEPLOYMENT_CLASS: development
+  docling-worker:
+    environment:
+      MINDATLAS_DEPLOYMENT_CLASS: development
+  assistant-worker:
     build:
       args:
         APP_BUILD_REVISION: ${APP_BUILD_REVISION:-development}

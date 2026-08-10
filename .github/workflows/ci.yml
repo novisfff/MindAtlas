@@ -17,7 +17,7 @@ jobs:
         working-directory: backend
     env:
       # Required by settings/crypto for many integration tests; 32-byte base64 test key.
-      AI_PROVIDER_FERNET_KEY: "07v02gVBdreNrXjLJZkIMdohHtgy6aDFKBHxakHjbrQ="
+      AI_PROVIDER_FERNET_KEY: "b98esSSrtceWc4IUOFGR-f_6I8FfnxtpjjYQZN51RCw="
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -69,27 +69,29 @@ jobs:
         env:
           POSTGRES_USER: mindatlas
           POSTGRES_PASSWORD: mindatlas
-          POSTGRES_DB: mindatlas_test_plan08_operator_auth_ci
+          POSTGRES_DB: mindatlas_test_pre_ga_v1_operator_auth_ci
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U mindatlas -d mindatlas_test_plan08_operator_auth_ci"
+          --health-cmd "pg_isready -U mindatlas -d mindatlas_test_pre_ga_v1_operator_auth_ci"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 10
     env:
       # Disposable CI database only — never production credentials.
-      DATABASE_URL: postgresql://mindatlas:mindatlas@localhost:5432/mindatlas_test_plan08_operator_auth_ci
-      MINDATLAS_TEST_POSTGRES_URL: postgresql://mindatlas:mindatlas@localhost:5432/mindatlas_test_plan08_operator_auth_ci
+      DATABASE_URL: postgresql://mindatlas:mindatlas@localhost:5432/mindatlas_test_pre_ga_v1_operator_auth_ci
+      MINDATLAS_TEST_POSTGRES_URL: postgresql://mindatlas:mindatlas@localhost:5432/mindatlas_test_pre_ga_v1_operator_auth_ci
       # Hard-fail release-critical operator-auth PostgreSQL suite when URL missing.
       MINDATLAS_REQUIRE_POSTGRES: "1"
       MINDATLAS_TEST_POSTGRES_DESTRUCTIVE: "1"
-      AI_PROVIDER_FERNET_KEY: "07v02gVBdreNrXjLJZkIMdohHtgy6aDFKBHxakHjbrQ="
+      AI_PROVIDER_FERNET_KEY: "b98esSSrtceWc4IUOFGR-f_6I8FfnxtpjjYQZN51RCw="
       # Origin only at job scope — operator secrets stay step-scoped so
       # test_settings_constructible_without_auth_secrets stays honest under CI.
       MINDATLAS_CANONICAL_ORIGIN: "http://localhost:3000"
       APP_ENV: test
-      APP_BUILD_REVISION: "ci-operator-control-plane"
+      # Bind evidence and runtime identity to the exact checked-out/PR head.
+      APP_BUILD_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+      MINDATLAS_DEPLOYMENT_CLASS: rehearsal
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -124,6 +126,45 @@ jobs:
             tests/test_route_auth_inventory.py \
             tests/test_operator_cli_boundary.py \
             tests/test_operator_control_plane_evidence.py
+
+      - name: Produce sanitized operator control-plane evidence
+        env:
+          # The runner executes the same fixed suites and needs only synthetic
+          # test credentials; no production operator material is exposed.
+          MINDATLAS_INITIAL_SETUP_TOKEN: "ci-only-operator-setup-material-not-for-production-use-48b"
+          MINDATLAS_SESSION_HMAC_ACTIVE_KEY_ID: "ci_active"
+          MINDATLAS_SESSION_HMAC_KEYS: '{"ci_active":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}'
+        run: |
+          set -euo pipefail
+          python scripts/verify_operator_control_plane.py \
+            --output "$RUNNER_TEMP/operator-control-plane-evidence.json"
+
+      - name: Validate operator evidence binding
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path(os.environ["RUNNER_TEMP"]) / "operator-control-plane-evidence.json"
+          payload = json.loads(path.read_text(encoding="utf-8"))
+          assert payload["buildRevision"] == os.environ["APP_BUILD_REVISION"]
+          assert payload["alembicHead"] == "pre_ga_v1_0001"
+          assert payload["testSuites"]["passed"] is True
+          assert payload["restartSessionPreserved"] is True
+          assert payload["rotationSucceeded"] is True
+          assert payload["previousKeySessionsRevoked"] is True
+          print("operator control-plane evidence: OK")
+          PY
+
+      - name: Upload sanitized operator control-plane evidence
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: operator-control-plane-evidence
+          path: ${{ runner.temp }}/operator-control-plane-evidence.json
+          if-no-files-found: error
 
       - name: Reject skipped release-critical postgres suite
         env:
@@ -183,27 +224,29 @@ jobs:
         env:
           POSTGRES_USER: mindatlas
           POSTGRES_PASSWORD: mindatlas
-          POSTGRES_DB: mindatlas_test_plan3_schema_ci
+          POSTGRES_DB: mindatlas_test_pre_ga_v1_schema_ci
         ports:
           - 5430:5432
         options: >-
-          --health-cmd "pg_isready -U mindatlas -d mindatlas_test_plan3_schema_ci"
+          --health-cmd "pg_isready -U mindatlas -d mindatlas_test_pre_ga_v1_schema_ci"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 10
     env:
-      DATABASE_URL: postgresql://mindatlas:mindatlas@localhost:5430/mindatlas_test_plan3_schema_ci
-      MINDATLAS_TEST_POSTGRES_URL: postgresql://mindatlas:mindatlas@localhost:5430/mindatlas_test_plan3_schema_ci
-      MINDATLAS_SCHEMA_GENERATOR_DATABASE_URL: postgresql://mindatlas:mindatlas@localhost:5430/mindatlas_test_plan3_schema_generator
-      MINDATLAS_SCHEMA_FRESH_DATABASE_URL: postgresql://mindatlas:mindatlas@localhost:5430/mindatlas_test_plan3_schema_fresh
-      MINDATLAS_SCHEMA_COMPATIBILITY_DATABASE_URL: postgresql://mindatlas:mindatlas@localhost:5430/mindatlas_test_plan3_schema_compatibility
-      MINDATLAS_SCHEMA_REBASELINE_SOURCE_URL: postgresql://mindatlas:mindatlas@localhost:5430/mindatlas_test_plan3_schema_source
+      DATABASE_URL: postgresql://mindatlas:mindatlas@localhost:5430/mindatlas_test_pre_ga_v1_schema_ci
+      MINDATLAS_TEST_POSTGRES_URL: postgresql://mindatlas:mindatlas@localhost:5430/mindatlas_test_pre_ga_v1_schema_ci
+      MINDATLAS_SCHEMA_GENERATOR_DATABASE_URL: postgresql://mindatlas:mindatlas@localhost:5430/mindatlas_test_pre_ga_v1_schema_generator
+      MINDATLAS_SCHEMA_FRESH_DATABASE_URL: postgresql://mindatlas:mindatlas@localhost:5430/mindatlas_test_pre_ga_v1_schema_fresh
+      MINDATLAS_SCHEMA_COMPATIBILITY_DATABASE_URL: postgresql://mindatlas:mindatlas@localhost:5430/mindatlas_test_pre_ga_v1_schema_compatibility
+      MINDATLAS_SCHEMA_REBASELINE_SOURCE_URL: postgresql://mindatlas:mindatlas@localhost:5430/mindatlas_test_pre_ga_v1_schema_source
       MINDATLAS_REQUIRE_SCHEMA_POSTGRES: "1"
       MINDATLAS_DEPLOYMENT_CLASS: rehearsal
       MINDATLAS_TEST_POSTGRES_DESTRUCTIVE: "1"
       APP_ENV: test
-      APP_BUILD_REVISION: ci-clean-schema
-      AI_PROVIDER_FERNET_KEY: "07v02gVBdreNrXjLJZkIMdohHtgy6aDFKBHxakHjbrQ="
+      # Bind schema evidence to the exact checked-out/PR head rather than a
+      # generic job label.  The evidence validator below checks this value.
+      APP_BUILD_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+      AI_PROVIDER_FERNET_KEY: "b98esSSrtceWc4IUOFGR-f_6I8FfnxtpjjYQZN51RCw="
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -220,10 +263,10 @@ jobs:
           set -euo pipefail
           export PGPASSWORD=mindatlas
           for database in \
-            mindatlas_test_plan3_schema_generator \
-            mindatlas_test_plan3_schema_fresh \
-            mindatlas_test_plan3_schema_compatibility \
-            mindatlas_test_plan3_schema_source; do
+            mindatlas_test_pre_ga_v1_schema_generator \
+            mindatlas_test_pre_ga_v1_schema_fresh \
+            mindatlas_test_pre_ga_v1_schema_compatibility \
+            mindatlas_test_pre_ga_v1_schema_source; do
             createdb -h localhost -p 5430 -U mindatlas "$database"
           done
       - name: Verify clean schema artifacts
@@ -256,6 +299,52 @@ jobs:
           assert roots == ["pre_ga_v1_0001"]
           PY
           alembic heads
+      - name: Install clean root into exit-verification databases
+        run: |
+          set -euo pipefail
+          for database_url in \
+            "${MINDATLAS_SCHEMA_FRESH_DATABASE_URL}" \
+            "${MINDATLAS_SCHEMA_REBASELINE_SOURCE_URL}"; do
+            env DATABASE_URL="$database_url" \
+              MINDATLAS_DEPLOYMENT_CLASS=rehearsal \
+              APP_ENV=test \
+              APP_BUILD_REVISION="$APP_BUILD_REVISION" \
+              alembic upgrade head
+          done
+      - name: Run pre-GA schema exit verification
+        run: |
+          set -euo pipefail
+          python scripts/verify_pre_ga_schema.py exit \
+            --fresh-database-url-env MINDATLAS_SCHEMA_FRESH_DATABASE_URL \
+            --rebaseline-database-url-env MINDATLAS_SCHEMA_REBASELINE_SOURCE_URL \
+            --deployment-class rehearsal \
+            --output "$RUNNER_TEMP/pre-ga-schema-exit-evidence.json"
+      - name: Validate pre-GA schema exit evidence binding
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path(os.environ["RUNNER_TEMP"]) / "pre-ga-schema-exit-evidence.json"
+          if not path.is_file():
+              raise SystemExit("pre-GA schema exit evidence is missing")
+          payload = json.loads(path.read_text(encoding="utf-8"))
+          assert payload["schemaRevision"] == "pre_ga_v1_0001"
+          assert payload["deploymentClass"] == "rehearsal"
+          assert payload["buildRevision"] == os.environ["APP_BUILD_REVISION"]
+          assert payload["archiveVerified"] is True
+          assert payload["logicalEquivalenceVerified"] is True
+          print("pre-GA schema exit evidence: OK")
+          PY
+      - name: Upload sanitized pre-GA schema evidence
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pre-ga-schema-exit-evidence
+          path: ${{ runner.temp }}/pre-ga-schema-exit-evidence.json
+          if-no-files-found: error
       - name: Run release-critical schema suites
         run: |
           set -euo pipefail
@@ -279,23 +368,24 @@ jobs:
         env:
           POSTGRES_USER: mindatlas
           POSTGRES_PASSWORD: mindatlas
-          POSTGRES_DB: mindatlas_test_plan08_readiness_ci
+          POSTGRES_DB: mindatlas_test_pre_ga_v1_readiness_ci
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U mindatlas -d mindatlas_test_plan08_readiness_ci"
+          --health-cmd "pg_isready -U mindatlas -d mindatlas_test_pre_ga_v1_readiness_ci"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 10
     env:
       # Disposable CI database only — never production credentials.
-      DATABASE_URL: postgresql://mindatlas:mindatlas@localhost:5432/mindatlas_test_plan08_readiness_ci
-      MINDATLAS_TEST_POSTGRES_URL: postgresql://mindatlas:mindatlas@localhost:5432/mindatlas_test_plan08_readiness_ci
+      DATABASE_URL: postgresql://mindatlas:mindatlas@localhost:5432/mindatlas_test_pre_ga_v1_readiness_ci
+      MINDATLAS_TEST_POSTGRES_URL: postgresql://mindatlas:mindatlas@localhost:5432/mindatlas_test_pre_ga_v1_readiness_ci
       MINDATLAS_REQUIRE_POSTGRES: "1"
       MINDATLAS_TEST_POSTGRES_DESTRUCTIVE: "1"
-      AI_PROVIDER_FERNET_KEY: "07v02gVBdreNrXjLJZkIMdohHtgy6aDFKBHxakHjbrQ="
+      AI_PROVIDER_FERNET_KEY: "b98esSSrtceWc4IUOFGR-f_6I8FfnxtpjjYQZN51RCw="
       APP_ENV: test
       APP_BUILD_REVISION: "ci-assistant-readiness"
+      MINDATLAS_DEPLOYMENT_CLASS: rehearsal
       ASSISTANT_NEW_RUNS_ENABLED: "true"
       ASSISTANT_MAIN_AGENT_WRITE_MODE: "off"
     steps:
@@ -391,11 +481,12 @@ jobs:
         working-directory: backend
     env:
       APP_ENV: test
-      APP_BUILD_REVISION: "ci-main-agent-bootstrap-smoke"
+      APP_BUILD_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+      MINDATLAS_DEPLOYMENT_CLASS: rehearsal
       ASSISTANT_NEW_RUNS_ENABLED: "true"
       ASSISTANT_MAIN_AGENT_WRITE_MODE: "off"
       # Disposable CI Fernet only — never production material.
-      AI_PROVIDER_FERNET_KEY: "07v02gVBdreNrXjLJZkIMdohHtgy6aDFKBHxakHjbrQ="
+      AI_PROVIDER_FERNET_KEY: "b98esSSrtceWc4IUOFGR-f_6I8FfnxtpjjYQZN51RCw="
     steps:
       - name: Checkout
         uses: actions/checkout@v5

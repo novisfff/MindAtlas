@@ -50,7 +50,7 @@ def _safe_payload() -> dict[str, Any]:
         "checkoutCommitSha": "0123456789abcdef0123456789abcdef01234567",
         "pullRequestHeadSha": "89abcdef0123456789abcdef0123456789abcdef",
         "buildRevision": "plan2-smoke-deadbeef",
-        "alembicHead": "b6e2d4f8a901",
+        "alembicHead": "pre_ga_v1_0001",
         "seedManifestDigest": "3ba69223e9c1a3ab1783c8a549a1b7cf56410f36f60a7fb67ba1f4fc84275237",
         "healthStatus": "ok",
         "readinessTransitions": [
@@ -494,10 +494,10 @@ def test_compose_runner_observes_safe_database_scalars() -> None:
     )
     with patch("scripts.smoke_main_agent_bootstrap.subprocess.run") as mock_run:
         mock_run.side_effect = [
-            MagicMock(returncode=0, stdout="b6e2d4f8a901\n", stderr=""),
+            MagicMock(returncode=0, stdout="pre_ga_v1_0001\n", stderr=""),
             MagicMock(returncode=0, stdout="1\n", stderr=""),
         ]
-        assert runner.observed_alembic_head() == "b6e2d4f8a901"
+        assert runner.observed_alembic_head() == "pre_ga_v1_0001"
         assert (
             runner.observed_conversation_run_count(
                 "11111111-1111-1111-1111-111111111111"
@@ -522,7 +522,7 @@ def test_compose_runner_rejects_invalid_database_scalar() -> None:
     with patch("scripts.smoke_main_agent_bootstrap.subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(
             returncode=0,
-            stdout="b6e2d4f8a901\nunexpected-second-row\n",
+            stdout="pre_ga_v1_0001\nunexpected-second-row\n",
             stderr="",
         )
         with pytest.raises(SmokeFailure, match="invalid scalar"):
@@ -531,13 +531,13 @@ def test_compose_runner_rejects_invalid_database_scalar() -> None:
 
 def test_collect_database_evidence_requires_expected_observations() -> None:
     compose = MagicMock()
-    compose.observed_alembic_head.return_value = "b6e2d4f8a901"
+    compose.observed_alembic_head.return_value = "pre_ga_v1_0001"
     compose.observed_conversation_run_count.return_value = 1
 
     assert collect_database_evidence(
         compose,
         conversation_id="11111111-1111-1111-1111-111111111111",
-    ) == ("b6e2d4f8a901", 1)
+    ) == ("pre_ga_v1_0001", 1)
     compose.observed_alembic_head.assert_called_once_with()
     compose.observed_conversation_run_count.assert_called_once_with(
         "11111111-1111-1111-1111-111111111111"
@@ -548,8 +548,8 @@ def test_collect_database_evidence_requires_expected_observations() -> None:
     ("alembic_head", "chat_run_count", "match"),
     [
         ("wrong-head", 1, "alembic head"),
-        ("b6e2d4f8a901", 0, "chat run count"),
-        ("b6e2d4f8a901", 2, "chat run count"),
+        ("pre_ga_v1_0001", 0, "chat run count"),
+        ("pre_ga_v1_0001", 2, "chat run count"),
     ],
 )
 def test_collect_database_evidence_fails_closed_on_invalid_values(

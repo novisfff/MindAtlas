@@ -10,7 +10,6 @@ import os
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Iterator
 
@@ -23,11 +22,14 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from tests._bootstrap import bootstrap_backend_imports, reset_caches
 from tests.postgres_destructive_guard import reset_disposable_public_schema
+from tests.schema_baseline_support import upgrade_clean_root_checked
 
 bootstrap_backend_imports()
 reset_caches()
 
-PLAN2_HEAD = "b6e2d4f8a901"
+from app.schema.contracts import CLEAN_ROOT_REVISION  # noqa: E402
+
+CLEAN_SCHEMA_HEAD = CLEAN_ROOT_REVISION
 BUILD = "test-build-health-ready-pg-task10"
 PASSWORD = "correct horse battery"
 
@@ -55,9 +57,6 @@ pytestmark = pytest.mark.skipif(
     ),
 )
 
-_BACKEND_DIR = Path(__file__).resolve().parents[1]
-
-
 def _as_sqlalchemy_url(url: str) -> str:
     if url.startswith("postgresql://") and "+psycopg2" not in url:
         return url.replace("postgresql://", "postgresql+psycopg2://", 1)
@@ -69,7 +68,7 @@ def _configure_database_env(url: str) -> None:
     import json
 
     os.environ["DATABASE_URL"] = url
-    os.environ.setdefault("MINDATLAS_PLAN10_B2_TEST_OVERRIDE", "1")
+    os.environ["MINDATLAS_DEPLOYMENT_CLASS"] = "rehearsal"
     os.environ.setdefault("APP_ENV", "test")
     os.environ["APP_BUILD_REVISION"] = BUILD
     os.environ["ASSISTANT_NEW_RUNS_ENABLED"] = "true"
@@ -90,15 +89,6 @@ def _configure_database_env(url: str) -> None:
         pass
 
 
-def _alembic_env() -> dict[str, str]:
-    env = os.environ.copy()
-    env["DATABASE_URL"] = _POSTGRES_URL
-    env["MINDATLAS_PLAN10_B2_TEST_OVERRIDE"] = "1"
-    env.setdefault("APP_ENV", "test")
-    env["APP_BUILD_REVISION"] = BUILD
-    return env
-
-
 @contextmanager
 def _engine() -> Iterator[Engine]:
     assert _POSTGRES_URL
@@ -116,23 +106,13 @@ def _drop_public_schema(engine: Engine) -> None:
     reset_disposable_public_schema(engine)
 
 
-def _upgrade_to_plan2_head() -> None:
-    import subprocess
-    import sys
-
-    result = subprocess.run(
-        [sys.executable, "-m", "alembic", "upgrade", PLAN2_HEAD],
-        cwd=str(_BACKEND_DIR),
-        env=_alembic_env(),
-        capture_output=True,
-        text=True,
-        check=False,
+def _upgrade_to_clean_root() -> None:
+    upgrade_clean_root_checked(
+        _POSTGRES_URL,
+        deployment_class="rehearsal",
+        app_env="test",
+        build_revision=BUILD,
     )
-    if result.returncode != 0:
-        raise AssertionError(
-            f"alembic upgrade {PLAN2_HEAD} failed:\n"
-            f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-        )
 
 
 def _make_key_ring():
@@ -169,15 +149,13 @@ class _PostgresRuntime:
         return response.status_code, reasons
 
     def reason_codes(self) -> tuple[str, ...]:
-        from app.assistant.runtime.readiness import (
-            AssistantReadinessService,
-            Plan2AlembicHeadCompatibility,
-        )
+        from app.assistant.runtime.readiness import AssistantReadinessService
+        from app.schema.compatibility import runtime_schema_compatibility
 
         snap = AssistantReadinessService(
             self.db,
             settings=self._settings,
-            schema_compatibility=Plan2AlembicHeadCompatibility(),
+            schema_compatibility=runtime_schema_compatibility(),
             key_ring=self.key_ring,
         ).evaluate()
         return snap.reason_codes
@@ -305,7 +283,7 @@ def postgres_runtime():
 
     with _engine() as engine:
         _drop_public_schema(engine)
-        _upgrade_to_plan2_head()
+        _upgrade_to_clean_root()
         SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
         db = SessionLocal()
         try:
@@ -320,8 +298,8 @@ def postgres_runtime():
 
             app.dependency_overrides[get_db] = _override_db
 
-            # Production public_ready uses Plan2AlembicHeadCompatibility against
-            # the live alembic_version row (upgraded to PLAN2_HEAD above).
+            # Production public_ready uses the family-bound compatibility port
+            # against the live clean-root marker and revision.
             _public = public_router()
             _public.add_api_route("/ready", production_public_ready, methods=["GET"])
             app.include_router(_public)

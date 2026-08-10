@@ -49,7 +49,7 @@ def temporary_postgres_databases(
     parsed = make_url(base_url)
     token = uuid.uuid4().hex[:10]
     database_names = tuple(
-        f"mindatlas_test_plan08_equiv_{token}_{label}" for label in labels
+        f"mindatlas_test_pre_ga_v1_equiv_{token}_{label}" for label in labels
     )
     if len(set(database_names)) != len(database_names) or any(
         len(name) > 63 for name in database_names
@@ -188,3 +188,57 @@ def run_staged_alembic(
         text=True,
         check=False,
     )
+
+
+def upgrade_clean_root(
+    database_url: str,
+    *,
+    deployment_class: str = "rehearsal",
+    app_env: str = "test",
+    build_revision: str = "test-clean-root",
+) -> subprocess.CompletedProcess[str]:
+    """Upgrade a disposable PostgreSQL database through the live clean root.
+
+    Release-critical PostgreSQL fixtures must start from an empty database and
+    install the configured root directly.  Keeping this command in one helper
+    prevents individual suites from reintroducing archived lineage revisions
+    or the retired Plan 10 override.
+    """
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "DATABASE_URL": database_url,
+            "MINDATLAS_DEPLOYMENT_CLASS": deployment_class,
+            "APP_ENV": app_env,
+            "APP_BUILD_REVISION": build_revision,
+        }
+    )
+    environment.pop("MINDATLAS_PLAN10_B2_TEST_OVERRIDE", None)
+    return subprocess.run(
+        [sys.executable, "-m", "alembic", "upgrade", "head"],
+        cwd=BACKEND_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def upgrade_clean_root_checked(
+    database_url: str,
+    *,
+    deployment_class: str = "rehearsal",
+    app_env: str = "test",
+    build_revision: str = "test-clean-root",
+) -> None:
+    result = upgrade_clean_root(
+        database_url,
+        deployment_class=deployment_class,
+        app_env=app_env,
+        build_revision=build_revision,
+    )
+    if result.returncode != 0:
+        raise AssertionError(
+            "alembic upgrade head failed for clean root:\n"
+            f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )

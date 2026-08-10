@@ -33,6 +33,8 @@ _BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(_BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(_BACKEND_ROOT))
 
+from app.schema.contracts import CLEAN_ROOT_REVISION  # noqa: E402
+
 # ---------------------------------------------------------------------------
 # Evidence contract (exact allowlist — do not extend without plan change)
 # ---------------------------------------------------------------------------
@@ -68,7 +70,7 @@ SUITES: tuple[tuple[str, list[str]], ...] = (
     ("route_inventory", ["tests/test_route_auth_inventory.py", "tests/test_operator_cli_boundary.py"]),
 )
 
-TASK2_HEAD = "9f3c1a7e2b40"
+CLEAN_SCHEMA_REVISION = CLEAN_ROOT_REVISION
 _SCHEMA_VERSION = "1"
 
 # Disposable synthetic material for the in-process rehearsal only. Never written
@@ -368,39 +370,19 @@ def probe_alembic_head() -> str:
         check=False,
     )
     text = (completed.stdout or "") + "\n" + (completed.stderr or "")
-    match = re.search(r"\b([0-9a-f]{12})\b", text)
-    if match:
-        head = match.group(1)
-    else:
+    revision_pattern = r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}"
+    match = re.search(rf"(?m)^\s*Rev:\s*({revision_pattern})\b", text)
+    head = match.group(1) if match is not None else ""
+    if not head:
         for line in text.splitlines():
-            line = line.strip()
-            if re.fullmatch(r"[0-9a-f]{12}(\s.*)?", line):
-                head = line.split()[0]
+            candidate = line.strip().split()[0] if line.strip() else ""
+            if re.fullmatch(revision_pattern, candidate):
+                head = candidate
                 break
-        else:
-            head = ""
-    if head != TASK2_HEAD:
-        # Confirm via plain ``alembic heads`` before failing closed.
-        heads_plain = subprocess.run(
-            [sys.executable, "-m", "alembic", "heads"],
-            cwd=str(_BACKEND_ROOT),
-            capture_output=True,
-            text=True,
-            check=False,
+    if head != CLEAN_SCHEMA_REVISION:
+        raise RuntimeError(
+            f"expected alembic head {CLEAN_SCHEMA_REVISION}, got {head!r}"
         )
-        plain = (heads_plain.stdout or "") + (heads_plain.stderr or "")
-        plain_match = re.search(r"\b([0-9a-f]{12})\b", plain)
-        plain_head = plain_match.group(1) if plain_match else ""
-        if plain_head == TASK2_HEAD:
-            head = plain_head
-        elif TASK2_HEAD in plain and not plain_head:
-            head = TASK2_HEAD
-        else:
-            raise RuntimeError(
-                f"expected alembic head {TASK2_HEAD}, probed {head or plain_head!r}"
-            )
-    if head != TASK2_HEAD:
-        raise RuntimeError(f"expected alembic head {TASK2_HEAD}, got {head!r}")
     return head
 
 
@@ -425,6 +407,12 @@ def probe_postgres_version(url: str) -> str:
 
 
 def probe_build_revision() -> str:
+    configured = os.environ.get("APP_BUILD_REVISION", "").strip()
+    if configured and configured not in {"development", "unknown"}:
+        # CI supplies the PR/check-out identity explicitly.  Prefer it over
+        # the Actions merge checkout SHA so evidence can be bound to the
+        # reviewed head; local runs still fall back to git below.
+        return configured
     completed = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=str(_BACKEND_ROOT),
@@ -836,6 +824,7 @@ def main(argv: list[str] | None = None) -> int:
     env = dict(os.environ)
     env["MINDATLAS_TEST_POSTGRES_URL"] = pg_url
     env["MINDATLAS_REQUIRE_POSTGRES"] = "1"
+    env["MINDATLAS_DEPLOYMENT_CLASS"] = "rehearsal"
     # Ensure backend imports resolve inside subprocesses the same way.
     env.setdefault("PYTHONPATH", str(_BACKEND_ROOT))
     if str(_BACKEND_ROOT) not in env.get("PYTHONPATH", ""):
@@ -844,9 +833,9 @@ def main(argv: list[str] | None = None) -> int:
     print("==> probing build revision / alembic head / postgres")
     build_revision = probe_build_revision()
     alembic_head = probe_alembic_head()
-    if alembic_head != TASK2_HEAD:
+    if alembic_head != CLEAN_SCHEMA_REVISION:
         print(
-            f"alembic head mismatch: expected {TASK2_HEAD}, got {alembic_head!r}",
+            f"alembic head mismatch: expected {CLEAN_SCHEMA_REVISION}, got {alembic_head!r}",
             file=sys.stderr,
         )
         return 1

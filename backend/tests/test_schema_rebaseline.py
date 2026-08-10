@@ -148,7 +148,7 @@ def test_report_reservation_failure_happens_before_database_connection(
 
     monkeypatch.setattr(rebaseline_script, "create_engine", unexpected_create_engine)
     monkeypatch.setenv("MINDATLAS_DEPLOYMENT_CLASS", "development")
-    monkeypatch.setenv("MINDATLAS_BUILD_REVISION", "build-1")
+    monkeypatch.setenv("APP_BUILD_REVISION", "build-1")
     monkeypatch.setenv("DATABASE_URL", "postgresql://user:password@host/db")
 
     result = rebaseline_script.main(
@@ -181,7 +181,7 @@ def test_database_setup_failure_is_bounded_and_does_not_leak_url(
 
     monkeypatch.setattr(rebaseline_script, "create_engine", unavailable)
     monkeypatch.setenv("MINDATLAS_DEPLOYMENT_CLASS", "development")
-    monkeypatch.setenv("MINDATLAS_BUILD_REVISION", "build-1")
+    monkeypatch.setenv("APP_BUILD_REVISION", "build-1")
     monkeypatch.setenv("DATABASE_URL", "postgresql://user:password@host/db")
 
     result = rebaseline_script.main(
@@ -216,7 +216,7 @@ def test_main_rejects_unsafe_build_revision_before_database_connection(
 
     monkeypatch.setattr(rebaseline_script, "create_engine", unexpected_create_engine)
     monkeypatch.setenv("MINDATLAS_DEPLOYMENT_CLASS", "development")
-    monkeypatch.setenv("MINDATLAS_BUILD_REVISION", "token=opaque")
+    monkeypatch.setenv("APP_BUILD_REVISION", "token=opaque")
     monkeypatch.setenv("DATABASE_URL", "postgresql://user:password@host/db")
 
     result = rebaseline_script.main(
