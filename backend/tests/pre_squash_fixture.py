@@ -112,6 +112,27 @@ def _snapshot_mismatch_code(actual, expected) -> str:  # noqa: ANN001
                                     else:
                                         suffix = "constraint_metadata"
                                     break
+                        elif field == "columns":
+                            actual_columns = actual_item.definition.get("columns", [])
+                            expected_columns = expected_item.definition.get("columns", [])
+                            for actual_column, expected_column in zip(
+                                actual_columns, expected_columns
+                            ):
+                                if actual_column != expected_column:
+                                    suffix = "column_mismatch"
+                                    for column_field in (
+                                        "name",
+                                        "formattedType",
+                                        "defaultExpression",
+                                        "nullable",
+                                        "collation",
+                                    ):
+                                        if actual_column.get(column_field) != expected_column.get(
+                                            column_field
+                                        ):
+                                            suffix = f"column_{column_field}"
+                                            break
+                                    break
                         break
             return f"fixture_snapshot_{kind}_{name}_{suffix}_mismatch"[:96]
     return "fixture_snapshot_fingerprint_mismatch"
