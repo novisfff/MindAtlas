@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 from datetime import timedelta
@@ -245,6 +246,21 @@ def _assert_presquash_unchanged(engine, *, expected_head: str) -> None:  # noqa:
         ).first()
     if head != expected_head or legacy_table is None or identity_table is not None:
         raise RuntimeError("exit_proof_rebaseline_mutated_rejected_source")
+
+
+_SAFE_STAGE_CODE = re.compile(r"[a-z0-9_]{1,96}\Z")
+
+
+def _run_stage(label: str, callback):  # noqa: ANN001, ANN202
+    """Run one proof stage and retain only a bounded diagnostic code."""
+    try:
+        return callback()
+    except Exception as exc:  # noqa: BLE001
+        raw_code = getattr(exc, "safe_code", None) or str(exc)
+        code = raw_code if isinstance(raw_code, str) else "unexpected"
+        if _SAFE_STAGE_CODE.fullmatch(code) is None:
+            code = "unexpected"
+        raise RuntimeError(f"exit_proof_{label}_{code}") from None
 
 
 def _rebaseline_matrix(url: str) -> dict[str, object]:
@@ -504,11 +520,17 @@ def _build_revision_digest(payload: dict[str, object]) -> str:
 
 def build_proof(*, fresh_url: str, downgrade_url: str, rebaseline_url: str, build_revision: str) -> dict[str, object]:
     checks = [
-        _fresh_upgrade(fresh_url, build=build_revision),
-        _downgrade_guard(downgrade_url),
-        _rebaseline_matrix(rebaseline_url),
+        _run_stage(
+            "fresh_upgrade",
+            lambda: _fresh_upgrade(fresh_url, build=build_revision),
+        ),
+        _run_stage("downgrade_guard", lambda: _downgrade_guard(downgrade_url)),
+        _run_stage("rebaseline_matrix", lambda: _rebaseline_matrix(rebaseline_url)),
     ]
-    wrong_family, worker_drift = _compatibility_proofs(downgrade_url)
+    wrong_family, worker_drift = _run_stage(
+        "compatibility",
+        lambda: _compatibility_proofs(downgrade_url),
+    )
     checks.extend((wrong_family, worker_drift))
     source = (BACKEND_ROOT.parent / "deploy" / "migrate.sh").read_text("utf-8")
     checks.append(
