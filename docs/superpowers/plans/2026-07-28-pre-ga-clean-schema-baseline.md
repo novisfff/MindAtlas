@@ -3469,6 +3469,12 @@ integration remains enforced by the dedicated CI jobs with
 - [x] CI run `31351421076` executed the PostgreSQL exit and sanitized-evidence
   gates successfully. This checkout still has no running Docker daemon, so the
   local replay remains unavailable without changing the environment.
+- [x] CI run `31376694263` (head `8ae08b4`) completed all six workflow jobs
+  successfully: backend `3298 passed, 305 skipped`, frontend build/tests,
+  operator/readiness/smoke gates, and the PostgreSQL 15 schema job. The schema
+  job's concrete proof matrix, digest-bound exit evidence, and all 13
+  release-critical PostgreSQL suites passed; no claim here depends on a local
+  Docker replay.
 
 ## 复审补充完成记录 (2026-08-10)
 
