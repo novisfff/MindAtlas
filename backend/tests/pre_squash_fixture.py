@@ -347,10 +347,43 @@ def _live_constraint_definitions(snapshot) -> dict[str, dict[str, str]]:  # noqa
     return result
 
 
+def _live_index_definitions(snapshot) -> dict[str, dict[str, str]]:  # noqa: ANN001
+    """Compile live ORM indexes so partial predicates round-trip canonically."""
+    from sqlalchemy.schema import CreateIndex
+    from sqlalchemy.dialects import postgresql
+
+    from app.database import Base
+    from app.model_registry import load_all_live_models
+
+    load_all_live_models()
+    snapshot_tables = {
+        item.key.name
+        for item in snapshot.source_document.objects
+        if item.key.kind == "table"
+    }
+    result: dict[str, dict[str, str]] = {}
+    for table in Base.metadata.tables.values():
+        if table.name not in snapshot_tables:
+            continue
+        definitions: dict[str, str] = {}
+        for index in table.indexes:
+            if not isinstance(index.name, str) or not index.name:
+                continue
+            definitions[index.name] = str(
+                CreateIndex(index).compile(
+                    dialect=postgresql.dialect(),
+                    compile_kwargs={"literal_binds": True},
+                )
+            )
+        result[table.name] = definitions
+    return result
+
+
 def _install_source_snapshot(
     connection,
     snapshot,
     live_constraints: Mapping[str, Mapping[str, str]],
+    live_indexes: Mapping[str, Mapping[str, str]],
 ) -> None:  # noqa: ANN001
     """Materialize the committed pre-squash catalog, including raw ordinals."""
     # The clean root intentionally uses the version-2 logical contract and may
@@ -475,7 +508,9 @@ def _install_source_snapshot(
             if not isinstance(index, Mapping):
                 raise ValueError("fixture index definition is invalid")
             name = index.get("name")
-            definition = index.get("definition")
+            definition = (live_indexes.get(item.key.name) or {}).get(
+                name, index.get("definition")
+            )
             if not isinstance(name, str) or not isinstance(definition, str):
                 raise ValueError("fixture index definition is invalid")
             # PostgreSQL creates these indexes while adding PK/UNIQUE
@@ -560,6 +595,7 @@ def install_pre_squash_fixture(
     snapshot = load_pre_squash_snapshot()
     try:
         live_constraints = _live_constraint_definitions(snapshot)
+        live_indexes = _live_index_definitions(snapshot)
     except Exception:
         raise PreSquashFixtureError("fixture_live_metadata_unavailable") from None
     try:
@@ -573,7 +609,12 @@ def install_pre_squash_fixture(
             raise PreSquashFixtureError("fixture_database_reset_failed") from None
         try:
             with engine.begin() as connection:
-                _install_source_snapshot(connection, snapshot, live_constraints)
+                _install_source_snapshot(
+                    connection,
+                    snapshot,
+                    live_constraints,
+                    live_indexes,
+                )
                 database_name = connection.scalar(text("SELECT current_database()"))
                 if not isinstance(database_name, str):
                     raise ValueError("fixture database identity is unavailable")
