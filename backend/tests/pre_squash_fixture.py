@@ -57,6 +57,22 @@ def _postgres_error_suffix(exc: Exception) -> str:
     return normalized[:32] or "error"
 
 
+def _snapshot_mismatch_code(actual, expected) -> str:  # noqa: ANN001
+    """Classify a fixture mismatch without emitting catalog definitions."""
+    actual_keys = tuple(item.key for item in actual.objects)
+    expected_keys = tuple(item.key for item in expected.objects)
+    if actual_keys != expected_keys:
+        return "fixture_snapshot_keys_mismatch"
+    for actual_item, expected_item in zip(actual.objects, expected.objects):
+        if canonical_json_bytes(actual_item.definition) != canonical_json_bytes(
+            expected_item.definition
+        ):
+            kind = re.sub(r"[^a-z0-9]+", "_", actual_item.key.kind.lower())
+            name = re.sub(r"[^a-z0-9]+", "_", actual_item.key.name.lower())
+            return f"fixture_snapshot_{kind}_{name}_mismatch"[:96]
+    return "fixture_snapshot_fingerprint_mismatch"
+
+
 def _quote(identifier: str) -> str:
     if not isinstance(identifier, str) or not identifier:
         raise ValueError("fixture identifier is invalid")
@@ -306,7 +322,9 @@ def install_pre_squash_fixture(
             or canonical_json_bytes(actual.to_payload())
             != canonical_json_bytes(snapshot.source_document.to_payload())
         ):
-            raise PreSquashFixtureError("fixture_snapshot_mismatch")
+            raise PreSquashFixtureError(
+                _snapshot_mismatch_code(actual, snapshot.source_document)
+            )
     finally:
         engine.dispose()
 
