@@ -49,6 +49,14 @@ from tests.pre_squash_fixture import install_pre_squash_fixture  # noqa: E402
 from tests.schema_baseline_support import upgrade_clean_root_checked  # noqa: E402
 
 
+class ExitProofFailure(RuntimeError):
+    """Bounded proof-stage failure safe for CI output."""
+
+    def __init__(self, safe_code: str) -> None:
+        super().__init__(safe_code)
+        self.safe_code = safe_code
+
+
 def _sqlalchemy_url(url: str) -> str:
     if url.startswith("postgresql://") and "+psycopg2" not in url:
         return url.replace("postgresql://", "postgresql+psycopg2://", 1)
@@ -260,7 +268,7 @@ def _run_stage(label: str, callback):  # noqa: ANN001, ANN202
         code = raw_code if isinstance(raw_code, str) else "unexpected"
         if _SAFE_STAGE_CODE.fullmatch(code) is None:
             code = "unexpected"
-        raise RuntimeError(f"exit_proof_{label}_{code}") from None
+        raise ExitProofFailure(f"exit_proof_{label}_{code}") from None
 
 
 def _rebaseline_matrix(url: str) -> dict[str, object]:
