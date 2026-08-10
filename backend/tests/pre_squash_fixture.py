@@ -76,6 +76,29 @@ def _snapshot_mismatch_code(actual, expected) -> str:  # noqa: ANN001
                         field
                     ):
                         suffix = field
+                        if field == "constraints":
+                            actual_constraints = actual_item.definition.get(
+                                "constraints", []
+                            )
+                            expected_constraints = expected_item.definition.get(
+                                "constraints", []
+                            )
+                            for actual_constraint, expected_constraint in zip(
+                                actual_constraints, expected_constraints
+                            ):
+                                if actual_constraint != expected_constraint:
+                                    name = re.sub(
+                                        r"[^a-z0-9]+",
+                                        "_",
+                                        str(actual_constraint.get("name", "unknown")),
+                                    )
+                                    if actual_constraint.get(
+                                        "definition"
+                                    ) != expected_constraint.get("definition"):
+                                        suffix = f"constraint_{name}_definition"
+                                    else:
+                                        suffix = f"constraint_{name}_metadata"
+                                    break
                         break
             return f"fixture_snapshot_{kind}_{name}_{suffix}_mismatch"[:96]
     return "fixture_snapshot_fingerprint_mismatch"
