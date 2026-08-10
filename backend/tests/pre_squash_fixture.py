@@ -150,6 +150,8 @@ def render_table_ddl(
     schema: str,
     table_name: str,
     definition: Mapping[str, Any],
+    *,
+    constraint_definitions: Mapping[str, str] | None = None,
 ) -> str:
     """Render the table/column portion of one captured catalog object."""
     columns = definition.get("columns")
@@ -181,7 +183,7 @@ def render_table_ddl(
         rendered_columns.append(" ".join(parts))
     rendered_constraints = [
         f"CONSTRAINT {_quote(_constraint_name(constraint))} "
-        f"{_constraint_definition(constraint)}"
+        f"{(constraint_definitions or {}).get(_constraint_name(constraint), _constraint_definition(constraint))}"
         for constraint in constraints
         if isinstance(constraint, Mapping)
         and constraint.get("type") != "f"
@@ -193,8 +195,16 @@ def render_table_ddl(
     )
 
 
-def _render_constraint(schema: str, table_name: str, constraint: Mapping[str, Any]) -> str:
-    definition = _constraint_definition(constraint)
+def _render_constraint(
+    schema: str,
+    table_name: str,
+    constraint: Mapping[str, Any],
+    *,
+    constraint_definitions: Mapping[str, str] | None = None,
+) -> str:
+    definition = (constraint_definitions or {}).get(
+        _constraint_name(constraint), _constraint_definition(constraint)
+    )
     return (
         f"ALTER TABLE {_quote(schema)}.{_quote(table_name)} "
         f"ADD CONSTRAINT {_quote(_constraint_name(constraint))} {definition}"
@@ -216,7 +226,64 @@ def _drop_identity_controls(connection) -> None:  # noqa: ANN001
     )
 
 
-def _install_source_snapshot(connection, snapshot) -> None:  # noqa: ANN001
+def _live_constraint_definitions(snapshot) -> dict[str, dict[str, str]]:  # noqa: ANN001
+    """Render current ORM constraints so PostgreSQL deparses them canonically."""
+    from sqlalchemy import CheckConstraint, ForeignKeyConstraint, PrimaryKeyConstraint
+    from sqlalchemy import UniqueConstraint
+
+    from app.database import Base
+    from app.model_registry import load_all_live_models
+
+    load_all_live_models()
+    snapshot_tables = {
+        item.key.name
+        for item in snapshot.source_document.objects
+        if item.key.kind == "table"
+    }
+    result: dict[str, dict[str, str]] = {}
+    for table in Base.metadata.tables.values():
+        if table.name not in snapshot_tables:
+            continue
+        definitions: dict[str, str] = {}
+        for constraint in table.constraints:
+            name = constraint.name
+            if not isinstance(name, str) or not name:
+                continue
+            if isinstance(constraint, CheckConstraint):
+                definitions[name] = f"CHECK ({constraint.sqltext})"
+            elif isinstance(constraint, PrimaryKeyConstraint):
+                columns = ", ".join(_quote(column.name) for column in constraint.columns)
+                definitions[name] = f"PRIMARY KEY ({columns})"
+            elif isinstance(constraint, UniqueConstraint):
+                columns = ", ".join(_quote(column.name) for column in constraint.columns)
+                definitions[name] = f"UNIQUE ({columns})"
+            elif isinstance(constraint, ForeignKeyConstraint):
+                local_columns = ", ".join(
+                    _quote(element.parent.name) for element in constraint.elements
+                )
+                remote_columns = ", ".join(
+                    _quote(element.column.name) for element in constraint.elements
+                )
+                remote_table = constraint.elements[0].column.table
+                definition = (
+                    f"FOREIGN KEY ({local_columns}) REFERENCES "
+                    f"{_quote(remote_table.schema or 'public')}.{_quote(remote_table.name)}"
+                    f" ({remote_columns})"
+                )
+                if constraint.ondelete:
+                    definition += f" ON DELETE {constraint.ondelete.upper()}"
+                if constraint.onupdate:
+                    definition += f" ON UPDATE {constraint.onupdate.upper()}"
+                definitions[name] = definition
+        result[table.name] = definitions
+    return result
+
+
+def _install_source_snapshot(
+    connection,
+    snapshot,
+    live_constraints: Mapping[str, Mapping[str, str]],
+) -> None:  # noqa: ANN001
     """Materialize the committed pre-squash catalog, including raw ordinals."""
     # The clean root intentionally uses the version-2 logical contract and may
     # order columns differently from the historical physical catalog.  Build
@@ -277,7 +344,12 @@ def _install_source_snapshot(connection, snapshot) -> None:  # noqa: ANN001
         try:
             _exec_literal(
                 connection,
-                render_table_ddl(item.key.schema, item.key.name, item.definition)
+                render_table_ddl(
+                    item.key.schema,
+                    item.key.name,
+                    item.definition,
+                    constraint_definitions=live_constraints.get(item.key.name),
+                )
             )
         except Exception as exc:
             raise PreSquashFixtureError(
@@ -294,7 +366,12 @@ def _install_source_snapshot(connection, snapshot) -> None:  # noqa: ANN001
             try:
                 _exec_literal(
                     connection,
-                    _render_constraint(item.key.schema, item.key.name, constraint)
+                    _render_constraint(
+                        item.key.schema,
+                        item.key.name,
+                        constraint,
+                        constraint_definitions=live_constraints.get(item.key.name),
+                    )
                 )
             except Exception as exc:
                 raise PreSquashFixtureError(
@@ -413,13 +490,17 @@ def install_pre_squash_fixture(
     """Install and validate the committed pre-squash source fixture."""
     snapshot = load_pre_squash_snapshot()
     try:
+        live_constraints = _live_constraint_definitions(snapshot)
+    except Exception:
+        raise PreSquashFixtureError("fixture_live_metadata_unavailable") from None
+    try:
         engine = create_engine(_sqlalchemy_url(database_url), future=True)
     except Exception:
         raise PreSquashFixtureError("fixture_database_unavailable") from None
     try:
         try:
             with engine.begin() as connection:
-                _install_source_snapshot(connection, snapshot)
+                _install_source_snapshot(connection, snapshot, live_constraints)
                 database_name = connection.scalar(text("SELECT current_database()"))
                 if not isinstance(database_name, str):
                     raise ValueError("fixture database identity is unavailable")
