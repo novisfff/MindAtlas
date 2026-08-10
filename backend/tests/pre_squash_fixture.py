@@ -139,6 +139,28 @@ def _snapshot_mismatch_code(actual, expected) -> str:  # noqa: ANN001
                                                 suffix = f"column_{column_field}"
                                                 break
                                     break
+                        elif field == "indexes":
+                            actual_indexes = actual_item.definition.get("indexes", [])
+                            expected_indexes = expected_item.definition.get("indexes", [])
+                            for actual_index, expected_index in zip(
+                                actual_indexes, expected_indexes
+                            ):
+                                if actual_index != expected_index:
+                                    if actual_index.get("name") != expected_index.get(
+                                        "name"
+                                    ):
+                                        suffix = "index_name"
+                                    elif actual_index.get("definition") != expected_index.get(
+                                        "definition"
+                                    ):
+                                        suffix = "index_definition"
+                                    elif actual_index.get("keyAttributeNumbers") != expected_index.get(
+                                        "keyAttributeNumbers"
+                                    ):
+                                        suffix = "index_key_attributes"
+                                    else:
+                                        suffix = "index_metadata"
+                                    break
                         break
             return f"fixture_snapshot_{kind}_{name}_{suffix}_mismatch"[:96]
     return "fixture_snapshot_fingerprint_mismatch"
