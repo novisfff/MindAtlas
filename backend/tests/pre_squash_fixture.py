@@ -69,7 +69,15 @@ def _snapshot_mismatch_code(actual, expected) -> str:  # noqa: ANN001
         ):
             kind = re.sub(r"[^a-z0-9]+", "_", actual_item.key.kind.lower())
             name = re.sub(r"[^a-z0-9]+", "_", actual_item.key.name.lower())
-            return f"fixture_snapshot_{kind}_{name}_mismatch"[:96]
+            suffix = "definition"
+            if kind == "table":
+                for field in ("columns", "constraints", "indexes"):
+                    if actual_item.definition.get(field) != expected_item.definition.get(
+                        field
+                    ):
+                        suffix = field
+                        break
+            return f"fixture_snapshot_{kind}_{name}_{suffix}_mismatch"[:96]
     return "fixture_snapshot_fingerprint_mismatch"
 
 
