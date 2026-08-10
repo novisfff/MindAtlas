@@ -95,7 +95,27 @@ def _snapshot_mismatch_code(actual, expected) -> str:  # noqa: ANN001
                                     if actual_constraint.get(
                                         "definition"
                                     ) != expected_constraint.get("definition"):
-                                        suffix = f"constraint_{name}_definition"
+                                        actual_definition = str(
+                                            actual_constraint.get("definition", "")
+                                        )
+                                        expected_definition = str(
+                                            expected_constraint.get("definition", "")
+                                        )
+                                        if re.sub(
+                                            r"\s+", "", actual_definition
+                                        ) == re.sub(
+                                            r"\s+", "", expected_definition
+                                        ):
+                                            difference = "whitespace"
+                                        elif actual_definition.count("(") != expected_definition.count(
+                                            "("
+                                        ) or actual_definition.count(")") != expected_definition.count(")"):
+                                            difference = "parentheses"
+                                        else:
+                                            difference = "expression"
+                                        suffix = (
+                                            f"constraint_{name}_definition_{difference}"
+                                        )
                                     else:
                                         suffix = f"constraint_{name}_metadata"
                                     break
