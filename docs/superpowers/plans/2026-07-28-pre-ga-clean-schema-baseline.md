@@ -3456,9 +3456,9 @@ integration remains enforced by the dedicated CI jobs with
   failed on the live `JSONB` server default. The runner now calls
   `tests._db.create_sqlite_schema`, with a regression test covering restart,
   rotation, and revocation rehearsal.
-- [ ] Local PostgreSQL exit evidence remains environment-dependent: this
-  checkout has no running Docker daemon. CI is the authoritative execution of
-  the release-critical PostgreSQL and sanitized-evidence gates.
+- [x] CI run `31351421076` executed the PostgreSQL exit and sanitized-evidence
+  gates successfully. This checkout still has no running Docker daemon, so the
+  local replay remains unavailable without changing the environment.
 
 ## Rollback Boundary
 
