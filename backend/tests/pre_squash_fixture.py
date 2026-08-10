@@ -47,6 +47,13 @@ def _postgres_error_suffix(exc: Exception) -> str:
         return code.lower()
     name = type(original).__name__ if original is not None else type(exc).__name__
     normalized = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+    message = str(original or exc).lower()
+    # TypeErrors from a DBAPI adapter are useful to distinguish (for example,
+    # percent-formatting vs. parameter-shape mistakes), while arbitrary SQL
+    # text and server diagnostics must never escape this fixture boundary.
+    message_token = re.sub(r"[^a-z0-9]+", "_", message).strip("_")
+    if message_token and len(message_token) <= 48:
+        return f"{normalized[:24]}_{message_token}"
     return normalized[:32] or "error"
 
 
