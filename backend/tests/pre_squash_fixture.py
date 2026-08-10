@@ -3,8 +3,8 @@
 The live Alembic directory intentionally contains only the clean root.  Some
 capture and rebaseline proofs still need a database that represents the
 captured pre-squash source.  This module reconstructs that source from the
-committed catalog manifest after installing the live root; it never imports,
-copies, or executes an archived migration.
+committed catalog snapshot; it never imports, copies, or executes an archived
+migration.
 """
 
 from __future__ import annotations
@@ -14,15 +14,11 @@ import re
 from typing import Any
 
 from sqlalchemy import create_engine, text
-from sqlalchemy.engine import Engine
-
 from app.schema.canonical import canonical_json_bytes, structural_fingerprint
 from app.schema.contracts import PRE_SQUASH_HEAD
-from app.schema.sql_objects import load_exclusion_manifest, load_pre_squash_snapshot
-from tests.schema_baseline_support import (
-    _sqlalchemy_url,
-    upgrade_clean_root_checked,
-)
+from app.schema.sql_objects import load_pre_squash_snapshot
+from tests.postgres_destructive_guard import reset_disposable_public_schema
+from tests.schema_baseline_support import _sqlalchemy_url
 
 
 _SUPPORTED_COLUMN_TYPE = re.compile(
@@ -120,18 +116,23 @@ def _snapshot_mismatch_code(actual, expected) -> str:  # noqa: ANN001
                             ):
                                 if actual_column != expected_column:
                                     suffix = "column_mismatch"
-                                    for column_field in (
-                                        "name",
-                                        "formattedType",
-                                        "defaultExpression",
-                                        "nullable",
-                                        "collation",
+                                    if actual_column.get("name") != expected_column.get(
+                                        "name"
                                     ):
-                                        if actual_column.get(column_field) != expected_column.get(
-                                            column_field
+                                        suffix = "column_order_mismatch"
+                                    else:
+                                        for column_field in (
+                                            "name",
+                                            "formattedType",
+                                            "defaultExpression",
+                                            "nullable",
+                                            "collation",
                                         ):
-                                            suffix = f"column_{column_field}"
-                                            break
+                                            if actual_column.get(column_field) != expected_column.get(
+                                                column_field
+                                            ):
+                                                suffix = f"column_{column_field}"
+                                                break
                                     break
                         break
             return f"fixture_snapshot_{kind}_{name}_{suffix}_mismatch"[:96]
@@ -229,21 +230,6 @@ def _render_constraint(
     return (
         f"ALTER TABLE {_quote(schema)}.{_quote(table_name)} "
         f"ADD CONSTRAINT {_quote(_constraint_name(constraint))} {definition}"
-    )
-
-
-def _drop_identity_controls(connection) -> None:  # noqa: ANN001
-    connection.execute(
-        text(
-            'DROP TRIGGER IF EXISTS "trg_mindatlas_schema_identity_guard" '
-            'ON "public"."mindatlas_schema_identity"'
-        )
-    )
-    connection.execute(
-        text('DROP FUNCTION IF EXISTS "public"."mindatlas_guard_schema_identity_mutation"()')
-    )
-    connection.execute(
-        text('DROP TABLE IF EXISTS "public"."mindatlas_schema_identity"')
     )
 
 
@@ -519,6 +505,10 @@ def install_pre_squash_fixture(
     except Exception:
         raise PreSquashFixtureError("fixture_database_unavailable") from None
     try:
+        try:
+            reset_disposable_public_schema(engine)
+        except Exception:
+            raise PreSquashFixtureError("fixture_database_reset_failed") from None
         try:
             with engine.begin() as connection:
                 _install_source_snapshot(connection, snapshot, live_constraints)
