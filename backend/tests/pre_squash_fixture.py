@@ -202,10 +202,10 @@ def _legacy_source_constraint_definition(
     definition = _constraint_definition(constraint)
     if constraint.get("type") != "c" or not definition.startswith("CHECK ("):
         return definition
-    body = definition[len("CHECK (") : -1]
+    body = definition[len("CHECK ") :]
     any_pattern = re.compile(
         r"(?P<column>[a-z_][a-z0-9_]*)::text\s*=\s*ANY\s*"
-        r"\(\s*\(?ARRAY\[(?P<values>[^\]]+)\]::text\[\]\)?\s*\)"
+        r"\(\s*ARRAY\[(?P<values>[^\]]+)\]::text\[\]\s*\)"
     )
 
     def replace_any(match: re.Match[str]) -> str:
@@ -218,7 +218,7 @@ def _legacy_source_constraint_definition(
     body = any_pattern.sub(replace_any, body)
     body = re.sub(r"\b([a-z_][a-z0-9_]*)::text\b", r"\1", body)
     body = re.sub(r"'((?:''|[^'])*)'::character varying", r"'\1'", body)
-    return f"CHECK ({body})"
+    return f"CHECK {body}"
 
 
 def _dropped_column_name(ordinal: int) -> str:
