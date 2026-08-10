@@ -374,6 +374,17 @@ git commit -m "test(schema): freeze clean logical contract"
 
 ---
 
+## Implementation Reconciliation (2026-08-10)
+
+The amendment's implementation is present in the branch history: projection,
+version-2 logical manifests, strict loaders, and the capture/check contracts
+landed in commits `a6bbfdc` and `2f60198`, and are consumed by the parent-plan
+generator/equivalence gates. The remaining PostgreSQL capture command in the
+exit gate is intentionally CI-enforced because this checkout has no running
+Docker daemon; no source implementation is left pending from this amendment.
+
+---
+
 ## Exit Gate
 
 ```bash

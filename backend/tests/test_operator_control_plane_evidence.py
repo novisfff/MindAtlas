@@ -21,6 +21,7 @@ from scripts.verify_operator_control_plane import (  # noqa: E402
     SENSITIVE_FRAGMENTS,
     finalize_evidence,
     probe_build_revision,
+    rehearse_restart_rotation_revocation,
     validate_evidence,
 )
 
@@ -153,3 +154,12 @@ def test_build_revision_can_be_bound_to_explicit_checkout_identity(
 ) -> None:
     monkeypatch.setenv("APP_BUILD_REVISION", "pr-head-sha")
     assert probe_build_revision() == "pr-head-sha"
+
+
+def test_rehearsal_uses_sqlite_compatibility_for_postgres_operator_models() -> None:
+    """The CI evidence runner must exercise its restart/rotation rehearsal."""
+    assert rehearse_restart_rotation_revocation() == {
+        "restartSessionPreserved": True,
+        "rotationSucceeded": True,
+        "previousKeySessionsRevoked": True,
+    }

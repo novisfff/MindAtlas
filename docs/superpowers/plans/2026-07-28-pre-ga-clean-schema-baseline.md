@@ -3447,6 +3447,19 @@ The local Docker daemon was unavailable during this audit pass; PostgreSQL
 integration remains enforced by the dedicated CI jobs with
 `MINDATLAS_REQUIRE_POSTGRES=1` / `MINDATLAS_REQUIRE_SCHEMA_POSTGRES=1`.
 
+## Exit-Gate Reconciliation (2026-08-10)
+
+- [x] Frontend dependencies were installed from the lockfile; Vitest passed
+  36 files / 201 tests, and `npm run build` passed.
+- [x] The first CI run exposed a real operator evidence-runner bug: its
+  SQLite rehearsal bypassed the shared PostgreSQL-to-SQLite metadata shim and
+  failed on the live `JSONB` server default. The runner now calls
+  `tests._db.create_sqlite_schema`, with a regression test covering restart,
+  rotation, and revocation rehearsal.
+- [ ] Local PostgreSQL exit evidence remains environment-dependent: this
+  checkout has no running Docker daemon. CI is the authoritative execution of
+  the release-critical PostgreSQL and sanitized-evidence gates.
+
 ## Rollback Boundary
 
 - Before the first supported pre-GA deployment, revert code and recreate disposable databases from the clean root. Do not reactivate the old archive.

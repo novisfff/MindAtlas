@@ -474,14 +474,14 @@ def rehearse_restart_rotation_revocation() -> dict[str, bool]:
     bootstrap_backend_imports()
     reset_caches()
 
-    import tests._db  # noqa: F401  — JSONB→JSON for SQLite
+    from tests._db import create_sqlite_schema
     import app.entry.models  # noqa: F401  — mapper resolution for AppSetting path
     import app.operator_auth.models  # noqa: F401
     import app.system_settings.models  # noqa: F401
     from app.common.exceptions import register_exception_handlers
     from app.common.request_context import reset_request_id, set_request_id
     from app.config import Settings, get_settings
-    from app.database import Base, get_db
+    from app.database import get_db
     from app.operator_auth.constants import SESSION_COOKIE_NAME
     from app.operator_auth.contracts import RequestSecurityContext
     from app.operator_auth.models import (
@@ -550,7 +550,12 @@ def rehearse_restart_rotation_revocation() -> dict[str, bool]:
             cursor.execute("PRAGMA foreign_keys=ON")
             cursor.close()
 
-        Base.metadata.create_all(eng, tables=_REHEARSAL_TABLES)
+        # Use the shared SQLite compatibility layer: the live operator models
+        # carry PostgreSQL JSONB defaults/checks that SQLite cannot parse
+        # verbatim (for example ``'{}'::jsonb``).  The rehearsal store is
+        # intentionally SQLite-only, so normalize just these operator tables
+        # before creating them rather than bypassing the compatibility shim.
+        create_sqlite_schema(eng, tables=_REHEARSAL_TABLES)
         factory = sessionmaker(
             bind=eng,
             autoflush=False,
