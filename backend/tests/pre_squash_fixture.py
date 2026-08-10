@@ -187,7 +187,13 @@ def _install_legacy_objects(connection) -> None:  # noqa: ANN001
         if not isinstance(definition, str):
             raise ValueError("fixture function definition is invalid")
         try:
-            connection.exec_driver_sql(definition)
+            # Function bodies may contain PostgreSQL ``RAISE`` placeholders
+            # (``%``).  Bypass SQLAlchemy's DBAPI parameter mapping explicitly;
+            # otherwise psycopg2 treats those literal placeholders as a Python
+            # format string when an empty parameter mapping is supplied.
+            connection.execution_options(no_parameters=True).exec_driver_sql(
+                definition
+            )
         except Exception as exc:
             raise PreSquashFixtureError(
                 f"legacy_function_{item.key.name}_{_postgres_error_suffix(exc)}"
