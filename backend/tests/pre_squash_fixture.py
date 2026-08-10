@@ -87,11 +87,6 @@ def _snapshot_mismatch_code(actual, expected) -> str:  # noqa: ANN001
                                 actual_constraints, expected_constraints
                             ):
                                 if actual_constraint != expected_constraint:
-                                    name = re.sub(
-                                        r"[^a-z0-9]+",
-                                        "_",
-                                        str(actual_constraint.get("name", "unknown")),
-                                    )
                                     if actual_constraint.get(
                                         "definition"
                                     ) != expected_constraint.get("definition"):
@@ -113,11 +108,9 @@ def _snapshot_mismatch_code(actual, expected) -> str:  # noqa: ANN001
                                             difference = "parentheses"
                                         else:
                                             difference = "expression"
-                                        suffix = (
-                                            f"constraint_{name}_definition_{difference}"
-                                        )
+                                        suffix = f"constraint_definition_{difference}"
                                     else:
-                                        suffix = f"constraint_{name}_metadata"
+                                        suffix = "constraint_metadata"
                                     break
                         break
             return f"fixture_snapshot_{kind}_{name}_{suffix}_mismatch"[:96]
