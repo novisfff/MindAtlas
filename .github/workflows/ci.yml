@@ -239,6 +239,7 @@ jobs:
       MINDATLAS_SCHEMA_FRESH_DATABASE_URL: postgresql://mindatlas:mindatlas@localhost:5430/mindatlas_test_pre_ga_v1_schema_fresh
       MINDATLAS_SCHEMA_COMPATIBILITY_DATABASE_URL: postgresql://mindatlas:mindatlas@localhost:5430/mindatlas_test_pre_ga_v1_schema_compatibility
       MINDATLAS_SCHEMA_REBASELINE_SOURCE_URL: postgresql://mindatlas:mindatlas@localhost:5430/mindatlas_test_pre_ga_v1_schema_source
+      MINDATLAS_SCHEMA_EXIT_DOWNGRADE_DATABASE_URL: postgresql://mindatlas:mindatlas@localhost:5430/mindatlas_test_pre_ga_v1_schema_exit_downgrade
       MINDATLAS_REQUIRE_SCHEMA_POSTGRES: "1"
       MINDATLAS_DEPLOYMENT_CLASS: rehearsal
       MINDATLAS_TEST_POSTGRES_DESTRUCTIVE: "1"
@@ -266,7 +267,8 @@ jobs:
             mindatlas_test_pre_ga_v1_schema_generator \
             mindatlas_test_pre_ga_v1_schema_fresh \
             mindatlas_test_pre_ga_v1_schema_compatibility \
-            mindatlas_test_pre_ga_v1_schema_source; do
+            mindatlas_test_pre_ga_v1_schema_source \
+            mindatlas_test_pre_ga_v1_schema_exit_downgrade; do
             createdb -h localhost -p 5430 -U mindatlas "$database"
           done
       - name: Verify clean schema artifacts
@@ -299,18 +301,15 @@ jobs:
           assert roots == ["pre_ga_v1_0001"]
           PY
           alembic heads
-      - name: Install clean root into exit-verification databases
+      - name: Execute concrete PostgreSQL exit proof matrix
         run: |
           set -euo pipefail
-          for database_url in \
-            "${MINDATLAS_SCHEMA_FRESH_DATABASE_URL}" \
-            "${MINDATLAS_SCHEMA_REBASELINE_SOURCE_URL}"; do
-            env DATABASE_URL="$database_url" \
-              MINDATLAS_DEPLOYMENT_CLASS=rehearsal \
-              APP_ENV=test \
-              APP_BUILD_REVISION="$APP_BUILD_REVISION" \
-              alembic upgrade head
-          done
+          python scripts/run_pre_ga_schema_exit_proof.py \
+            --fresh-upgrade-database-url-env MINDATLAS_SCHEMA_FRESH_DATABASE_URL \
+            --downgrade-database-url-env MINDATLAS_SCHEMA_EXIT_DOWNGRADE_DATABASE_URL \
+            --rebaseline-database-url-env MINDATLAS_SCHEMA_REBASELINE_SOURCE_URL \
+            --build-revision "$APP_BUILD_REVISION" \
+            --output "$RUNNER_TEMP/pre-ga-schema-exit-proof.json"
       - name: Run pre-GA schema exit verification
         run: |
           set -euo pipefail
@@ -318,7 +317,8 @@ jobs:
             --fresh-database-url-env MINDATLAS_SCHEMA_FRESH_DATABASE_URL \
             --rebaseline-database-url-env MINDATLAS_SCHEMA_REBASELINE_SOURCE_URL \
             --deployment-class rehearsal \
-            --output "$RUNNER_TEMP/pre-ga-schema-exit-evidence.json"
+            --output "$RUNNER_TEMP/pre-ga-schema-exit-evidence.json" \
+            --proof-file "$RUNNER_TEMP/pre-ga-schema-exit-proof.json"
       - name: Validate pre-GA schema exit evidence binding
         run: |
           set -euo pipefail
@@ -336,8 +336,21 @@ jobs:
           assert payload["buildRevision"] == os.environ["APP_BUILD_REVISION"]
           assert payload["archiveVerified"] is True
           assert payload["logicalEquivalenceVerified"] is True
+          assert payload["freshUpgradeVerified"] is True
+          assert payload["testOnlyDowngradeGuardVerified"] is True
+          assert payload["guardedRebaselineMatrixVerified"] is True
+          assert payload["wrongFamilyRejected"] is True
+          assert payload["workerClaimRejectedOnDrift"] is True
+          assert payload["deployAutoStampAbsent"] is True
           print("pre-GA schema exit evidence: OK")
           PY
+      - name: Upload pre-GA schema proof observations
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pre-ga-schema-exit-proof
+          path: ${{ runner.temp }}/pre-ga-schema-exit-proof.json
+          if-no-files-found: error
       - name: Upload sanitized pre-GA schema evidence
         if: success()
         uses: actions/upload-artifact@v4
@@ -354,7 +367,14 @@ jobs:
             tests/test_schema_equivalence_postgres.py \
             tests/test_schema_rebaseline_postgres.py \
             tests/test_runtime_schema_compatibility_postgres.py \
-            tests/test_deploy_migrate_clean_only.py
+            tests/test_deploy_migrate_clean_only.py \
+            tests/test_plan09_lifecycle_postgres.py \
+            tests/test_skill_eval_repository_postgres.py \
+            tests/test_agent_skill_admin_postgres_migration.py \
+            tests/test_main_agent_postgres_migration.py \
+            tests/test_durable_interrupt_repository_postgres.py \
+            tests/test_durable_run_events_postgres.py \
+            tests/test_schema_capture_postgres.py
 
   assistant-readiness:
     name: Assistant Seed And Readiness Gates

@@ -3188,7 +3188,8 @@ python scripts/verify_pre_ga_schema.py exit \
   --fresh-database-url-env MINDATLAS_SCHEMA_CLEAN_DATABASE_URL \
   --rebaseline-database-url-env MINDATLAS_SCHEMA_REBASELINE_DATABASE_URL \
   --deployment-class rehearsal \
-  --output ../docs/superpowers/evidence/2026-07-28-pre-ga-clean-baseline.json
+  --output ../docs/superpowers/evidence/2026-07-28-pre-ga-clean-baseline.json \
+  --proof-file "$RUNNER_TEMP/pre-ga-schema-exit-proof.json"
 ```
 
 The mode performs or consumes machine-readable results for:
@@ -3276,7 +3277,8 @@ MINDATLAS_DEPLOYMENT_CLASS=rehearsal \
     --fresh-database-url-env MINDATLAS_SCHEMA_CLEAN_DATABASE_URL \
     --rebaseline-database-url-env MINDATLAS_SCHEMA_REBASELINE_DATABASE_URL \
     --deployment-class rehearsal \
-    --output ../docs/superpowers/evidence/2026-07-28-pre-ga-clean-baseline.json
+    --output ../docs/superpowers/evidence/2026-07-28-pre-ga-clean-baseline.json \
+    --proof-file "$RUNNER_TEMP/pre-ga-schema-exit-proof.json"
 .venv-plan3-clean/bin/python -m pytest tests/test_schema_evidence.py -q
 ```
 
@@ -3386,7 +3388,8 @@ MINDATLAS_DEPLOYMENT_CLASS=rehearsal \
     --fresh-database-url-env MINDATLAS_SCHEMA_FRESH_DATABASE_URL \
     --rebaseline-database-url-env MINDATLAS_SCHEMA_REBASELINE_SOURCE_URL \
     --deployment-class rehearsal \
-    --output ../docs/superpowers/evidence/2026-07-28-pre-ga-clean-baseline.json
+    --output ../docs/superpowers/evidence/2026-07-28-pre-ga-clean-baseline.json \
+    --proof-file "$RUNNER_TEMP/pre-ga-schema-exit-proof.json"
 cd ../frontend
 npm ci
 npm test
@@ -3425,9 +3428,10 @@ release-facing gaps are now closed:
   health, and initialization PostgreSQL fixtures to an empty clean-root
   upgrade (`pre_ga_v1_0001`); archived lineage is never executed by these
   gates.
-- [x] Replaced the old-head schema rebaseline/compatibility PostgreSQL gates
-  with clean-root boundary tests and retained only static historical evidence
-  for the archived lineage.
+- [x] Rebuilt the pre-squash PostgreSQL source fixture from the committed,
+  self-digested catalog manifest (without importing or executing archived
+  migrations), then restored the guarded rebaseline acceptance/rejection,
+  lock, retained-data, and rollback matrix against that fixture.
 - [x] Made the smoke runner and operator-control-plane evidence runner import
   and compare `CLEAN_ROOT_REVISION`, accept opaque Alembic IDs, and fail on any
   non-exact head; the operator evidence runner now runs in CI and is uploaded
@@ -3440,8 +3444,14 @@ release-facing gaps are now closed:
 - [x] Added PostgreSQL shell integration coverage for empty, versioned,
   non-empty-unversioned, old-head, wrong-family, invalid-class, and connection
   failure migration states.
-- [x] Added the CI `verify_pre_ga_schema.py exit` invocation, evidence binding
-  validation, and sanitized artifact upload.
+- [x] Added a concrete PostgreSQL exit-proof runner whose self-digested
+  observations drive `verify_pre_ga_schema.py exit`; CI validates the proof
+  binding, runs the complete matrix, and uploads both proof and sanitized
+  evidence artifacts.
+- [x] Migrated the seven current capability/durability/capture PostgreSQL
+  suites to clean-root fixtures, archived only their historical migration
+  variants as `.py.archived`, and included every live suite in the schema
+  release-critical job.
 
 The local Docker daemon was unavailable during this audit pass; PostgreSQL
 integration remains enforced by the dedicated CI jobs with
@@ -3459,6 +3469,28 @@ integration remains enforced by the dedicated CI jobs with
 - [x] CI run `31351421076` executed the PostgreSQL exit and sanitized-evidence
   gates successfully. This checkout still has no running Docker daemon, so the
   local replay remains unavailable without changing the environment.
+
+## 复审补充完成记录 (2026-08-10)
+
+本节是对上方原始 Task 1–12 编写清单的实际状态归档；原始清单中的
+`Step 2` 红灯演示和独立 commit 命令是实施过程说明，不把“尚未在本机重放”
+误报成 release gate 证据。所有 release-facing outcome 均由代码、定向测试或
+CI job 证明：
+
+| Task | 当前状态 | 证据/边界 |
+| --- | --- | --- |
+| 1–2 | 已完成 | family/exclusion/identity contracts 与 PostgreSQL canonical catalog tests |
+| 3 | 已完成 | 四份 capture artifact、manifest digest、`pre_squash_fixture.py` byte-equivalent 校验 |
+| 4–5 | 已完成 | live lineage 删除、deterministic clean root、archive/sole-head checks |
+| 6–8 | 已完成 | marker/runtime identity、logical equivalence、60-revision archive CI gate |
+| 9 | 已完成 | rehearsal/development old-head success、retained rows/checksums、production/shared/unknown/wrong-head/drift/non-empty/lock rejection、snapshot rollback；无拒绝场景变更源库 |
+| 10 | 已完成 | API/readiness/admission/worker compatibility 与 drift claim rejection |
+| 11 | 已完成 | clean-only deploy state machine、Compose identity、七个 live PostgreSQL suites、schema release job |
+| 12 | 已完成 | `run_pre_ga_schema_exit_proof.py` + proof digest validation + PR-head-bound sanitized evidence |
+
+未执行且仍明确不宣称执行的内容只有 deviation record 中列出的原 Plan 10
+production canary、legacy-zero、restore、B1/B2 以及 calendar soak；它们不是
+本次 clean-baseline release gate 的隐含前置条件。
 
 ## Rollback Boundary
 

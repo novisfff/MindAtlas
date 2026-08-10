@@ -167,6 +167,145 @@ class SchemaEvidence(BaseModel):
         return value
 
 
+_EXIT_PROOF_CHECKS = frozenset(
+    {
+        "fresh_upgrade",
+        "test_only_downgrade_guard",
+        "guarded_rebaseline_matrix",
+        "wrong_family_rejected",
+        "worker_claim_rejected_on_drift",
+        "deploy_auto_stamp_absent",
+    }
+)
+
+
+def _validate_exit_proof(
+    payload: object,
+    *,
+    deployment_class: str,
+    build_revision: str,
+) -> dict[str, bool]:
+    """Validate proof observations produced by the release-gate runner.
+
+    The final evidence must not manufacture booleans for suites that were not
+    run.  Each flag is therefore derived from a self-digesting, exact set of
+    named checks and their observed database/runtime facts.
+    """
+    if not isinstance(payload, dict) or set(payload) != {
+        "schemaVersion",
+        "deploymentClass",
+        "buildRevision",
+        "checks",
+        "proofDigest",
+    }:
+        raise SchemaVerificationError("exit_proof_invalid")
+    if payload["schemaVersion"] != 1:
+        raise SchemaVerificationError("exit_proof_invalid")
+    if payload["deploymentClass"] != deployment_class:
+        raise SchemaVerificationError("exit_proof_invalid")
+    if payload["buildRevision"] != build_revision:
+        raise SchemaVerificationError("exit_proof_invalid")
+    claimed_digest = payload["proofDigest"]
+    unsigned = {key: value for key, value in payload.items() if key != "proofDigest"}
+    if (
+        not isinstance(claimed_digest, str)
+        or re.fullmatch(r"[0-9a-f]{64}", claimed_digest) is None
+        or _evidence_digest(unsigned) != claimed_digest
+    ):
+        raise SchemaVerificationError("exit_proof_invalid")
+    checks = payload["checks"]
+    if not isinstance(checks, list) or len(checks) != len(_EXIT_PROOF_CHECKS):
+        raise SchemaVerificationError("exit_proof_invalid")
+    by_name: dict[str, dict[str, object]] = {}
+    for item in checks:
+        if not isinstance(item, dict) or set(item) != {
+            "name",
+            "result",
+            "observations",
+        }:
+            raise SchemaVerificationError("exit_proof_invalid")
+        name = item["name"]
+        observations = item["observations"]
+        if (
+            not isinstance(name, str)
+            or name in by_name
+            or name not in _EXIT_PROOF_CHECKS
+            or item["result"] != "pass"
+            or not isinstance(observations, dict)
+        ):
+            raise SchemaVerificationError("exit_proof_invalid")
+        by_name[name] = observations
+    if set(by_name) != _EXIT_PROOF_CHECKS:
+        raise SchemaVerificationError("exit_proof_invalid")
+
+    required_observations: dict[str, tuple[str, ...]] = {
+        "fresh_upgrade": ("beforeHead", "afterHead", "markerRevision"),
+        "test_only_downgrade_guard": (
+            "rejectedError",
+            "headAfterRejected",
+            "emptyAfterAcknowledged",
+        ),
+        "guarded_rebaseline_matrix": (
+            "beforeHead",
+            "afterHead",
+            "retainedDataUnchanged",
+            "developmentSuccess",
+            "rejectionsNoMutation",
+            "rejectionCodes",
+        ),
+        "wrong_family_rejected": ("error", "mutationBlocked"),
+        "worker_claim_rejected_on_drift": ("error", "mutationBlocked"),
+        "deploy_auto_stamp_absent": ("sourceContainsAutoStamp",),
+    }
+    for name, fields in required_observations.items():
+        observations = by_name[name]
+        if any(field not in observations for field in fields):
+            raise SchemaVerificationError("exit_proof_invalid")
+    if not (
+        by_name["fresh_upgrade"]["beforeHead"] is None
+        and by_name["fresh_upgrade"]["afterHead"] == CLEAN_ROOT_REVISION
+        and by_name["fresh_upgrade"]["markerRevision"] == CLEAN_ROOT_REVISION
+    ):
+        raise SchemaVerificationError("exit_proof_invalid")
+    if not (
+        by_name["test_only_downgrade_guard"]["rejectedError"]
+        == "schema_test_downgrade_forbidden"
+        and by_name["test_only_downgrade_guard"]["headAfterRejected"]
+        == CLEAN_ROOT_REVISION
+        and by_name["test_only_downgrade_guard"]["emptyAfterAcknowledged"] is True
+    ):
+        raise SchemaVerificationError("exit_proof_invalid")
+    rejection_codes = by_name["guarded_rebaseline_matrix"]["rejectionCodes"]
+    if not (
+        by_name["guarded_rebaseline_matrix"]["beforeHead"] == PRE_SQUASH_HEAD
+        and by_name["guarded_rebaseline_matrix"]["afterHead"]
+        == CLEAN_ROOT_REVISION
+        and by_name["guarded_rebaseline_matrix"]["retainedDataUnchanged"] is True
+        and by_name["guarded_rebaseline_matrix"]["developmentSuccess"] is True
+        and by_name["guarded_rebaseline_matrix"]["rejectionsNoMutation"] is True
+        and isinstance(rejection_codes, list)
+        and {
+            "production_rebaseline_forbidden",
+            "database_deployment_identity_unknown",
+            "legacy_exclusion_data_present",
+            "pre_squash_fingerprint_mismatch",
+            "pre_squash_head_mismatch",
+            "rebaseline_lock_unavailable",
+        }
+        <= set(rejection_codes)
+    ):
+        raise SchemaVerificationError("exit_proof_invalid")
+    for name in ("wrong_family_rejected", "worker_claim_rejected_on_drift"):
+        if not (
+            by_name[name]["error"] == "schema_incompatible"
+            and by_name[name]["mutationBlocked"] is True
+        ):
+            raise SchemaVerificationError("exit_proof_invalid")
+    if by_name["deploy_auto_stamp_absent"]["sourceContainsAutoStamp"] is not False:
+        raise SchemaVerificationError("exit_proof_invalid")
+    return {name: True for name in _EXIT_PROOF_CHECKS}
+
+
 _EVIDENCE_SECRET_PATTERN = re.compile(
     r"(?i)(?:postgres(?:ql)?://|https?://|password|token|cookie|"
     r"authorization|-----begin(?: [^-]+)? private key-----|sk-[A-Za-z0-9])"
@@ -580,6 +719,7 @@ def verify_exit(
     rebaseline_database_url: str,
     deployment_class: str,
     output: Path,
+    proof_file: Path | None = None,
 ) -> SchemaEvidence:
     """Run the fixed final verification contract and atomically attest it."""
     try:
@@ -631,6 +771,17 @@ def verify_exit(
         build_revision = os.environ.get("APP_BUILD_REVISION", "").strip()
         if not build_revision or build_revision in {"development", "unknown"}:
             raise SchemaVerificationError("build_identity_invalid")
+        if proof_file is None:
+            raise SchemaVerificationError("exit_proof_missing")
+        try:
+            proof_payload = json.loads(proof_file.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            raise SchemaVerificationError("exit_proof_missing") from None
+        proof_flags = _validate_exit_proof(
+            proof_payload,
+            deployment_class=required.value,
+            build_revision=build_revision,
+        )
 
         payload: dict[str, object] = {
             "schemaVersion": 1,
@@ -653,12 +804,18 @@ def verify_exit(
             "exclusionManifestDigest": exclusions.manifest_digest,
             "logicalEquivalenceVerified": fresh.application_fingerprint
             == expected.application_structural_fingerprint,
-            "freshUpgradeVerified": True,
-            "testOnlyDowngradeGuardVerified": True,
-            "guardedRebaselineMatrixVerified": True,
-            "wrongFamilyRejected": True,
-            "workerClaimRejectedOnDrift": True,
-            "deployAutoStampAbsent": True,
+            "freshUpgradeVerified": proof_flags["fresh_upgrade"],
+            "testOnlyDowngradeGuardVerified": proof_flags[
+                "test_only_downgrade_guard"
+            ],
+            "guardedRebaselineMatrixVerified": proof_flags[
+                "guarded_rebaseline_matrix"
+            ],
+            "wrongFamilyRejected": proof_flags["wrong_family_rejected"],
+            "workerClaimRejectedOnDrift": proof_flags[
+                "worker_claim_rejected_on_drift"
+            ],
+            "deployAutoStampAbsent": proof_flags["deploy_auto_stamp_absent"],
             "postgresMajor": clean_document.postgres_major,
             "buildRevision": build_revision,
         }
@@ -691,6 +848,7 @@ def main(argv: list[str] | None = None) -> int:
     exit_mode.add_argument("--rebaseline-database-url-env", required=True)
     exit_mode.add_argument("--deployment-class", required=True)
     exit_mode.add_argument("--output", required=True)
+    exit_mode.add_argument("--proof-file", required=True)
     args = parser.parse_args(argv)
 
     try:
@@ -747,6 +905,7 @@ def main(argv: list[str] | None = None) -> int:
                     ),
                     deployment_class=args.deployment_class,
                     output=Path(args.output).resolve(),
+                    proof_file=Path(args.proof_file).resolve(),
                 )
                 success_message = (
                     "schema_exit_ok "

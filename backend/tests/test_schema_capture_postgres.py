@@ -23,15 +23,14 @@ from app.schema.sql_objects import (
     load_exclusion_manifest,
     load_pre_squash_snapshot,
 )
+from app.schema.contracts import CLEAN_ROOT_REVISION, PRE_SQUASH_HEAD
 from scripts import capture_pre_ga_schema as capture_script
 from tests.postgres_destructive_guard import reset_disposable_public_schema
+from tests.pre_squash_fixture import install_pre_squash_fixture
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 CAPTURE_SCRIPT = BACKEND_ROOT / "scripts" / "capture_pre_ga_schema.py"
-PLAN1_HEAD = "9f3c1a7e2b40"
-PRE_SQUASH_HEAD = "b6e2d4f8a901"
-
 _POSTGRES_URL = os.environ.get("MINDATLAS_TEST_POSTGRES_URL", "").strip()
 pytestmark = pytest.mark.skipif(
     not _POSTGRES_URL,
@@ -48,8 +47,9 @@ def _sqlalchemy_url(url: str) -> str:
 def _alembic_upgrade(url: str, revision: str) -> None:
     env = os.environ.copy()
     env["DATABASE_URL"] = url
-    env["MINDATLAS_PLAN10_B2_TEST_OVERRIDE"] = "1"
-    env.setdefault("APP_ENV", "test")
+    env["MINDATLAS_DEPLOYMENT_CLASS"] = "rehearsal"
+    env["APP_BUILD_REVISION"] = "test-schema-capture"
+    env["APP_ENV"] = "test"
     result = subprocess.run(
         [sys.executable, "-m", "alembic", "upgrade", revision],
         cwd=BACKEND_ROOT,
@@ -108,7 +108,7 @@ def postgres_engine() -> Iterator[Engine]:
 
 
 def test_capture_refuses_wrong_head(postgres_engine: Engine, tmp_path: Path) -> None:
-    _alembic_upgrade(_POSTGRES_URL, PLAN1_HEAD)
+    _alembic_upgrade(_POSTGRES_URL, CLEAN_ROOT_REVISION)
 
     result = _run_capture(_POSTGRES_URL, tmp_path)
 
@@ -133,7 +133,7 @@ def test_public_capture_cli_ignores_test_manifest_root_environment(
     postgres_engine: Engine,
     tmp_path: Path,
 ) -> None:
-    _alembic_upgrade(_POSTGRES_URL, PRE_SQUASH_HEAD)
+    install_pre_squash_fixture(_POSTGRES_URL)
     env_name = "MINDATLAS_TEST_SCHEMA_CAPTURE_URL"
     env = os.environ.copy()
     env[env_name] = _POSTGRES_URL
@@ -163,7 +163,7 @@ def test_capture_refuses_nonempty_legacy_evidence(
     postgres_engine: Engine,
     tmp_path: Path,
 ) -> None:
-    _alembic_upgrade(_POSTGRES_URL, PRE_SQUASH_HEAD)
+    install_pre_squash_fixture(_POSTGRES_URL)
     with postgres_engine.begin() as connection:
         connection.execute(
             text(
@@ -195,7 +195,7 @@ def test_capture_refuses_non_inert_rollout_control(
     tmp_path: Path,
     mutation: str,
 ) -> None:
-    _alembic_upgrade(_POSTGRES_URL, PRE_SQUASH_HEAD)
+    install_pre_squash_fixture(_POSTGRES_URL)
     with postgres_engine.begin() as connection:
         if mutation == "missing_control":
             connection.execute(text("DELETE FROM assistant_runtime_rollout_control"))
@@ -389,7 +389,7 @@ def test_capture_writes_four_sanitized_manifests_and_checks_byte_identity(
     postgres_engine: Engine,
     tmp_path: Path,
 ) -> None:
-    _alembic_upgrade(_POSTGRES_URL, PRE_SQUASH_HEAD)
+    install_pre_squash_fixture(_POSTGRES_URL)
 
     write_result = _run_capture(_POSTGRES_URL, tmp_path)
 
@@ -452,7 +452,7 @@ def test_capture_reads_one_repeatable_read_read_only_snapshot(
     postgres_engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _alembic_upgrade(_POSTGRES_URL, PRE_SQUASH_HEAD)
+    install_pre_squash_fixture(_POSTGRES_URL)
     observed: dict[str, str] = {}
     real_reader = capture_script.PostgresCatalogReader
 
@@ -497,7 +497,7 @@ def test_capture_drift_cases_fail_closed_without_changing_manifests(
     mutation: str,
     expected_code: str,
 ) -> None:
-    _alembic_upgrade(_POSTGRES_URL, PRE_SQUASH_HEAD)
+    install_pre_squash_fixture(_POSTGRES_URL)
     baseline = _run_capture(_POSTGRES_URL, tmp_path)
     assert baseline.returncode == 0, baseline.stderr
     before = {path.name: path.read_bytes() for path in tmp_path.iterdir()}
