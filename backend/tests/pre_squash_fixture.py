@@ -111,6 +111,8 @@ def _snapshot_mismatch_code(actual, expected) -> str:  # noqa: ANN001
                         elif field == "columns":
                             actual_columns = actual_item.definition.get("columns", [])
                             expected_columns = expected_item.definition.get("columns", [])
+                            if len(actual_columns) != len(expected_columns):
+                                suffix = "columns_length_mismatch"
                             for actual_column, expected_column in zip(
                                 actual_columns, expected_columns
                             ):
@@ -129,6 +131,7 @@ def _snapshot_mismatch_code(actual, expected) -> str:  # noqa: ANN001
                                             "collation",
                                             "identityKind",
                                             "generatedKind",
+                                            "ordinal",
                                         ):
                                             if actual_column.get(column_field) != expected_column.get(
                                                 column_field
