@@ -274,7 +274,14 @@ def _run_stage(label: str, callback):  # noqa: ANN001, ANN202
 def _rebaseline_matrix(url: str) -> dict[str, object]:
     engine = _engine(url)
     try:
-        install_pre_squash_fixture(url)
+        def install_fixture() -> None:
+            install_pre_squash_fixture(url)
+
+        def reset_and_install() -> None:
+            reset_disposable_public_schema(engine)
+            install_pre_squash_fixture(url)
+
+        _run_stage("source_fixture", install_fixture)
         with engine.begin() as connection:
             retained_id = "00000000-0000-0000-0000-000000000002"
             connection.execute(
@@ -285,8 +292,14 @@ def _rebaseline_matrix(url: str) -> dict[str, object]:
                 ),
                 {"id": retained_id, "key": "schema-exit-retained"},
             )
-        with engine.connect() as connection:
-            report = apply_rebaseline(connection, _request(DeploymentClass.REHEARSAL))
+        def apply_rehearsal():  # noqa: ANN202
+            with engine.connect() as connection:
+                return apply_rebaseline(
+                    connection,
+                    _request(DeploymentClass.REHEARSAL),
+                )
+
+        report = _run_stage("rehearsal_success", apply_rehearsal)
         if (
             report.before_revision != PRE_SQUASH_HEAD
             or report.after_revision != CLEAN_ROOT_REVISION
@@ -294,14 +307,20 @@ def _rebaseline_matrix(url: str) -> dict[str, object]:
         ):
             raise RuntimeError("exit_proof_rebaseline_success_failed")
 
-        reset_disposable_public_schema(engine)
-        install_pre_squash_fixture(url)
+        _run_stage("development_fixture", reset_and_install)
         _set_database_comment(engine, "development")
-        with engine.connect() as connection:
-            development_report = apply_rebaseline(
-                connection,
-                _request(DeploymentClass.DEVELOPMENT),
-            )
+
+        def apply_development():  # noqa: ANN202
+            with engine.connect() as connection:
+                return apply_rebaseline(
+                    connection,
+                    _request(DeploymentClass.DEVELOPMENT),
+                )
+
+        development_report = _run_stage(
+            "development_success",
+            apply_development,
+        )
         if (
             development_report.before_revision != PRE_SQUASH_HEAD
             or development_report.after_revision != CLEAN_ROOT_REVISION
@@ -317,8 +336,13 @@ def _rebaseline_matrix(url: str) -> dict[str, object]:
             "wrong_head",
             "lock",
         ):
-            reset_disposable_public_schema(engine)
-            install_pre_squash_fixture(url)
+            _run_stage(
+                f"{scenario}_fixture",
+                lambda: (
+                    reset_disposable_public_schema(engine),
+                    install_pre_squash_fixture(url),
+                ),
+            )
             _set_database_comment(engine, "rehearsal")
             if scenario == "production":
                 code = _apply_and_code(engine, _request(DeploymentClass.PRODUCTION))
