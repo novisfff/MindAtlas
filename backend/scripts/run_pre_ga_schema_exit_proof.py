@@ -263,6 +263,8 @@ def _run_stage(label: str, callback):  # noqa: ANN001, ANN202
     """Run one proof stage and retain only a bounded diagnostic code."""
     try:
         return callback()
+    except ExitProofFailure:
+        raise
     except Exception as exc:  # noqa: BLE001
         raw_code = getattr(exc, "safe_code", None) or str(exc)
         code = raw_code if isinstance(raw_code, str) else "unexpected"
