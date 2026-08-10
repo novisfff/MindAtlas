@@ -26,8 +26,8 @@ from tests.schema_baseline_support import (
 
 
 _SUPPORTED_COLUMN_TYPE = re.compile(
-    r"(?:uuid|integer|boolean|jsonb?|text|timestamp with time zone|"
-    r"character varying\([0-9]+\))\Z"
+    r"(?:uuid|integer|bigint|boolean|jsonb?|text|bytea|date|timemode|"
+    r"timestamp with time zone|character varying\([0-9]+\))\Z"
 )
 
 
@@ -167,9 +167,61 @@ def _drop_identity_controls(connection) -> None:  # noqa: ANN001
     )
 
 
-def _install_legacy_objects(connection) -> None:  # noqa: ANN001
-    manifest = load_exclusion_manifest()
-    table_items = [item for item in manifest.objects if item.key.kind == "table"]
+def _install_source_snapshot(connection, snapshot) -> None:  # noqa: ANN001
+    """Materialize the committed pre-squash catalog, including raw ordinals."""
+    # The clean root intentionally uses the version-2 logical contract and may
+    # order columns differently from the historical physical catalog.  Build
+    # the source fixture from the captured document itself so rebaseline tests
+    # exercise the exact source fingerprint rather than a model approximation.
+    for item in snapshot.source_document.objects:
+        if item.key.kind != "enum":
+            continue
+        labels = item.definition.get("labels")
+        if not isinstance(labels, list) or not all(
+            isinstance(label, str) and "'" not in label for label in labels
+        ):
+            raise ValueError("fixture enum definition is invalid")
+        label_sql = ", ".join("'" + label + "'" for label in labels)
+        try:
+            connection.exec_driver_sql(
+                f"CREATE TYPE {_quote(item.key.schema)}.{_quote(item.key.name)} "
+                f"AS ENUM ({label_sql})"
+            )
+        except Exception:
+            raise PreSquashFixtureError(
+                f"legacy_enum_{item.key.name}"
+            ) from None
+
+    sequence_items = [
+        item
+        for item in snapshot.source_document.objects
+        if item.key.kind == "sequence"
+    ]
+    for item in sorted(sequence_items, key=lambda value: value.key.name):
+        definition = item.definition
+        try:
+            sequence_type = str(definition["type"])
+            start = int(definition["start"])
+            increment = int(definition["increment"])
+            minimum = int(definition["minimum"])
+            maximum = int(definition["maximum"])
+            cache = int(definition["cache"])
+            cycle = "CYCLE" if definition.get("cycle") else "NO CYCLE"
+            connection.exec_driver_sql(
+                f"CREATE SEQUENCE {_quote(item.key.schema)}.{_quote(item.key.name)} "
+                f"AS {sequence_type} START WITH {start} INCREMENT BY {increment} "
+                f"MINVALUE {minimum} MAXVALUE {maximum} CACHE {cache} {cycle}"
+            )
+        except Exception:
+            raise PreSquashFixtureError(
+                f"legacy_sequence_{item.key.name}"
+            ) from None
+
+    table_items = [
+        item
+        for item in snapshot.source_document.objects
+        if item.key.kind == "table"
+    ]
     for item in sorted(table_items, key=lambda value: value.key.name):
         try:
             connection.exec_driver_sql(
@@ -180,8 +232,8 @@ def _install_legacy_objects(connection) -> None:  # noqa: ANN001
                 f"legacy_table_{item.key.name}"
             ) from None
 
-    # Foreign keys may refer to a legacy table that sorts later, so add every
-    # captured constraint only after all legacy tables exist.
+    # Foreign keys may refer to a table that sorts later, so add every captured
+    # constraint only after all tables exist.
     for item in sorted(table_items, key=lambda value: value.key.name):
         constraints = item.definition.get("constraints", [])
         for constraint in constraints:
@@ -196,7 +248,7 @@ def _install_legacy_objects(connection) -> None:  # noqa: ANN001
                     f"legacy_fk_{constraint.get('name', 'unknown')}"
                 ) from None
 
-    for item in manifest.objects:
+    for item in snapshot.source_document.objects:
         if item.key.kind != "function":
             continue
         definition = item.definition.get("definition")
@@ -239,7 +291,7 @@ def _install_legacy_objects(connection) -> None:  # noqa: ANN001
                     f"legacy_index_{name}"
                 ) from None
 
-    for item in manifest.objects:
+    for item in snapshot.source_document.objects:
         if item.key.kind != "trigger":
             continue
         definition = item.definition.get("definition")
@@ -252,6 +304,8 @@ def _install_legacy_objects(connection) -> None:  # noqa: ANN001
                 f"legacy_trigger_{item.key.name}"
             ) from None
 
+    # The source catalog intentionally contains this one inert Plan 10 control
+    # seed.  Rebaseline removes it as an allowlisted non-business artifact.
     connection.execute(
         text(
             "INSERT INTO \"public\".\"assistant_runtime_rollout_control\" "
@@ -262,6 +316,39 @@ def _install_legacy_objects(connection) -> None:  # noqa: ANN001
         )
     )
 
+    # Restore the source revision control row exactly as a migration would.
+    connection.execute(
+        text(
+            "INSERT INTO \"public\".\"alembic_version\" (version_num) "
+            "VALUES (:revision)"
+        ),
+        {"revision": PRE_SQUASH_HEAD},
+    )
+
+    sequence_item = next(
+        (
+            item
+            for item in sequence_items
+            if item.key.name == "assistant_chat_run_event_id_seq"
+        ),
+        None,
+    )
+    if sequence_item is not None:
+        owned_by = sequence_item.definition.get("ownedBy")
+        if isinstance(owned_by, Mapping):
+            try:
+                connection.exec_driver_sql(
+                    f"ALTER SEQUENCE {_quote(sequence_item.key.schema)}."
+                    f"{_quote(sequence_item.key.name)} OWNED BY "
+                    f"{_quote(str(owned_by['schema']))}."
+                    f"{_quote(str(owned_by['table']))}."
+                    f"{_quote(str(owned_by['column']))}"
+                )
+            except Exception:
+                raise PreSquashFixtureError(
+                    f"legacy_sequence_owner_{sequence_item.key.name}"
+                ) from None
+
 
 def install_pre_squash_fixture(
     database_url: str,
@@ -271,15 +358,7 @@ def install_pre_squash_fixture(
     build_revision: str = "test-pre-squash-fixture",
 ) -> None:
     """Install and validate the committed pre-squash source fixture."""
-    try:
-        upgrade_clean_root_checked(
-            database_url,
-            deployment_class=deployment_class,
-            app_env=app_env,
-            build_revision=build_revision,
-        )
-    except Exception:
-        raise PreSquashFixtureError("clean_root_upgrade_failed") from None
+    snapshot = load_pre_squash_snapshot()
     try:
         engine = create_engine(_sqlalchemy_url(database_url), future=True)
     except Exception:
@@ -287,15 +366,7 @@ def install_pre_squash_fixture(
     try:
         try:
             with engine.begin() as connection:
-                _drop_identity_controls(connection)
-                _install_legacy_objects(connection)
-                connection.execute(
-                    text(
-                        "UPDATE \"public\".\"alembic_version\" "
-                        "SET version_num = :revision"
-                    ),
-                    {"revision": PRE_SQUASH_HEAD},
-                )
+                _install_source_snapshot(connection, snapshot)
                 database_name = connection.scalar(text("SELECT current_database()"))
                 if not isinstance(database_name, str):
                     raise ValueError("fixture database identity is unavailable")
@@ -308,7 +379,6 @@ def install_pre_squash_fixture(
         except Exception:
             raise PreSquashFixtureError("legacy_install_failed") from None
 
-        snapshot = load_pre_squash_snapshot()
         try:
             with engine.connect() as connection:
                 from app.schema.catalog import PostgresCatalogReader
