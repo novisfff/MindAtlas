@@ -127,6 +127,8 @@ def _snapshot_mismatch_code(actual, expected) -> str:  # noqa: ANN001
                                             "defaultExpression",
                                             "nullable",
                                             "collation",
+                                            "identityKind",
+                                            "generatedKind",
                                         ):
                                             if actual_column.get(column_field) != expected_column.get(
                                                 column_field
