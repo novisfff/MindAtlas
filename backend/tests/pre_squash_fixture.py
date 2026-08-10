@@ -39,6 +39,17 @@ class PreSquashFixtureError(RuntimeError):
         self.safe_code = safe_code
 
 
+def _postgres_error_suffix(exc: Exception) -> str:
+    """Return a bounded, non-sensitive PostgreSQL error discriminator."""
+    original = getattr(exc, "orig", None)
+    code = getattr(original, "pgcode", None) or getattr(original, "sqlstate", None)
+    if isinstance(code, str) and re.fullmatch(r"[0-9A-Z]{5}", code):
+        return code.lower()
+    name = type(original).__name__ if original is not None else type(exc).__name__
+    normalized = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+    return normalized[:32] or "error"
+
+
 def _quote(identifier: str) -> str:
     if not isinstance(identifier, str) or not identifier:
         raise ValueError("fixture identifier is invalid")
@@ -170,9 +181,9 @@ def _install_legacy_objects(connection) -> None:  # noqa: ANN001
             raise ValueError("fixture function definition is invalid")
         try:
             connection.exec_driver_sql(definition)
-        except Exception:
+        except Exception as exc:
             raise PreSquashFixtureError(
-                f"legacy_function_{item.key.name}"
+                f"legacy_function_{item.key.name}_{_postgres_error_suffix(exc)}"
             ) from None
 
     for item in table_items:
