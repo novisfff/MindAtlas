@@ -54,10 +54,13 @@ def _sqlalchemy_url(url: str) -> str:
     return url
 
 
-def _set_database_comment(engine: Engine, deployment_class: str) -> None:
+def _set_database_comment(engine: Engine, deployment_class: str | None) -> None:
     with engine.begin() as connection:
         database_name = connection.scalar(text("SELECT current_database()"))
         assert isinstance(database_name, str)
+        if deployment_class is None:
+            connection.exec_driver_sql(f'COMMENT ON DATABASE "{database_name}" IS NULL')
+            return
         connection.exec_driver_sql(
             f'COMMENT ON DATABASE "{database_name}" IS %s',
             (f"mindatlas:deployment_class={deployment_class}",),
@@ -119,23 +122,32 @@ def _read_head(engine: Engine) -> str:
 
 def _assert_presquash_unchanged(engine: Engine) -> None:
     with engine.connect() as connection:
-        assert connection.execute(
-            text("SELECT version_num FROM alembic_version")
-        ).scalar_one() == PRE_SQUASH_HEAD
-        assert connection.execute(
-            text(
-                "SELECT 1 FROM information_schema.tables "
-                "WHERE table_schema='public' "
-                "AND table_name='assistant_runtime_migration_item'"
-            )
-        ).first() is not None
-        assert connection.execute(
-            text(
-                "SELECT 1 FROM information_schema.tables "
-                "WHERE table_schema='public' "
-                "AND table_name='mindatlas_schema_identity'"
-            )
-        ).first() is None
+        assert (
+            connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one()
+            == PRE_SQUASH_HEAD
+        )
+        assert (
+            connection.execute(
+                text(
+                    "SELECT 1 FROM information_schema.tables "
+                    "WHERE table_schema='public' "
+                    "AND table_name='assistant_runtime_migration_item'"
+                )
+            ).first()
+            is not None
+        )
+        assert (
+            connection.execute(
+                text(
+                    "SELECT 1 FROM information_schema.tables "
+                    "WHERE table_schema='public' "
+                    "AND table_name='mindatlas_schema_identity'"
+                )
+            ).first()
+            is None
+        )
 
 
 def test_clean_root_rebaseline_is_idempotent_and_does_not_mutate(
@@ -185,20 +197,29 @@ def test_presquash_rebaseline_preserves_retained_rows_and_drops_only_legacy(
     assert report.retained_data_unchanged is True
     assert report.removed_known_inert_seed_rows == 1
     with presquash_engine.connect() as connection:
-        assert connection.execute(
-            text("SELECT version_num FROM alembic_version")
-        ).scalar_one() == CLEAN_ROOT_REVISION
-        assert connection.execute(
-            text("SELECT value_json FROM app_setting WHERE id=:id"),
-            {"id": retained_id},
-        ).scalar_one() == before
-        assert connection.execute(
-            text(
-                "SELECT 1 FROM information_schema.tables "
-                "WHERE table_schema='public' "
-                "AND table_name='assistant_runtime_migration_item'"
-            )
-        ).first() is None
+        assert (
+            connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one()
+            == CLEAN_ROOT_REVISION
+        )
+        assert (
+            connection.execute(
+                text("SELECT value_json FROM app_setting WHERE id=:id"),
+                {"id": retained_id},
+            ).scalar_one()
+            == before
+        )
+        assert (
+            connection.execute(
+                text(
+                    "SELECT 1 FROM information_schema.tables "
+                    "WHERE table_schema='public' "
+                    "AND table_name='assistant_runtime_migration_item'"
+                )
+            ).first()
+            is None
+        )
         marker = read_schema_identity(connection)
     assert marker.schema_revision == CLEAN_ROOT_REVISION
 
@@ -239,6 +260,11 @@ def test_clean_root_rebaseline_rejects_production_before_mutation(
     ("database_class", "request_class", "expected_code"),
     [
         (
+            None,
+            DeploymentClass.REHEARSAL,
+            "database_deployment_identity_missing",
+        ),
+        (
             "development",
             DeploymentClass.REHEARSAL,
             "deployment_identity_mismatch",
@@ -252,7 +278,7 @@ def test_clean_root_rebaseline_rejects_production_before_mutation(
 )
 def test_presquash_rebaseline_rejects_database_identity_before_mutation(
     presquash_engine: Engine,
-    database_class: str,
+    database_class: str | None,
     request_class: DeploymentClass,
     expected_code: str,
 ) -> None:
@@ -264,6 +290,76 @@ def test_presquash_rebaseline_rejects_database_identity_before_mutation(
         apply_rebaseline(connection, _request(request_class))
     assert exc.value.safe_code == expected_code
     _assert_presquash_unchanged(presquash_engine)
+
+
+def test_presquash_rebaseline_rejects_missing_head_without_mutation(
+    presquash_engine: Engine,
+) -> None:
+    with presquash_engine.begin() as connection:
+        connection.execute(text("DELETE FROM alembic_version"))
+
+    with presquash_engine.connect() as connection, pytest.raises(
+        RebaselineRefused,
+        match="^pre_squash_head_mismatch$",
+    ) as exc:
+        apply_rebaseline(connection, _request(DeploymentClass.REHEARSAL))
+
+    assert exc.value.safe_code == "pre_squash_head_mismatch"
+    with presquash_engine.connect() as connection:
+        assert (
+            tuple(
+                connection.execute(
+                    text("SELECT version_num FROM alembic_version")
+                ).scalars()
+            )
+            == ()
+        )
+        assert (
+            connection.execute(
+                text(
+                    "SELECT 1 FROM information_schema.tables "
+                    "WHERE table_schema='public' "
+                    "AND table_name='mindatlas_schema_identity'"
+                )
+            ).first()
+            is None
+        )
+
+
+def test_presquash_rebaseline_rejects_multiple_heads_without_mutation(
+    presquash_engine: Engine,
+) -> None:
+    with presquash_engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO alembic_version (version_num) "
+                "VALUES ('unreviewed_head')"
+            )
+        )
+
+    with presquash_engine.connect() as connection, pytest.raises(
+        RebaselineRefused,
+        match="^pre_squash_head_mismatch$",
+    ) as exc:
+        apply_rebaseline(connection, _request(DeploymentClass.REHEARSAL))
+
+    assert exc.value.safe_code == "pre_squash_head_mismatch"
+    with presquash_engine.connect() as connection:
+        assert tuple(
+            connection.execute(
+                text("SELECT version_num FROM alembic_version ORDER BY version_num")
+            ).scalars()
+        ) == (PRE_SQUASH_HEAD, "unreviewed_head")
+        assert (
+            connection.execute(
+                text(
+                    "SELECT 1 FROM information_schema.tables "
+                    "WHERE table_schema='public' "
+                    "AND table_name='mindatlas_schema_identity'"
+                )
+            ).first()
+            is None
+        )
 
 
 def test_presquash_rebaseline_rejects_nonempty_legacy_without_mutation(
@@ -291,6 +387,23 @@ def test_presquash_rebaseline_rejects_nonempty_legacy_without_mutation(
     _assert_presquash_unchanged(presquash_engine)
 
 
+def test_presquash_rebaseline_rejects_non_inert_legacy_control_without_mutation(
+    presquash_engine: Engine,
+) -> None:
+    with presquash_engine.begin() as connection:
+        connection.execute(
+            text("UPDATE assistant_runtime_rollout_control " "SET state_revision = 1")
+        )
+    with presquash_engine.connect() as connection, pytest.raises(
+        RebaselineRefused,
+        match="^legacy_exclusion_data_present$",
+    ) as exc:
+        apply_rebaseline(connection, _request(DeploymentClass.REHEARSAL))
+
+    assert exc.value.safe_code == "legacy_exclusion_data_present"
+    _assert_presquash_unchanged(presquash_engine)
+
+
 def test_presquash_rebaseline_rejects_schema_drift_without_mutation(
     presquash_engine: Engine,
 ) -> None:
@@ -307,14 +420,29 @@ def test_presquash_rebaseline_rejects_schema_drift_without_mutation(
     _assert_presquash_unchanged(presquash_engine)
 
 
+def test_presquash_rebaseline_rejects_extra_legacy_prefix_object_without_mutation(
+    presquash_engine: Engine,
+) -> None:
+    with presquash_engine.begin() as connection:
+        connection.execute(
+            text("CREATE TABLE legacy_rebaseline_unreviewed (id integer)")
+        )
+    with presquash_engine.connect() as connection, pytest.raises(
+        RebaselineRefused,
+        match="^pre_squash_fingerprint_mismatch$",
+    ) as exc:
+        apply_rebaseline(connection, _request(DeploymentClass.REHEARSAL))
+
+    assert exc.value.safe_code == "pre_squash_fingerprint_mismatch"
+    _assert_presquash_unchanged(presquash_engine)
+
+
 def test_presquash_rebaseline_rejects_wrong_head_without_mutation(
     presquash_engine: Engine,
 ) -> None:
     with presquash_engine.begin() as connection:
         connection.execute(
-            text(
-                "UPDATE alembic_version SET version_num = 'unreviewed_head'"
-            )
+            text("UPDATE alembic_version SET version_num = 'unreviewed_head'")
         )
 
     with presquash_engine.connect() as connection, pytest.raises(

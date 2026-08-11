@@ -178,6 +178,22 @@ _EXIT_PROOF_CHECKS = frozenset(
     }
 )
 
+_REBASELINE_REJECTION_SCENARIOS = {
+    "production": "production_rebaseline_forbidden",
+    "missing_identity": "database_deployment_identity_missing",
+    "unknown_identity": "database_deployment_identity_unknown",
+    "mismatched_identity": "deployment_identity_mismatch",
+    "missing_head": "pre_squash_head_mismatch",
+    "multiple_heads": "pre_squash_head_mismatch",
+    "legacy_business_row": "legacy_exclusion_data_present",
+    "non_inert_legacy_control": "legacy_exclusion_data_present",
+    "source_schema_drift": "pre_squash_fingerprint_mismatch",
+    "extra_legacy_prefix_object": "pre_squash_fingerprint_mismatch",
+    "data_invariant": "data_invariant_failed",
+    "lock_contention": "rebaseline_lock_unavailable",
+    "retained_snapshot_rollback": "retained_data_changed",
+}
+
 
 def _validate_exit_proof(
     payload: object,
@@ -249,9 +265,15 @@ def _validate_exit_proof(
             "beforeHead",
             "afterHead",
             "retainedDataUnchanged",
+            "rehearsalSuccess",
             "developmentSuccess",
+            "idempotentSecondApply",
+            "snapshotRollback",
+            "reportPathRejectedBeforeDatabase",
+            "parserHasNoBypass",
             "rejectionsNoMutation",
             "rejectionCodes",
+            "rejectionScenarios",
         ),
         "wrong_family_rejected": ("error", "mutationBlocked"),
         "worker_claim_rejected_on_drift": ("error", "mutationBlocked"),
@@ -275,24 +297,45 @@ def _validate_exit_proof(
         and by_name["test_only_downgrade_guard"]["emptyAfterAcknowledged"] is True
     ):
         raise SchemaVerificationError("exit_proof_invalid")
-    rejection_codes = by_name["guarded_rebaseline_matrix"]["rejectionCodes"]
+    matrix = by_name["guarded_rebaseline_matrix"]
+    rejection_codes = matrix["rejectionCodes"]
+    rejection_scenarios = matrix["rejectionScenarios"]
+    expected_rejection_codes = set(_REBASELINE_REJECTION_SCENARIOS.values())
+    scenario_codes: dict[str, str] = {}
+    if not isinstance(rejection_scenarios, list):
+        raise SchemaVerificationError("exit_proof_invalid")
+    for scenario in rejection_scenarios:
+        if not isinstance(scenario, dict) or set(scenario) != {
+            "name",
+            "error",
+            "sourceStateUnchanged",
+        }:
+            raise SchemaVerificationError("exit_proof_invalid")
+        name = scenario["name"]
+        error = scenario["error"]
+        if (
+            not isinstance(name, str)
+            or not isinstance(error, str)
+            or name in scenario_codes
+            or scenario["sourceStateUnchanged"] is not True
+        ):
+            raise SchemaVerificationError("exit_proof_invalid")
+        scenario_codes[name] = error
     if not (
-        by_name["guarded_rebaseline_matrix"]["beforeHead"] == PRE_SQUASH_HEAD
-        and by_name["guarded_rebaseline_matrix"]["afterHead"]
-        == CLEAN_ROOT_REVISION
-        and by_name["guarded_rebaseline_matrix"]["retainedDataUnchanged"] is True
-        and by_name["guarded_rebaseline_matrix"]["developmentSuccess"] is True
-        and by_name["guarded_rebaseline_matrix"]["rejectionsNoMutation"] is True
+        matrix["beforeHead"] == PRE_SQUASH_HEAD
+        and matrix["afterHead"] == CLEAN_ROOT_REVISION
+        and matrix["retainedDataUnchanged"] is True
+        and matrix["rehearsalSuccess"] is True
+        and matrix["developmentSuccess"] is True
+        and matrix["idempotentSecondApply"] is True
+        and matrix["snapshotRollback"] is True
+        and matrix["reportPathRejectedBeforeDatabase"] is True
+        and matrix["parserHasNoBypass"] is True
+        and matrix["rejectionsNoMutation"] is True
         and isinstance(rejection_codes, list)
-        and {
-            "production_rebaseline_forbidden",
-            "database_deployment_identity_unknown",
-            "legacy_exclusion_data_present",
-            "pre_squash_fingerprint_mismatch",
-            "pre_squash_head_mismatch",
-            "rebaseline_lock_unavailable",
-        }
-        <= set(rejection_codes)
+        and set(rejection_codes) == expected_rejection_codes
+        and len(rejection_codes) == len(expected_rejection_codes)
+        and scenario_codes == _REBASELINE_REJECTION_SCENARIOS
     ):
         raise SchemaVerificationError("exit_proof_invalid")
     for name in ("wrong_family_rejected", "worker_claim_rejected_on_drift"):
@@ -386,7 +429,9 @@ def _sqlalchemy_url(url: str) -> str:
     return url
 
 
-def _read_single_head(connection, expected: str, safe_code: str) -> None:  # noqa: ANN001
+def _read_single_head(
+    connection, expected: str, safe_code: str
+) -> None:  # noqa: ANN001
     rows = tuple(
         str(value)
         for value in connection.execute(
@@ -428,12 +473,16 @@ def _require_inert_legacy_state(connection) -> None:  # noqa: ANN001
         if count != 0:
             raise SchemaVerificationError("legacy_exclusion_data_present")
 
-    controls = connection.execute(
-        text(
-            "SELECT singleton_key, active_rollout_revision_id, state_revision "
-            "FROM assistant_runtime_rollout_control"
+    controls = (
+        connection.execute(
+            text(
+                "SELECT singleton_key, active_rollout_revision_id, state_revision "
+                "FROM assistant_runtime_rollout_control"
+            )
         )
-    ).mappings().all()
+        .mappings()
+        .all()
+    )
     if len(controls) != 1:
         raise SchemaVerificationError("legacy_exclusion_data_present")
     control = controls[0]
@@ -547,10 +596,8 @@ def _verify_clean_contract(
     application_fingerprint = structural_fingerprint(logical_clean)
     if (
         logical_bytes != expected_bytes
-        or application_fingerprint
-        != logical_contract.logical_application_fingerprint
-        or application_fingerprint
-        != expected.application_structural_fingerprint
+        or application_fingerprint != logical_contract.logical_application_fingerprint
+        or application_fingerprint != expected.application_structural_fingerprint
     ):
         raise SchemaVerificationError("logical_application_schema_difference")
 
@@ -560,14 +607,11 @@ def _verify_clean_contract(
         or marker.structural_fingerprint != application_fingerprint
         or marker.seed_contract_digest != expected.seed_contract_digest
         or marker.runtime_contract_version != expected.runtime_contract_version
-        or marker.checkpoint_codec_version
-        != expected.checkpoint_codec_version
-        or marker.capability_feature_digest
-        != expected.capability_feature_digest
+        or marker.checkpoint_codec_version != expected.checkpoint_codec_version
+        or marker.capability_feature_digest != expected.capability_feature_digest
         or marker.operator_auth_contract_version
         != expected.operator_auth_contract_version
-        or marker.identity_contract_version
-        != SCHEMA_IDENTITY_CONTRACT_VERSION
+        or marker.identity_contract_version != SCHEMA_IDENTITY_CONTRACT_VERSION
         or (
             required_deployment_class is not None
             and marker.deployment_class is not required_deployment_class
@@ -601,20 +645,18 @@ def verify_equivalence(
         expected = load_expected_schema_contract()
 
         expected_exclusion_keys = {
-            CanonicalObjectKey(*parts)
-            for parts in expected_legacy_object_keys()
+            CanonicalObjectKey(*parts) for parts in expected_legacy_object_keys()
         }
         if set(exclusions.object_keys) != expected_exclusion_keys:
-            raise SchemaVerificationError(
-                "legacy_exclusion_allowlist_mismatch"
-            )
+            raise SchemaVerificationError("legacy_exclusion_allowlist_mismatch")
 
         old_document = _read_old_database(old_database_url)
-        if (
-            structural_fingerprint(old_document)
-            != exclusions.source_structural_fingerprint
-            or canonical_json_bytes(old_document.to_payload())
-            != canonical_json_bytes(snapshot.source_document.to_payload())
+        if structural_fingerprint(
+            old_document
+        ) != exclusions.source_structural_fingerprint or canonical_json_bytes(
+            old_document.to_payload()
+        ) != canonical_json_bytes(
+            snapshot.source_document.to_payload()
         ):
             raise SchemaVerificationError("pre_squash_schema_drift")
         old_without_legacy = normalize_document(
@@ -643,9 +685,7 @@ def verify_equivalence(
             logical_contract.logical_application_document.to_payload()
         )
         if old_bytes != clean_bytes or old_bytes != expected_bytes:
-            raise SchemaVerificationError(
-                "logical_application_schema_difference"
-            )
+            raise SchemaVerificationError("logical_application_schema_difference")
 
         old_fingerprint = structural_fingerprint(logical_old)
         clean_fingerprint = structural_fingerprint(logical_clean)
@@ -653,12 +693,9 @@ def verify_equivalence(
         if (
             old_fingerprint != expected_fingerprint
             or clean_fingerprint != expected_fingerprint
-            or expected.application_structural_fingerprint
-            != expected_fingerprint
+            or expected.application_structural_fingerprint != expected_fingerprint
         ):
-            raise SchemaVerificationError(
-                "logical_application_schema_difference"
-            )
+            raise SchemaVerificationError("logical_application_schema_difference")
 
         return EquivalenceVerification(
             old_application_fingerprint=old_fingerprint,
@@ -686,9 +723,7 @@ def verify_fresh(
         try:
             required_deployment_class = DeploymentClass(deployment_class)
         except ValueError:
-            raise SchemaVerificationError(
-                "schema_deployment_class_invalid"
-            ) from None
+            raise SchemaVerificationError("schema_deployment_class_invalid") from None
         exclusions = load_exclusion_manifest()
         logical_contract = load_logical_application_contract()
         expected = load_expected_schema_contract()
@@ -759,14 +794,12 @@ def verify_exit(
             != expected.application_structural_fingerprint
         ):
             raise SchemaVerificationError("expected_manifest_invalid")
-        root = BACKEND_ROOT / "alembic" / "versions" / (
-            "pre_ga_v1_0001_clean_baseline.py"
+        root = (
+            BACKEND_ROOT / "alembic" / "versions" / ("pre_ga_v1_0001_clean_baseline.py")
         )
         if not root.is_file() or "alembic stamp" in root.read_text("utf-8"):
             raise SchemaVerificationError("clean_root_artifact_invalid")
-        if "alembic stamp" in (
-            REPO_ROOT / "deploy" / "migrate.sh"
-        ).read_text("utf-8"):
+        if "alembic stamp" in (REPO_ROOT / "deploy" / "migrate.sh").read_text("utf-8"):
             raise SchemaVerificationError("deploy_auto_stamp_present")
         build_revision = os.environ.get("APP_BUILD_REVISION", "").strip()
         if not build_revision or build_revision in {"development", "unknown"}:
@@ -805,21 +838,21 @@ def verify_exit(
             "logicalEquivalenceVerified": fresh.application_fingerprint
             == expected.application_structural_fingerprint,
             "freshUpgradeVerified": proof_flags["fresh_upgrade"],
-            "testOnlyDowngradeGuardVerified": proof_flags[
-                "test_only_downgrade_guard"
-            ],
-            "guardedRebaselineMatrixVerified": proof_flags[
-                "guarded_rebaseline_matrix"
-            ],
+            "testOnlyDowngradeGuardVerified": proof_flags["test_only_downgrade_guard"],
+            "guardedRebaselineMatrixVerified": proof_flags["guarded_rebaseline_matrix"],
             "wrongFamilyRejected": proof_flags["wrong_family_rejected"],
-            "workerClaimRejectedOnDrift": proof_flags[
-                "worker_claim_rejected_on_drift"
-            ],
+            "workerClaimRejectedOnDrift": proof_flags["worker_claim_rejected_on_drift"],
             "deployAutoStampAbsent": proof_flags["deploy_auto_stamp_absent"],
             "postgresMajor": clean_document.postgres_major,
             "buildRevision": build_revision,
         }
-        if any(value is not True for key, value in payload.items() if key.endswith("Verified") or key.endswith("Rejected") or key == "deployAutoStampAbsent"):
+        if any(
+            value is not True
+            for key, value in payload.items()
+            if key.endswith("Verified")
+            or key.endswith("Rejected")
+            or key == "deployAutoStampAbsent"
+        ):
             raise SchemaVerificationError("verification_incomplete")
         digest = _evidence_digest(payload)
         evidence = SchemaEvidence(**payload, verificationDigest=digest)
@@ -856,12 +889,8 @@ def main(argv: list[str] | None = None) -> int:
             warnings.simplefilter("always")
             if args.mode == "equivalence":
                 result = verify_equivalence(
-                    old_database_url=_read_database_url(
-                        args.old_database_url_env
-                    ),
-                    clean_database_url=_read_database_url(
-                        args.clean_database_url_env
-                    ),
+                    old_database_url=_read_database_url(args.old_database_url_env),
+                    clean_database_url=_read_database_url(args.clean_database_url_env),
                 )
                 success_message = (
                     "schema_equivalence_ok "
@@ -897,9 +926,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
             else:
                 evidence = verify_exit(
-                    fresh_database_url=_read_database_url(
-                        args.fresh_database_url_env
-                    ),
+                    fresh_database_url=_read_database_url(args.fresh_database_url_env),
                     rebaseline_database_url=_read_database_url(
                         args.rebaseline_database_url_env
                     ),
@@ -912,9 +939,7 @@ def main(argv: list[str] | None = None) -> int:
                     f"schema_revision={evidence.schemaRevision} "
                     f"verification_digest={evidence.verificationDigest}"
                 )
-        if any(
-            not _is_known_cli_warning(item) for item in caught_warnings
-        ):
+        if any(not _is_known_cli_warning(item) for item in caught_warnings):
             raise SchemaVerificationError("verification_warning_unexpected")
         print(success_message)
         return 0

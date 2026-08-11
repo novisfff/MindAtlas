@@ -11,7 +11,13 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 BASE_COMPOSE = REPO_ROOT / "deploy" / "docker-compose.yml"
 DEV_OVERRIDE = REPO_ROOT / "deploy" / "docker-compose.override.yml"
 SMOKE_OVERLAY = REPO_ROOT / "deploy" / "compose.main-agent-smoke.yml"
-SERVICES = ("db-migrate", "api", "lightrag-worker", "docling-worker", "assistant-worker")
+SERVICES = (
+    "db-migrate",
+    "api",
+    "lightrag-worker",
+    "docling-worker",
+    "assistant-worker",
+)
 
 
 class _ComposeLoader(yaml.SafeLoader):
@@ -40,18 +46,28 @@ def _environment(compose: dict[str, object], service: str) -> dict[str, object]:
     return environment
 
 
-def test_production_like_base_compose_fails_closed_without_development_default() -> None:
+def test_production_like_base_compose_fails_closed_without_development_default() -> (
+    None
+):
     source = BASE_COMPOSE.read_text(encoding="utf-8")
 
     assert ":-development" not in source
     assert "MINDATLAS_DEPLOYMENT_CLASS: development" not in source
-    assert source.count("MINDATLAS_DEPLOYMENT_CLASS: ${MINDATLAS_DEPLOYMENT_CLASS:-}") == 5
+    required_identity = (
+        "MINDATLAS_DEPLOYMENT_CLASS: "
+        "${MINDATLAS_DEPLOYMENT_CLASS:?Set MINDATLAS_DEPLOYMENT_CLASS "
+        "to development, rehearsal, or production}"
+    )
+    assert source.count(required_identity) == 5
 
 
 def test_local_override_is_the_only_development_identity_source() -> None:
     override = _compose(DEV_OVERRIDE)
     for service in SERVICES:
-        assert _environment(override, service)["MINDATLAS_DEPLOYMENT_CLASS"] == "development"
+        assert (
+            _environment(override, service)["MINDATLAS_DEPLOYMENT_CLASS"]
+            == "development"
+        )
 
 
 def test_main_agent_smoke_explicitly_uses_rehearsal_identity() -> None:

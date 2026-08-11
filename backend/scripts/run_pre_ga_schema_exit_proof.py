@@ -9,6 +9,7 @@ command validates the exact check set and its digest before deriving evidence.
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import hashlib
 import json
 import os
@@ -16,6 +17,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
 from datetime import timedelta
 
 from sqlalchemy import create_engine, text
@@ -29,7 +31,11 @@ from tests._bootstrap import bootstrap_backend_imports, reset_caches  # noqa: E4
 bootstrap_backend_imports()
 reset_caches()
 
-from app.schema.canonical import canonical_json_bytes  # noqa: E402
+from app.schema.canonical import (  # noqa: E402
+    canonical_json_bytes,
+    structural_fingerprint,
+)
+from app.schema.catalog import PostgresCatalogReader  # noqa: E402
 from app.schema.compatibility import runtime_schema_compatibility  # noqa: E402
 from app.schema.contracts import (  # noqa: E402
     CLEAN_ROOT_REVISION,
@@ -43,8 +49,13 @@ from app.schema.rebaseline import (  # noqa: E402
     RebaselineRequest,
     apply_rebaseline,
 )
-from tests.main_agent_postgres_support import insert_complete_main_agent_run  # noqa: E402
-from tests.postgres_destructive_guard import reset_disposable_public_schema  # noqa: E402
+import app.schema.rebaseline as rebaseline_module  # noqa: E402
+from tests.main_agent_postgres_support import (
+    insert_complete_main_agent_run,
+)  # noqa: E402
+from tests.postgres_destructive_guard import (
+    reset_disposable_public_schema,
+)  # noqa: E402
 from tests.pre_squash_fixture import install_pre_squash_fixture  # noqa: E402
 from tests.schema_baseline_support import upgrade_clean_root_checked  # noqa: E402
 
@@ -88,13 +99,20 @@ def _head(engine):  # noqa: ANN001, ANN202
         ).scalar()
 
 
-def _set_database_comment(engine, deployment_class: str) -> None:  # noqa: ANN001
+def _set_database_comment(
+    engine,
+    deployment_class: str | None,
+) -> None:  # noqa: ANN001
     with engine.begin() as connection:
         name = connection.scalar(text("SELECT current_database()"))
         if not isinstance(name, str):
             raise RuntimeError("exit_proof_database_identity_unavailable")
+        escaped_name = name.replace(chr(34), chr(34) * 2)
+        if deployment_class is None:
+            connection.exec_driver_sql(f'COMMENT ON DATABASE "{escaped_name}" IS NULL')
+            return
         connection.exec_driver_sql(
-            f'COMMENT ON DATABASE "{name.replace(chr(34), chr(34) * 2)}" IS %s',
+            f'COMMENT ON DATABASE "{escaped_name}" IS %s',
             (f"mindatlas:deployment_class={deployment_class}",),
         )
 
@@ -233,7 +251,69 @@ def _apply_and_code(engine, request: RebaselineRequest) -> str:  # noqa: ANN001
     return "accepted"
 
 
+def _quote_identifier(identifier: str) -> str:
+    return f'"{identifier.replace(chr(34), chr(34) * 2)}"'
+
+
+def _source_state_digest(engine) -> str:  # noqa: ANN001
+    """Hash the full source catalog and row set without recording row values."""
+    with engine.connect() as connection:
+        database_comment = connection.scalar(
+            text(
+                "SELECT shobj_description(oid, 'pg_database') "
+                "FROM pg_database WHERE datname = current_database()"
+            )
+        )
+        heads = tuple(
+            str(item)
+            for item in connection.execute(
+                text("SELECT version_num FROM alembic_version ORDER BY version_num")
+            ).scalars()
+        )
+        table_names = tuple(
+            str(item)
+            for item in connection.execute(
+                text(
+                    "SELECT tablename FROM pg_catalog.pg_tables "
+                    "WHERE schemaname = 'public' ORDER BY tablename"
+                )
+            ).scalars()
+        )
+        rows: dict[str, list[str]] = {}
+        for table_name in table_names:
+            qualified = f'"public".{_quote_identifier(table_name)}'
+            rows[table_name] = sorted(
+                str(item)
+                for item in connection.execute(
+                    text(f"SELECT row_to_json(t)::text FROM {qualified} AS t")
+                ).scalars()
+            )
+        catalog = structural_fingerprint(
+            PostgresCatalogReader(connection).read_document()
+        )
+    return hashlib.sha256(
+        canonical_json_bytes(
+            {
+                "databaseComment": database_comment,
+                "heads": heads,
+                "catalog": catalog,
+                "rows": rows,
+            }
+        )
+    ).hexdigest()
+
+
+def _assert_source_state_unchanged(
+    engine,
+    *,
+    before: str,
+) -> None:  # noqa: ANN001
+    if _source_state_digest(engine) != before:
+        raise RuntimeError("exit_proof_rebaseline_mutated_rejected_source")
+
+
 def _assert_presquash_unchanged(engine, *, expected_head: str) -> None:  # noqa: ANN001
+    """Compatibility helper retained for focused unit-like proof stages."""
     with engine.connect() as connection:
         head = connection.execute(
             text("SELECT version_num FROM alembic_version")
@@ -273,100 +353,189 @@ def _run_stage(label: str, callback):  # noqa: ANN001, ANN202
         raise ExitProofFailure(f"exit_proof_{label}_{code}") from None
 
 
+_REBASELINE_REJECTION_SCENARIOS = (
+    ("production", "production_rebaseline_forbidden"),
+    ("missing_identity", "database_deployment_identity_missing"),
+    ("unknown_identity", "database_deployment_identity_unknown"),
+    ("mismatched_identity", "deployment_identity_mismatch"),
+    ("missing_head", "pre_squash_head_mismatch"),
+    ("multiple_heads", "pre_squash_head_mismatch"),
+    ("legacy_business_row", "legacy_exclusion_data_present"),
+    ("non_inert_legacy_control", "legacy_exclusion_data_present"),
+    ("source_schema_drift", "pre_squash_fingerprint_mismatch"),
+    ("extra_legacy_prefix_object", "pre_squash_fingerprint_mismatch"),
+    ("data_invariant", "data_invariant_failed"),
+    ("lock_contention", "rebaseline_lock_unavailable"),
+    ("retained_snapshot_rollback", "retained_data_changed"),
+)
+
+
+def _install_presquash_source(engine, url: str) -> None:  # noqa: ANN001
+    reset_disposable_public_schema(engine)
+    install_pre_squash_fixture(url)
+    _set_database_comment(engine, "rehearsal")
+
+
+def _insert_legacy_business_row(engine) -> None:  # noqa: ANN001
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO assistant_runtime_migration_item "
+                "(id, subject_kind, source_type, source_id, source_name, "
+                "source_name_normalized, source_digest, evidence_json, "
+                "source_revision, target_revision, attempt_count, state_revision, "
+                "state, created_at, updated_at) VALUES "
+                "(:id, 'skill', 'legacy', 'proof', '', '', :digest, '{}'::json, "
+                "0, 0, 0, 0, 'discovered', NOW(), NOW())"
+            ),
+            {"id": "00000000-0000-0000-0000-000000000003", "digest": "a" * 64},
+        )
+
+
+def _rebaseline_report_path_rejected_before_database() -> bool:
+    from scripts import rebaseline_pre_ga_v1 as rebaseline_script
+
+    original_create_engine = rebaseline_script.create_engine
+    original_environment = {
+        name: os.environ.get(name)
+        for name in (
+            "MINDATLAS_DEPLOYMENT_CLASS",
+            "APP_BUILD_REVISION",
+            "MINDATLAS_EXIT_PROOF_DATABASE_URL",
+        )
+    }
+    connected = False
+
+    def unexpected_create_engine(*args, **kwargs):  # noqa: ANN001, ANN002
+        nonlocal connected
+        connected = True
+        raise AssertionError("report-path rejection must precede database access")
+
+    try:
+        rebaseline_script.create_engine = unexpected_create_engine
+        os.environ["MINDATLAS_DEPLOYMENT_CLASS"] = "development"
+        os.environ["APP_BUILD_REVISION"] = "schema-exit-proof"
+        os.environ["MINDATLAS_EXIT_PROOF_DATABASE_URL"] = "postgresql://unused"
+        with tempfile.TemporaryDirectory() as directory:
+            result = rebaseline_script.main(
+                [
+                    "inspect",
+                    "--database-url-env",
+                    "MINDATLAS_EXIT_PROOF_DATABASE_URL",
+                    "--report-file",
+                    str(Path(directory) / "missing-parent" / "report.json"),
+                ]
+            )
+    finally:
+        rebaseline_script.create_engine = original_create_engine
+        for name, value in original_environment.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+    if result != 2 or connected:
+        raise RuntimeError("exit_proof_report_path_guard_failed")
+    return True
+
+
+def _rebaseline_parser_has_no_bypass() -> bool:
+    from scripts.rebaseline_pre_ga_v1 import build_parser
+
+    help_text = build_parser().format_help()
+    if "--force" in help_text or "--skip" in help_text:
+        raise RuntimeError("exit_proof_rebaseline_parser_bypass_present")
+    return True
+
+
 def _rebaseline_matrix(url: str) -> dict[str, object]:
     engine = _engine(url)
+    rejection_scenarios: list[dict[str, object]] = []
     try:
-        def install_fixture() -> None:
-            install_pre_squash_fixture(url)
-
-        def reset_and_install() -> None:
-            reset_disposable_public_schema(engine)
-            install_pre_squash_fixture(url)
-
-        _run_stage("source_fixture", install_fixture)
+        _run_stage("source_fixture", lambda: _install_presquash_source(engine, url))
         with engine.begin() as connection:
-            retained_id = "00000000-0000-0000-0000-000000000002"
             connection.execute(
                 text(
                     "INSERT INTO app_setting "
                     "(id, key, value_json, created_at, updated_at) "
                     "VALUES (:id, :key, '{}'::json, NOW(), NOW())"
                 ),
-                {"id": retained_id, "key": "schema-exit-retained"},
+                {
+                    "id": "00000000-0000-0000-0000-000000000002",
+                    "key": "schema-exit-retained",
+                },
             )
-        def apply_rehearsal():  # noqa: ANN202
-            with engine.connect() as connection:
-                return apply_rebaseline(
-                    connection,
-                    _request(DeploymentClass.REHEARSAL),
-                )
-
-        report = _run_stage("rehearsal_success", apply_rehearsal)
+        with engine.connect() as connection:
+            rehearsal_report = apply_rebaseline(
+                connection,
+                _request(DeploymentClass.REHEARSAL),
+            )
         if (
-            report.before_revision != PRE_SQUASH_HEAD
-            or report.after_revision != CLEAN_ROOT_REVISION
-            or report.retained_data_unchanged is not True
+            rehearsal_report.before_revision != PRE_SQUASH_HEAD
+            or rehearsal_report.after_revision != CLEAN_ROOT_REVISION
+            or rehearsal_report.retained_data_unchanged is not True
         ):
             raise RuntimeError("exit_proof_rebaseline_success_failed")
+        before_second_apply = _source_state_digest(engine)
+        with engine.connect() as connection:
+            idempotent_report = apply_rebaseline(
+                connection,
+                _request(DeploymentClass.REHEARSAL),
+            )
+        if idempotent_report.result != "already_rebaselined":
+            raise RuntimeError("exit_proof_rebaseline_idempotence_failed")
+        _assert_source_state_unchanged(engine, before=before_second_apply)
 
-        _run_stage("development_fixture", reset_and_install)
-        _set_database_comment(engine, "development")
-
-        def apply_development():  # noqa: ANN202
-            with engine.connect() as connection:
-                return apply_rebaseline(
-                    connection,
-                    _request(DeploymentClass.DEVELOPMENT),
-                )
-
-        development_report = _run_stage(
-            "development_success",
-            apply_development,
+        _run_stage(
+            "development_fixture", lambda: _install_presquash_source(engine, url)
         )
+        _set_database_comment(engine, "development")
+        with engine.connect() as connection:
+            development_report = apply_rebaseline(
+                connection,
+                _request(DeploymentClass.DEVELOPMENT),
+            )
         if (
             development_report.before_revision != PRE_SQUASH_HEAD
             or development_report.after_revision != CLEAN_ROOT_REVISION
         ):
             raise RuntimeError("exit_proof_development_rebaseline_failed")
 
-        rejection_codes: list[str] = []
-        for scenario in (
-            "production",
-            "unknown",
-            "nonempty",
-            "drift",
-            "wrong_head",
-            "lock",
-        ):
+        for name, expected_code in _REBASELINE_REJECTION_SCENARIOS:
             _run_stage(
-                f"{scenario}_fixture",
-                lambda: (
-                    reset_disposable_public_schema(engine),
-                    install_pre_squash_fixture(url),
-                ),
+                f"{name}_fixture",
+                lambda: _install_presquash_source(engine, url),
             )
-            _set_database_comment(engine, "rehearsal")
-            if scenario == "production":
-                code = _apply_and_code(engine, _request(DeploymentClass.PRODUCTION))
-            elif scenario == "unknown":
+            request = _request(DeploymentClass.REHEARSAL)
+            if name == "production":
+                request = _request(DeploymentClass.PRODUCTION)
+            elif name == "missing_identity":
+                _set_database_comment(engine, None)
+            elif name == "unknown_identity":
                 _set_database_comment(engine, "shared")
-                code = _apply_and_code(engine, _request(DeploymentClass.REHEARSAL))
-            elif scenario == "nonempty":
+            elif name == "mismatched_identity":
+                _set_database_comment(engine, "development")
+            elif name == "missing_head":
+                with engine.begin() as connection:
+                    connection.execute(text("DELETE FROM alembic_version"))
+            elif name == "multiple_heads":
                 with engine.begin() as connection:
                     connection.execute(
                         text(
-                            "INSERT INTO assistant_runtime_migration_item "
-                            "(id, subject_kind, source_type, source_id, source_name, "
-                            "source_name_normalized, source_digest, evidence_json, "
-                            "source_revision, target_revision, attempt_count, state_revision, "
-                            "state, created_at, updated_at) VALUES "
-                            "(:id, 'skill', 'legacy', 'proof', '', '', :digest, '{}'::json, "
-                            "0, 0, 0, 0, 'discovered', NOW(), NOW())"
-                        ),
-                        {"id": "00000000-0000-0000-0000-000000000003", "digest": "a" * 64},
+                            "INSERT INTO alembic_version (version_num) "
+                            "VALUES ('unreviewed_head')"
+                        )
                     )
-                code = _apply_and_code(engine, _request(DeploymentClass.REHEARSAL))
-            elif scenario == "drift":
+            elif name == "legacy_business_row":
+                _insert_legacy_business_row(engine)
+            elif name == "non_inert_legacy_control":
+                with engine.begin() as connection:
+                    connection.execute(
+                        text(
+                            "UPDATE assistant_runtime_rollout_control "
+                            "SET state_revision = 1"
+                        )
+                    )
+            elif name == "source_schema_drift":
                 with engine.begin() as connection:
                     connection.execute(
                         text(
@@ -374,17 +543,14 @@ def _rebaseline_matrix(url: str) -> dict[str, object]:
                             "ADD COLUMN schema_exit_drift integer"
                         )
                     )
-                code = _apply_and_code(engine, _request(DeploymentClass.REHEARSAL))
-            elif scenario == "wrong_head":
+            elif name == "extra_legacy_prefix_object":
                 with engine.begin() as connection:
                     connection.execute(
-                        text(
-                            "UPDATE alembic_version "
-                            "SET version_num = 'unreviewed_head'"
-                        )
+                        text("CREATE TABLE legacy_exit_proof_unreviewed (id integer)")
                     )
-                code = _apply_and_code(engine, _request(DeploymentClass.REHEARSAL))
-            else:
+
+            before_rejection = _source_state_digest(engine)
+            if name == "lock_contention":
                 holder = engine.connect()
                 transaction = holder.begin()
                 try:
@@ -392,32 +558,63 @@ def _rebaseline_matrix(url: str) -> dict[str, object]:
                         text("SELECT pg_advisory_xact_lock(:key)"),
                         {"key": REBASELINE_ADVISORY_LOCK_KEY},
                     )
-                    code = _apply_and_code(
-                        engine,
-                        _request(DeploymentClass.REHEARSAL),
-                    )
+                    code = _apply_and_code(engine, request)
                 finally:
                     transaction.rollback()
                     holder.close()
-            _assert_presquash_unchanged(
-                engine,
-                expected_head=(
-                    "unreviewed_head"
-                    if scenario == "wrong_head"
-                    else PRE_SQUASH_HEAD
-                ),
+            elif name == "data_invariant":
+                original_invariants = rebaseline_module.validate_data_invariants
+
+                def rejected_invariant(connection):  # noqa: ANN001
+                    raise RebaselineRefused("data_invariant_failed")
+
+                try:
+                    rebaseline_module.validate_data_invariants = rejected_invariant
+                    code = _apply_and_code(engine, request)
+                finally:
+                    rebaseline_module.validate_data_invariants = original_invariants
+            elif name == "retained_snapshot_rollback":
+                original_snapshot = rebaseline_module.snapshot_retained_tables
+                calls = 0
+
+                def changed_snapshot(connection, ephemeral_key):  # noqa: ANN001
+                    nonlocal calls
+                    calls += 1
+                    snapshot = original_snapshot(connection, ephemeral_key)
+                    if calls == 2:
+                        if not snapshot:
+                            raise RuntimeError("exit_proof_snapshot_empty")
+                        return (
+                            *snapshot[:-1],
+                            replace(
+                                snapshot[-1],
+                                row_count=snapshot[-1].row_count + 1,
+                            ),
+                        )
+                    return snapshot
+
+                try:
+                    rebaseline_module.snapshot_retained_tables = changed_snapshot
+                    code = _apply_and_code(engine, request)
+                finally:
+                    rebaseline_module.snapshot_retained_tables = original_snapshot
+                if calls != 2:
+                    raise RuntimeError("exit_proof_snapshot_rollback_not_reached")
+            else:
+                code = _apply_and_code(engine, request)
+            if code != expected_code:
+                raise RuntimeError("exit_proof_rebaseline_rejection_matrix_failed")
+            _assert_source_state_unchanged(engine, before=before_rejection)
+            rejection_scenarios.append(
+                {
+                    "name": name,
+                    "error": code,
+                    "sourceStateUnchanged": True,
+                }
             )
-            rejection_codes.append(code)
-        expected = {
-            "production_rebaseline_forbidden",
-            "database_deployment_identity_unknown",
-            "legacy_exclusion_data_present",
-            "pre_squash_fingerprint_mismatch",
-            "pre_squash_head_mismatch",
-            "rebaseline_lock_unavailable",
-        }
-        if set(rejection_codes) != expected:
-            raise RuntimeError("exit_proof_rebaseline_rejection_matrix_failed")
+
+        report_path_rejected = _rebaseline_report_path_rejected_before_database()
+        parser_has_no_bypass = _rebaseline_parser_has_no_bypass()
     finally:
         reset_disposable_public_schema(engine)
         engine.dispose()
@@ -434,9 +631,17 @@ def _rebaseline_matrix(url: str) -> dict[str, object]:
             "beforeHead": PRE_SQUASH_HEAD,
             "afterHead": CLEAN_ROOT_REVISION,
             "retainedDataUnchanged": True,
+            "rehearsalSuccess": True,
             "developmentSuccess": True,
+            "idempotentSecondApply": True,
+            "snapshotRollback": True,
+            "reportPathRejectedBeforeDatabase": report_path_rejected,
+            "parserHasNoBypass": parser_has_no_bypass,
             "rejectionsNoMutation": True,
-            "rejectionCodes": sorted(expected),
+            "rejectionCodes": sorted(
+                {code for _, code in _REBASELINE_REJECTION_SCENARIOS}
+            ),
+            "rejectionScenarios": rejection_scenarios,
         },
     }
 
@@ -495,6 +700,7 @@ def _compatibility_proofs(url: str) -> tuple[dict[str, object], dict[str, object
                     "SET schema_family='wrong_family'"
                 )
             )
+
         class WorkerSchema:
             def is_compatible(self, db):  # noqa: ANN001
                 return runtime_schema_compatibility().is_compatible(db)
@@ -532,7 +738,11 @@ def _compatibility_proofs(url: str) -> tuple[dict[str, object], dict[str, object
                 ),
                 {"build": "schema-exit-compatibility"},
             ).one()
-        if row.status != "queued" or row.lease_owner is not None or row.lease_expires_at is not None:
+        if (
+            row.status != "queued"
+            or row.lease_owner is not None
+            or row.lease_expires_at is not None
+        ):
             raise RuntimeError("exit_proof_worker_drift_mutated")
         worker_drift = {
             "name": "worker_claim_rejected_on_drift",
@@ -552,7 +762,9 @@ def _build_revision_digest(payload: dict[str, object]) -> str:
     return hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
 
 
-def build_proof(*, fresh_url: str, downgrade_url: str, rebaseline_url: str, build_revision: str) -> dict[str, object]:
+def build_proof(
+    *, fresh_url: str, downgrade_url: str, rebaseline_url: str, build_revision: str
+) -> dict[str, object]:
     checks = [
         _run_stage(
             "fresh_upgrade",
