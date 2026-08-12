@@ -37,3 +37,4 @@ lightrag_storage/
 .DS_Store
 .ace-tool/
 .agent/
+.worktrees/

@@ -9,7 +9,7 @@ from app.database import Base
 class AiProvider(UuidPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "ai_provider"
 
-    name = Column(String(128), nullable=False, unique=True)
+    name = Column(String(128), nullable=False, unique=True, index=True)
     base_url = Column(String(2048), nullable=False)
     model = Column(String(255), nullable=False)
     api_key_encrypted = Column(Text, nullable=False)

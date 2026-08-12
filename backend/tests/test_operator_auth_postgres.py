@@ -1,13 +1,11 @@
-"""PostgreSQL gates for Plan 1 Task 2 operator control-plane schema.
+"""PostgreSQL gates for the operator control-plane schema on the clean root.
 
 Requires ``MINDATLAS_TEST_POSTGRES_URL``. Proves:
 
-- additive revision ``9f3c1a7e2b40`` remains the historical target for
-  operator-control-plane migration fixtures
+- the release-critical fixture installs the complete clean root directly
 - singleton / digest / expiry / revoke-reason checks
 - unique token_digest and singleton_key
 - append-only ``operator_audit_event`` (UPDATE/DELETE raise SQLSTATE 55000)
-- guarded downgrade (empty uninitialized non-production test DB only)
 """
 
 from __future__ import annotations
@@ -27,15 +25,14 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from tests._bootstrap import bootstrap_backend_imports, reset_caches
 from tests.postgres_destructive_guard import reset_disposable_public_schema
+from tests.schema_baseline_support import upgrade_clean_root_checked
 
 bootstrap_backend_imports()
 reset_caches()
 
-PARENT_REVISION = "3bd7bc4257c9"
-TASK2_HEAD = "9f3c1a7e2b40"
-CURRENT_HEAD = "b6e2d4f8a901"
-DOWNGRADE_BLOCKED_TOKEN = "operator_auth_downgrade_blocked"
-DESTRUCTIVE_DOWNGRADE_ENV = "MINDATLAS_TEST_DESTRUCTIVE_DOWNGRADE"
+from app.schema.contracts import CLEAN_ROOT_REVISION  # noqa: E402
+
+CLEAN_SCHEMA_HEAD = CLEAN_ROOT_REVISION
 
 _POSTGRES_URL = os.environ.get("MINDATLAS_TEST_POSTGRES_URL", "").strip()
 _REQUIRE_POSTGRES = os.environ.get("MINDATLAS_REQUIRE_POSTGRES", "").strip() in {
@@ -77,6 +74,9 @@ def _as_sqlalchemy_url(url: str) -> str:
 
 def _configure_database_env(url: str) -> None:
     os.environ["DATABASE_URL"] = url
+    os.environ["MINDATLAS_DEPLOYMENT_CLASS"] = "rehearsal"
+    os.environ["APP_ENV"] = "test"
+    os.environ["APP_BUILD_REVISION"] = "test-operator-auth-clean-root"
     reset_caches()
     try:
         from app.config import get_settings
@@ -179,21 +179,20 @@ def _drop_public_schema(engine: Engine) -> None:
     reset_disposable_public_schema(engine)
 
 
-def _ensure_parent_revision() -> None:
-    """Bring disposable DB to parent ``3bd7bc4257c9`` without full chain upgrade.
-
-    The disposable operator-auth test database is empty by design; stamping the
-    parent is sufficient because Task 2 is additive and does not depend on prior
-    table shapes for its own DDL.
-    """
+def _ensure_clean_root() -> None:
+    """Install the live clean root directly on an empty disposable database."""
     _configure_database_env(_POSTGRES_URL)
     with _engine() as engine:
         _drop_public_schema(engine)
-    # Stamp parent so upgrade only applies 9f3c1a7e2b40.
-    _run_alembic("stamp", PARENT_REVISION)
+    upgrade_clean_root_checked(
+        _POSTGRES_URL,
+        deployment_class="rehearsal",
+        app_env="test",
+        build_revision="test-operator-auth-clean-root",
+    )
     with _engine() as engine:
-        assert _current_revision(engine) == PARENT_REVISION, (
-            f"expected parent {PARENT_REVISION}, got {_current_revision(engine)}"
+        assert _current_revision(engine) == CLEAN_SCHEMA_HEAD, (
+            f"expected clean root {CLEAN_SCHEMA_HEAD}, got {_current_revision(engine)}"
         )
 
 
@@ -295,7 +294,7 @@ class _PgMigrator:
 
 @pytest.fixture(scope="module")
 def pg_migrator() -> Iterator[_PgMigrator]:
-    _ensure_parent_revision()
+    _ensure_clean_root()
     with _engine() as engine:
         yield _PgMigrator(engine)
 
@@ -303,8 +302,8 @@ def pg_migrator() -> Iterator[_PgMigrator]:
 @pytest.fixture
 def pg_session(pg_migrator: _PgMigrator) -> Iterator[Session]:
     # Ensure head is applied once per session fixture usage.
-    if _current_revision(pg_migrator.engine) != TASK2_HEAD:
-        pg_migrator.upgrade(TASK2_HEAD)
+    if _current_revision(pg_migrator.engine) != CLEAN_SCHEMA_HEAD:
+        pg_migrator.upgrade(CLEAN_SCHEMA_HEAD)
     with _session(pg_migrator.engine) as session:
         # Clean operator tables between tests (audit trigger blocks DELETE —
         # truncate is CASCADE and bypasses row triggers via TRUNCATE).
@@ -396,8 +395,8 @@ def seed_operator_session(session: Session, account_id: uuid.UUID, **overrides: 
 
 
 def test_operator_schema_has_required_constraints(pg_migrator: _PgMigrator) -> None:
-    pg_migrator.upgrade(TASK2_HEAD)
-    assert _current_revision(pg_migrator.engine) == TASK2_HEAD
+    pg_migrator.upgrade(CLEAN_SCHEMA_HEAD)
+    assert _current_revision(pg_migrator.engine) == CLEAN_SCHEMA_HEAD
     assert pg_migrator.unique_columns("operator_account") == {("singleton_key",)}
     assert pg_migrator.has_check(
         "operator_account", "ck_operator_account_singleton_key"
@@ -431,7 +430,9 @@ def test_operator_alembic_sole_head() -> None:
 
     script = ScriptDirectory.from_config(_alembic_config())
     heads = script.get_heads()
-    assert heads == [CURRENT_HEAD], f"expected sole head {CURRENT_HEAD}, got {heads}"
+    assert heads == [CLEAN_SCHEMA_HEAD], (
+        f"expected sole head {CLEAN_SCHEMA_HEAD}, got {heads}"
+    )
 
 
 def test_operator_audit_is_append_only(pg_session: Session) -> None:
@@ -572,66 +573,3 @@ def test_session_revoke_reason_bounded(pg_session: Session) -> None:
         revoke_reason="logout",
     )
     pg_session.commit()
-
-
-def test_downgrade_blocked_without_ack(pg_migrator: _PgMigrator) -> None:
-    if _current_revision(pg_migrator.engine) != TASK2_HEAD:
-        pg_migrator.upgrade(TASK2_HEAD)
-    os.environ.pop(DESTRUCTIVE_DOWNGRADE_ENV, None)
-    with pytest.raises(Exception) as exc_info:
-        _run_alembic("downgrade", PARENT_REVISION)
-    assert DOWNGRADE_BLOCKED_TOKEN in _err_text(exc_info.value)
-    assert _current_revision(pg_migrator.engine) == TASK2_HEAD
-
-
-def test_downgrade_blocked_when_initialized(pg_migrator: _PgMigrator) -> None:
-    if _current_revision(pg_migrator.engine) != TASK2_HEAD:
-        pg_migrator.upgrade(TASK2_HEAD)
-    with _session(pg_migrator.engine) as session:
-        session.execute(
-            text(
-                "TRUNCATE operator_audit_event, operator_session, "
-                "operator_account RESTART IDENTITY CASCADE"
-            )
-        )
-        session.commit()
-        seed_operator_account(session)
-        session.commit()
-    prior = os.environ.get(DESTRUCTIVE_DOWNGRADE_ENV)
-    os.environ[DESTRUCTIVE_DOWNGRADE_ENV] = "1"
-    try:
-        with pytest.raises(Exception) as exc_info:
-            _run_alembic("downgrade", PARENT_REVISION)
-        assert DOWNGRADE_BLOCKED_TOKEN in _err_text(exc_info.value)
-    finally:
-        if prior is None:
-            os.environ.pop(DESTRUCTIVE_DOWNGRADE_ENV, None)
-        else:
-            os.environ[DESTRUCTIVE_DOWNGRADE_ENV] = prior
-    assert _current_revision(pg_migrator.engine) == TASK2_HEAD
-
-
-def test_downgrade_allowed_on_empty_test_db(pg_migrator: _PgMigrator) -> None:
-    if _current_revision(pg_migrator.engine) != TASK2_HEAD:
-        pg_migrator.upgrade(TASK2_HEAD)
-    with _session(pg_migrator.engine) as session:
-        session.execute(
-            text(
-                "TRUNCATE operator_audit_event, operator_session, "
-                "operator_account RESTART IDENTITY CASCADE"
-            )
-        )
-        session.commit()
-    prior = os.environ.get(DESTRUCTIVE_DOWNGRADE_ENV)
-    os.environ[DESTRUCTIVE_DOWNGRADE_ENV] = "1"
-    try:
-        _run_alembic("downgrade", PARENT_REVISION)
-        assert _current_revision(pg_migrator.engine) == PARENT_REVISION
-        # Re-upgrade so later tests still see head.
-        pg_migrator.upgrade(TASK2_HEAD)
-        assert _current_revision(pg_migrator.engine) == TASK2_HEAD
-    finally:
-        if prior is None:
-            os.environ.pop(DESTRUCTIVE_DOWNGRADE_ENV, None)
-        else:
-            os.environ[DESTRUCTIVE_DOWNGRADE_ENV] = prior

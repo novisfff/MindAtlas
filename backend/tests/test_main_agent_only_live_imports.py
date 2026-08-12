@@ -36,28 +36,12 @@ FORBIDDEN_SELECTOR_SYMBOLS = frozenset(
 # migration fixtures, and V1 read-only parser fixtures only.
 INVENTORY_ALLOWLIST: frozenset[str] = frozenset(
     {
-        "test_ai_runtime_legacy_cleanup.py:59",
-        "test_ai_runtime_legacy_cleanup.py:61",
-        "test_ai_runtime_legacy_cleanup.py:73",
-        "test_ai_runtime_legacy_cleanup.py:97",
-        "test_ai_runtime_legacy_cleanup.py:116",
-        "test_ai_runtime_migration_repository_postgres.py:580",
-        "test_ai_runtime_migration_repository_postgres.py:630",
-        "test_ai_runtime_migration_repository_postgres.py:636",
-        "test_ai_runtime_migration_repository_postgres.py:643",
-        "test_ai_runtime_migration_repository_postgres.py:648",
-        "test_ai_runtime_migration_repository_postgres.py:680",
-        "test_ai_runtime_migration_repository_postgres.py:728",
-        "test_ai_runtime_migration_repository_postgres.py:750",
         "test_assistant_atomic_admission.py:623",
         "test_assistant_atomic_admission.py:629",
         "test_assistant_runtime_config.py:15",
         "test_assistant_runtime_config.py:16",
         "test_assistant_runtime_config.py:27",
-        "test_assistant_runtime_migration_postgres.py:418",
         "test_durable_main_agent_runner.py:156",
-        "test_durable_run_migration_postgres.py:488",
-        "test_durable_run_migration_postgres.py:497",
         "test_durable_run_repository.py:910",
         "test_main_agent_golden_create_entry.py:92",
     }

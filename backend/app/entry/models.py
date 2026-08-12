@@ -56,6 +56,9 @@ class Entry(UuidPrimaryKeyMixin, TimestampMixin, Base):
     tags = relationship(Tag, secondary=entry_tag, lazy="joined")
 
     __table_args__ = (
+        Index("ix_entry_id", "id"),
+        Index("ix_entry_time_at", "time_at"),
+        Index("ix_entry_type_id", "type_id"),
         Index(
             "uq_entry_source_capability_call_id",
             "source_capability_call_id",

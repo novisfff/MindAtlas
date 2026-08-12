@@ -1,643 +1,90 @@
-"""PostgreSQL migration gate for Plan 04 main-agent aggregate flags (Task 1).
-
-Local unit runs skip unless ``MINDATLAS_TEST_POSTGRES_URL`` is set. CI provides
-a disposable PostgreSQL 15 database. Does not create backend/tests/_postgres.py
-because Plan 01 already owns the disposable URL contract.
-"""
+"""Current main-agent persistence checks on the clean schema root."""
 
 from __future__ import annotations
 
 import os
-import uuid
-from contextlib import contextmanager
-from pathlib import Path
+from typing import Iterator
 
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
-from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from tests._bootstrap import bootstrap_backend_imports, reset_caches
 from tests.postgres_destructive_guard import reset_disposable_public_schema
+from tests.schema_baseline_support import upgrade_clean_root_checked
 
 bootstrap_backend_imports()
 reset_caches()
 
+from app.schema.contracts import CLEAN_ROOT_REVISION  # noqa: E402
+from tests.main_agent_postgres_support import insert_complete_main_agent_run  # noqa: E402
 
-PLAN03_HEAD = "b666b11a5faa"
-PLAN06_HEAD = "6af373ef040f"
-PLAN07_HEAD = "7a3dac0ac2a8"
-PLAN08_LEDGER_REVISION = "984c07876856"
-PLAN08_LIFECYCLE_REVISION = "f2c3a4b5d6e7"
-PLAN08_HEAD = "d7e8f9a0b1c3"
-PLAN09_LIFECYCLE_REVISION = "403414a62e55"
-PLAN09_EVAL_REVISION = "027869a00a47"
-PLAN09_HEAD = "027869a00a47"
-CURRENT_HEAD = "b6e2d4f8a901"
-DOWNGRADE_BLOCKED_TOKEN = "MINDATLAS_PLAN04_DOWNGRADE_BLOCKED_ENABLED_AGGREGATES"
-
-CATALOG_CHECK = "ck_assistant_skill_package_catalog_disabled"
-RUNTIME_CHECK = "ck_assistant_main_agent_profile_runtime_disabled"
 
 _POSTGRES_URL = os.environ.get("MINDATLAS_TEST_POSTGRES_URL", "").strip()
-
+_REQUIRE_POSTGRES = os.environ.get("MINDATLAS_REQUIRE_POSTGRES", "").strip() in {
+    "1",
+    "true",
+    "TRUE",
+    "yes",
+    "YES",
+}
+if not _POSTGRES_URL and _REQUIRE_POSTGRES:
+    pytest.fail(
+        "MINDATLAS_TEST_POSTGRES_URL not set while MINDATLAS_REQUIRE_POSTGRES=1; "
+        "clean-root main-agent gate must hard-fail",
+        pytrace=False,
+    )
 pytestmark = pytest.mark.skipif(
     not _POSTGRES_URL,
-    reason=(
-        "MINDATLAS_TEST_POSTGRES_URL not set; PostgreSQL main-agent migration gate skipped "
-        "(local SQLite cannot exercise Plan 04 upgrade/downgrade preflight)"
-    ),
+    reason="MINDATLAS_TEST_POSTGRES_URL is required for clean-root main-agent proof",
 )
 
-_BACKEND_DIR = Path(__file__).resolve().parents[1]
-_DIGEST_A = "a" * 64
-_DIGEST_B = "b" * 64
-_DIGEST_C = "c" * 64
 
-
-def _as_sqlalchemy_url(url: str) -> str:
+def _sqlalchemy_url(url: str) -> str:
     if url.startswith("postgresql://") and "+psycopg2" not in url:
         return url.replace("postgresql://", "postgresql+psycopg2://", 1)
     return url
 
 
-def _configure_database_env(url: str) -> None:
-    os.environ["DATABASE_URL"] = url
-    reset_caches()
-    try:
-        from app.config import get_settings
-
-        get_settings.cache_clear()
-    except Exception:
-        pass
-
-
-def _alembic_config():
-    from alembic.config import Config
-
-    cfg = Config(str(_BACKEND_DIR / "alembic.ini"))
-    cfg.set_main_option("script_location", str(_BACKEND_DIR / "alembic"))
-    return cfg
-
-
-def _run_alembic(command_name: str, *args: str) -> None:
-    from alembic import command
-
-    cfg = _alembic_config()
-    fn = getattr(command, command_name)
-    fn(cfg, *args)
-
-
-@contextmanager
-def _engine() -> Engine:
+@pytest.fixture()
+def clean_root_engine() -> Iterator[Engine]:
     assert _POSTGRES_URL
-    _configure_database_env(_POSTGRES_URL)
-    engine = create_engine(_as_sqlalchemy_url(_POSTGRES_URL), future=True, pool_pre_ping=True)
+    engine = create_engine(_sqlalchemy_url(_POSTGRES_URL), future=True)
+    reset_disposable_public_schema(engine)
+    upgrade_clean_root_checked(
+        _POSTGRES_URL,
+        deployment_class="rehearsal",
+        app_env="test",
+        build_revision="test-main-agent-clean-root",
+    )
     try:
         yield engine
     finally:
+        reset_disposable_public_schema(engine)
         engine.dispose()
 
 
-def _current_revision(engine: Engine) -> str | None:
-    with engine.connect() as conn:
-        row = conn.execute(text("SELECT version_num FROM alembic_version")).fetchone()
-        return None if row is None else str(row[0])
-
-
-def _err_text(exc: BaseException) -> str:
-    parts = [str(exc)]
-    orig = getattr(exc, "orig", None)
-    if orig is not None:
-        parts.append(str(orig))
-    return " | ".join(parts)
-
-
-def _plan04_revision() -> str:
-    """Resolve the Plan 04 enable-flags migration (child of Plan 03 head).
-
-    Plan 06 and later may extend the chain; the sole Alembic head is no longer
-    necessarily Plan 04. Walk the script map for the revision whose
-    ``down_revision`` is the Plan 03 parent.
-    """
-    from alembic.script import ScriptDirectory
-
-    script = ScriptDirectory.from_config(_alembic_config())
-    # Prefer the known Plan 04 id when present (stable across Plan 05/06 heads).
-    known = "9ed6f561a381"
-    try:
-        rev = script.get_revision(known)
-        if rev is not None and rev.down_revision == PLAN03_HEAD:
-            return known
-    except Exception:
-        rev = None
-    matches: list[str] = []
-    for r in script.walk_revisions():
-        if r.down_revision == PLAN03_HEAD:
-            matches.append(r.revision)
-    assert matches, (
-        f"Plan 04 migration missing: no revision revises parent {PLAN03_HEAD}"
+def test_main_agent_run_shape_is_available_at_clean_root(
+    clean_root_engine: Engine,
+) -> None:
+    run_id = insert_complete_main_agent_run(
+        clean_root_engine,
+        status="queued",
+        required_app_build_revision="test-main-agent-clean-root",
     )
-    assert len(matches) == 1, (
-        f"expected sole Plan 04 child of {PLAN03_HEAD}, got {matches}"
-    )
-    return matches[0]
-
-
-def _check_names(conn, table: str) -> set[str]:
-    rows = conn.execute(
-        text(
-            """
-            SELECT c.conname
-            FROM pg_constraint c
-            JOIN pg_class t ON c.conrelid = t.oid
-            JOIN pg_namespace n ON t.relnamespace = n.oid
-            WHERE n.nspname = 'public'
-              AND t.relname = :table
-              AND c.contype = 'c'
-            """
-        ),
-        {"table": table},
-    ).fetchall()
-    return {str(r[0]) for r in rows}
-
-
-
-def _table_exists(conn, table: str) -> bool:
-    row = conn.execute(
-        text(
-            "SELECT 1 FROM information_schema.tables "
-            "WHERE table_schema = 'public' AND table_name = :t"
-        ),
-        {"t": table},
-    ).first()
-    return row is not None
-
-def _prepare_plan09_downgrade(conn) -> None:
-    """Prepare DB for Plan 09 guarded downgrades without touching immutable rows.
-
-    - Complete/cancel active eval runs (downgrade refuses queued/running).
-    - Clear package archive/catalog/alias evidence (blocks 09A lifecycle downgrade).
-    Immutable eval tables are dropped by the migration itself once ACK is set.
-    """
-    if _table_exists(conn, "assistant_skill_eval_run"):
-        # Terminalize active runs so eval downgrade active-run guard passes.
-        conn.execute(
+    with clean_root_engine.connect() as connection:
+        assert connection.execute(
+            text("SELECT version_num FROM alembic_version")
+        ).scalar_one() == CLEAN_ROOT_REVISION
+        row = connection.execute(
             text(
-                "UPDATE assistant_skill_eval_run "
-                "SET status = 'cancelled', "
-                "    ended_at = COALESCE(ended_at, NOW()), "
-                "    state_revision = state_revision + 1 "
-                "WHERE status IN ('queued', 'running', 'cancelling')"
-            )
-        )
-    # gate_use pins block eval downgrade even with ACK — must remove uses.
-    # gate_use is IMMUTABLE (no DELETE). Drop the reject-delete trigger temporarily.
-    if _table_exists(conn, "assistant_skill_publish_gate_use"):
-        conn.execute(
-            text(
-                "DROP TRIGGER IF EXISTS trg_assistant_skill_publish_gate_use_reject_delete "
-                "ON assistant_skill_publish_gate_use"
-            )
-        )
-        conn.execute(text("DELETE FROM assistant_skill_publish_gate_use"))
-    if _table_exists(conn, "assistant_skill_package"):
-        conn.execute(
-            text(
-                "UPDATE assistant_skill_package SET "
-                "archived_at = NULL, archived_by = NULL, "
-                "catalog_enabled_at = NULL, catalog_enabled_by = NULL, "
-                "catalog_enabled = false"
-            )
-        )
-    if _table_exists(conn, "assistant_skill_package_alias"):
-        conn.execute(
-            text(
-                "UPDATE assistant_skill_package_alias SET "
-                "disabled_at = NULL, disabled_by = NULL "
-                "WHERE disabled_at IS NOT NULL"
-            )
-        )
-    if _table_exists(conn, "assistant_main_agent_profile"):
-        conn.execute(
-            text(
-                "UPDATE assistant_main_agent_profile SET runtime_enabled = false"
-            )
-        )
-
-
-
-
-def _clear_enabled_flags(conn) -> None:
-    conn.execute(text("UPDATE assistant_skill_package SET catalog_enabled = false"))
-    conn.execute(text("UPDATE assistant_main_agent_profile SET runtime_enabled = false"))
-
-
-def _drop_public_schema(engine: Engine) -> None:
-    reset_disposable_public_schema(engine)
-
-
-def _reset_to_plan03_parent() -> None:
-    """Create the exact Plan 03 parent schema from a disposable empty database."""
-    _configure_database_env(_POSTGRES_URL)
-    engine = create_engine(_as_sqlalchemy_url(_POSTGRES_URL), future=True)
-    try:
-        _drop_public_schema(engine)
-        _run_alembic("upgrade", PLAN03_HEAD)
-        assert _current_revision(engine) == PLAN03_HEAD, (
-            f"expected Plan 03 parent {PLAN03_HEAD}, got {_current_revision(engine)}"
-        )
-        with engine.connect() as conn:
-            pkg_checks = _check_names(conn, "assistant_skill_package")
-            profile_checks = _check_names(conn, "assistant_main_agent_profile")
-            assert CATALOG_CHECK in pkg_checks, (
-                f"parent schema must retain {CATALOG_CHECK}, got {pkg_checks}"
-            )
-            assert RUNTIME_CHECK in profile_checks, (
-                f"parent schema must retain {RUNTIME_CHECK}, got {profile_checks}"
-            )
-    finally:
-        engine.dispose()
-
-
-def _insert_package(conn, *, name: str | None = None) -> uuid.UUID:
-    package_id = uuid.uuid4()
-    canonical = name or f"plan04-pkg-{package_id.hex[:8]}"
-    conn.execute(
-        text(
-            """
-            INSERT INTO assistant_skill_package (
-                id, canonical_name, display_name, description,
-                migration_state, catalog_enabled, is_system,
-                created_at, updated_at
-            ) VALUES (
-                :id, :name, :display, :desc,
-                'shadow', false, false,
-                NOW(), NOW()
-            )
-            """
-        ),
-        {
-            "id": package_id,
-            "name": canonical,
-            "display": canonical,
-            "desc": "plan04-gate",
-        },
-    )
-    return package_id
-
-
-def _insert_profile(conn, *, key: str | None = None) -> uuid.UUID:
-    profile_id = uuid.uuid4()
-    profile_key = key or f"plan04-profile-{profile_id.hex[:8]}"
-    conn.execute(
-        text(
-            """
-            INSERT INTO assistant_main_agent_profile (
-                id, profile_key, display_name, is_default,
-                migration_state, runtime_enabled, created_at, updated_at
-            ) VALUES (
-                :id, :key, :display, false,
-                'bootstrap', false, NOW(), NOW()
-            )
-            """
-        ),
-        {
-            "id": profile_id,
-            "key": profile_key,
-            "display": profile_key,
-        },
-    )
-    return profile_id
-
-
-def test_parent_head_is_plan03() -> None:
-    """Plan 04 migration must revise the sole Plan 03 head b666b11a5faa."""
-    plan04 = _plan04_revision()
-    from alembic.script import ScriptDirectory
-
-    script = ScriptDirectory.from_config(_alembic_config())
-    rev = script.get_revision(plan04)
-    assert rev is not None
-    assert rev.down_revision == PLAN03_HEAD
-    assert len(script.get_heads()) == 1
-
-
-def test_upgrade_drops_only_disabled_checks_and_preserves_defaults() -> None:
-    _reset_to_plan03_parent()
-    with _engine() as engine:
-        with engine.begin() as conn:
-            pkg_id = _insert_package(conn, name=f"pre-up-{uuid.uuid4().hex[:8]}")
-            profile_id = _insert_profile(conn, key=f"pre-up-{uuid.uuid4().hex[:8]}")
-
-        # Parent still enforces disabled-only checks (separate autocommit connection).
-        with engine.connect() as conn:
-            with conn.begin():
-                with pytest.raises((IntegrityError, DBAPIError)):
-                    conn.execute(
-                        text(
-                            "UPDATE assistant_skill_package "
-                            "SET catalog_enabled = true WHERE id = :id"
-                        ),
-                        {"id": pkg_id},
-                    )
-
-    _run_alembic("upgrade", PLAN09_HEAD)
-    with _engine() as engine:
-        assert _current_revision(engine) == PLAN09_HEAD
-        from alembic.script import ScriptDirectory
-
-        heads = ScriptDirectory.from_config(_alembic_config()).get_heads()
-        assert heads == [CURRENT_HEAD]
-
-        with engine.begin() as conn:
-            pkg_checks = _check_names(conn, "assistant_skill_package")
-            profile_checks = _check_names(conn, "assistant_main_agent_profile")
-            assert CATALOG_CHECK not in pkg_checks
-            assert RUNTIME_CHECK not in profile_checks
-            # Other Plan 01 checks must remain.
-            assert "ck_assistant_skill_package_migration_state" in pkg_checks
-            assert "ck_assistant_main_agent_profile_migration_state" in profile_checks
-
-            # Defaults remain false for preserved rows and new inserts.
-            row = conn.execute(
-                text(
-                    "SELECT catalog_enabled FROM assistant_skill_package WHERE id = :id"
-                ),
-                {"id": pkg_id},
-            ).fetchone()
-            assert row is not None and row[0] is False
-
-            row = conn.execute(
-                text(
-                    "SELECT runtime_enabled FROM assistant_main_agent_profile WHERE id = :id"
-                ),
-                {"id": profile_id},
-            ).fetchone()
-            assert row is not None and row[0] is False
-
-            new_pkg = _insert_package(conn, name=f"post-up-{uuid.uuid4().hex[:8]}")
-            new_profile = _insert_profile(conn, key=f"post-up-{uuid.uuid4().hex[:8]}")
-            assert (
-                conn.execute(
-                    text(
-                        "SELECT catalog_enabled FROM assistant_skill_package WHERE id = :id"
-                    ),
-                    {"id": new_pkg},
-                ).scalar()
-                is False
-            )
-            assert (
-                conn.execute(
-                    text(
-                        "SELECT runtime_enabled FROM assistant_main_agent_profile WHERE id = :id"
-                    ),
-                    {"id": new_profile},
-                ).scalar()
-                is False
-            )
-
-            # After upgrade, flags may be set true (checks dropped).
-            conn.execute(
-                text(
-                    "UPDATE assistant_skill_package "
-                    "SET catalog_enabled = true WHERE id = :id"
-                ),
-                {"id": new_pkg},
-            )
-            conn.execute(
-                text(
-                    "UPDATE assistant_main_agent_profile "
-                    "SET runtime_enabled = true WHERE id = :id"
-                ),
-                {"id": new_profile},
-            )
-            assert (
-                conn.execute(
-                    text(
-                        "SELECT catalog_enabled FROM assistant_skill_package WHERE id = :id"
-                    ),
-                    {"id": new_pkg},
-                ).scalar()
-                is True
-            )
-            assert (
-                conn.execute(
-                    text(
-                        "SELECT runtime_enabled FROM assistant_main_agent_profile WHERE id = :id"
-                    ),
-                    {"id": new_profile},
-                ).scalar()
-                is True
-            )
-            # Reset so other tests can downgrade.
-            _clear_enabled_flags(conn)
-
-
-def test_data_preservation_across_upgrade() -> None:
-    _reset_to_plan03_parent()
-    with _engine() as engine:
-        with engine.begin() as conn:
-            pkg_id = _insert_package(conn, name=f"preserve-{uuid.uuid4().hex[:8]}")
-            profile_id = _insert_profile(conn, key=f"preserve-{uuid.uuid4().hex[:8]}")
-            conn.execute(
-                text(
-                    """
-                    UPDATE assistant_skill_package
-                    SET display_name = 'Preserve Me', description = 'keep'
-                    WHERE id = :id
-                    """
-                ),
-                {"id": pkg_id},
-            )
-            conn.execute(
-                text(
-                    """
-                    UPDATE assistant_main_agent_profile
-                    SET display_name = 'Preserve Profile'
-                    WHERE id = :id
-                    """
-                ),
-                {"id": profile_id},
-            )
-
-    _run_alembic("upgrade", PLAN09_HEAD)
-    with _engine() as engine:
-        with engine.connect() as conn:
-            pkg = conn.execute(
-                text(
-                    "SELECT canonical_name, display_name, description, catalog_enabled, "
-                    "migration_state FROM assistant_skill_package WHERE id = :id"
-                ),
-                {"id": pkg_id},
-            ).fetchone()
-            assert pkg is not None
-            assert pkg[1] == "Preserve Me"
-            assert pkg[2] == "keep"
-            assert pkg[3] is False
-            assert pkg[4] == "shadow"
-
-            profile = conn.execute(
-                text(
-                    "SELECT profile_key, display_name, runtime_enabled, migration_state "
-                    "FROM assistant_main_agent_profile WHERE id = :id"
-                ),
-                {"id": profile_id},
-            ).fetchone()
-            assert profile is not None
-            assert profile[1] == "Preserve Profile"
-            assert profile[2] is False
-            assert profile[3] == "bootstrap"
-
-
-def test_downgrade_blocked_when_any_flag_true() -> None:
-    _reset_to_plan03_parent()
-    _run_alembic("upgrade", PLAN09_HEAD)
-
-    with _engine() as engine:
-        with engine.begin() as conn:
-            pkg_id = _insert_package(conn, name=f"block-pkg-{uuid.uuid4().hex[:8]}")
-            conn.execute(
-                text(
-                    "UPDATE assistant_skill_package "
-                    "SET catalog_enabled = true WHERE id = :id"
-                ),
-                {"id": pkg_id},
-            )
-
-    with pytest.raises(Exception) as exc_info:
-        _run_alembic("downgrade", PLAN03_HEAD)
-    assert DOWNGRADE_BLOCKED_TOKEN in _err_text(exc_info.value)
-
-    with _engine() as engine:
-        # Failed downgrade must leave DB at current Plan 09 head.
-        assert _current_revision(engine) == PLAN09_HEAD
-        with engine.begin() as conn:
-            # Still true; no data deletion on blocked downgrade.
-            assert (
-                conn.execute(
-                    text(
-                        "SELECT catalog_enabled FROM assistant_skill_package WHERE id = :id"
-                    ),
-                    {"id": pkg_id},
-                ).scalar()
-                is True
-            )
-            _clear_enabled_flags(conn)
-
-    # Profile path
-    with _engine() as engine:
-        with engine.begin() as conn:
-            profile_id = _insert_profile(conn, key=f"block-prof-{uuid.uuid4().hex[:8]}")
-            conn.execute(
-                text(
-                    "UPDATE assistant_main_agent_profile "
-                    "SET runtime_enabled = true WHERE id = :id"
-                ),
-                {"id": profile_id},
-            )
-
-    with pytest.raises(Exception) as exc_info:
-        _run_alembic("downgrade", PLAN03_HEAD)
-    assert DOWNGRADE_BLOCKED_TOKEN in _err_text(exc_info.value)
-
-    with _engine() as engine:
-        assert _current_revision(engine) == PLAN09_HEAD
-        with engine.begin() as conn:
-            assert (
-                conn.execute(
-                    text(
-                        "SELECT runtime_enabled FROM assistant_main_agent_profile WHERE id = :id"
-                    ),
-                    {"id": profile_id},
-                ).scalar()
-                is True
-            )
-            _clear_enabled_flags(conn)
-
-
-def test_parent_head_parent_head_cycle_and_sole_head() -> None:
-    """parent -> head -> parent -> head with sole head after upgrade."""
-    _reset_to_plan03_parent()
-    with _engine() as engine:
-        with engine.begin() as conn:
-            pkg_id = _insert_package(conn, name=f"cycle-{uuid.uuid4().hex[:8]}")
-            profile_id = _insert_profile(conn, key=f"cycle-{uuid.uuid4().hex[:8]}")
-
-    _run_alembic("upgrade", PLAN09_HEAD)
-    with _engine() as engine:
-        assert _current_revision(engine) == PLAN09_HEAD
-        with engine.connect() as conn:
-            assert CATALOG_CHECK not in _check_names(conn, "assistant_skill_package")
-            assert RUNTIME_CHECK not in _check_names(
-                conn, "assistant_main_agent_profile"
-            )
-            assert (
-                conn.execute(
-                    text(
-                        "SELECT catalog_enabled FROM assistant_skill_package WHERE id = :id"
-                    ),
-                    {"id": pkg_id},
-                ).scalar()
-                is False
-            )
-            assert (
-                conn.execute(
-                    text(
-                        "SELECT runtime_enabled FROM assistant_main_agent_profile WHERE id = :id"
-                    ),
-                    {"id": profile_id},
-                ).scalar()
-                is False
-            )
-
-    _run_alembic("downgrade", PLAN03_HEAD)
-    with _engine() as engine:
-        assert _current_revision(engine) == PLAN03_HEAD
-        with engine.connect() as conn:
-            assert CATALOG_CHECK in _check_names(conn, "assistant_skill_package")
-            assert RUNTIME_CHECK in _check_names(
-                conn, "assistant_main_agent_profile"
-            )
-            # Data preserved; still false so re-add check is valid.
-            assert (
-                conn.execute(
-                    text(
-                        "SELECT id FROM assistant_skill_package WHERE id = :id"
-                    ),
-                    {"id": pkg_id},
-                ).scalar()
-                == pkg_id
-            )
-            assert (
-                conn.execute(
-                    text(
-                        "SELECT id FROM assistant_main_agent_profile WHERE id = :id"
-                    ),
-                    {"id": profile_id},
-                ).scalar()
-                == profile_id
-            )
-
-    _run_alembic("upgrade", PLAN09_HEAD)
-    with _engine() as engine:
-        assert _current_revision(engine) == PLAN09_HEAD
-        from alembic.script import ScriptDirectory
-
-        heads = ScriptDirectory.from_config(_alembic_config()).get_heads()
-        assert heads == [CURRENT_HEAD]
-        with engine.connect() as conn:
-            assert CATALOG_CHECK not in _check_names(conn, "assistant_skill_package")
-            assert RUNTIME_CHECK not in _check_names(
-                conn, "assistant_main_agent_profile"
-            )
-            assert (
-                conn.execute(
-                    text(
-                        "SELECT catalog_enabled, migration_state "
-                        "FROM assistant_skill_package WHERE id = :id"
-                    ),
-                    {"id": pkg_id},
-                ).fetchone()
-                == (False, "shadow")
-            )
+                "SELECT runtime_kind, status, state_revision, "
+                "required_checkpoint_codec_version "
+                "FROM assistant_chat_run WHERE id=:id"
+            ),
+            {"id": run_id},
+        ).one()
+    assert row.runtime_kind == "main_agent"
+    assert row.status == "queued"
+    assert row.state_revision == 0
+    assert row.required_checkpoint_codec_version == 3

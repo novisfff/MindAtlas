@@ -1,8 +1,8 @@
-"""PostgreSQL gate for Plan 07 durable Interrupt repository/migration (Task 4).
+"""PostgreSQL gate for the durable Interrupt repository on the clean root.
 
 Skipped unless ``MINDATLAS_TEST_POSTGRES_URL`` is set. Proves partial unique
-pending index, sequential terminal + later pending, immutability trigger,
-resolution request uniqueness, controlled purge, and upgrade→downgrade→upgrade.
+ pending index, sequential terminal + later pending, immutability trigger,
+ resolution request uniqueness, and controlled purge.
 """
 
 from __future__ import annotations
@@ -11,7 +11,6 @@ import os
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Iterator
 
 import pytest
@@ -22,6 +21,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from tests._bootstrap import bootstrap_backend_imports, reset_caches
 from tests.postgres_destructive_guard import reset_disposable_public_schema
+from tests.schema_baseline_support import upgrade_clean_root_checked
 
 bootstrap_backend_imports()
 reset_caches()
@@ -36,16 +36,6 @@ pytestmark = pytest.mark.skipif(
     ),
 )
 
-PLAN06_HEAD = "6af373ef040f"
-PLAN07_INTERRUPT_REVISION = "7a3dac0ac2a8"
-PLAN08_LEDGER_REVISION = "984c07876856"
-PLAN08_LIFECYCLE_REVISION = "f2c3a4b5d6e7"
-PLAN08_HEAD = "d7e8f9a0b1c3"
-PLAN09_LIFECYCLE_REVISION = "403414a62e55"
-PLAN09_EVAL_REVISION = "027869a00a47"
-PLAN09_HEAD = "027869a00a47"
-PLAN2_HEAD = "b6e2d4f8a901"
-DOWNGRADE_BLOCKED_TOKEN = "MINDATLAS_PLAN07_DOWNGRADE_BLOCKED_INTERRUPT_DATA"
 DIGEST_A = "a" * 64
 PEPPER = "pg-test-interrupt-pepper-not-for-prod-32bxx"
 
@@ -58,8 +48,9 @@ def _as_sqlalchemy_url(url: str) -> str:
 
 def _configure_database_env(url: str) -> None:
     os.environ["DATABASE_URL"] = url
-    os.environ.setdefault("APP_ENV", "test")
-    os.environ.setdefault("MINDATLAS_PLAN10_B2_TEST_OVERRIDE", "1")
+    os.environ["APP_ENV"] = "test"
+    os.environ["MINDATLAS_DEPLOYMENT_CLASS"] = "rehearsal"
+    os.environ["APP_BUILD_REVISION"] = "test-durable-interrupt"
     reset_caches()
     try:
         from app.config import get_settings
@@ -67,27 +58,6 @@ def _configure_database_env(url: str) -> None:
         get_settings.cache_clear()
     except Exception:
         pass
-
-
-def _alembic_config():
-    from alembic.config import Config
-
-    backend_root = Path(__file__).resolve().parents[1]
-    cfg = Config(str(backend_root / "alembic.ini"))
-    cfg.set_main_option("script_location", str(backend_root / "alembic"))
-    cfg.set_main_option("sqlalchemy.url", _as_sqlalchemy_url(_POSTGRES_URL))
-    return cfg
-
-
-def _run_alembic(command_name: str, *args: str) -> None:
-    from alembic import command as alembic_command
-
-    cfg = _alembic_config()
-    fn = getattr(alembic_command, command_name)
-    if args:
-        fn(cfg, *args)
-    else:
-        fn(cfg)
 
 
 @contextmanager
@@ -110,12 +80,6 @@ def _session(engine: Engine) -> Iterator[Session]:
         session.close()
 
 
-def _current_revision(engine: Engine) -> str | None:
-    with engine.connect() as conn:
-        row = conn.execute(text("SELECT version_num FROM alembic_version")).first()
-        return None if row is None else str(row[0])
-
-
 def _err_text(exc: BaseException) -> str:
     parts = [str(exc)]
     cause = getattr(exc, "__cause__", None)
@@ -127,87 +91,16 @@ def _err_text(exc: BaseException) -> str:
     return " | ".join(parts)
 
 
-def _table_exists(conn, table: str) -> bool:
-    return bool(
-        conn.execute(
-            text(
-                """
-                SELECT 1 FROM information_schema.tables
-                WHERE table_schema = 'public' AND table_name = :t
-                """
-            ),
-            {"t": table},
-        ).first()
-    )
-
-
-def _index_names(conn, table: str) -> set[str]:
-    rows = conn.execute(
-        text(
-            """
-            SELECT indexname FROM pg_indexes
-            WHERE schemaname = 'public' AND tablename = :t
-            """
-        ),
-        {"t": table},
-    ).fetchall()
-    return {str(r[0]) for r in rows}
-
-
-def _drop_public_schema(engine: Engine) -> None:
-    reset_disposable_public_schema(engine)
-
-
-def _reset_to_revision(revision: str) -> None:
-    _configure_database_env(_POSTGRES_URL)
-    with _engine() as engine:
-        _drop_public_schema(engine)
-    _run_alembic("upgrade", revision)
-
-
-def _purge_interrupt_and_active(conn) -> None:
-    conn.execute(text("SET LOCAL mindatlas.allow_durable_run_purge = 'on'"))
-    if _table_exists(conn, "assistant_run_interrupt"):
-        conn.execute(text("DELETE FROM assistant_run_interrupt"))
-    # Clear durable run pointers then child tables so Plan 06 downgrade path is free if needed.
-    if _table_exists(conn, "assistant_chat_run"):
-        conn.execute(
-            text(
-                """
-                UPDATE assistant_chat_run
-                SET current_manifest_revision_id = NULL,
-                    current_policy_revision_id = NULL,
-                    current_budget_revision_id = NULL,
-                    current_obligation_revision_id = NULL,
-                    current_checkpoint_id = NULL
-                WHERE runtime_kind = 'main_agent'
-                """
-            )
-        )
-        for table in (
-            "assistant_run_checkpoint",
-            "assistant_run_provider_message",
-            "assistant_run_budget_revision",
-            "assistant_run_obligation_revision",
-            "assistant_run_policy_revision",
-            "assistant_run_manifest_revision",
-            "assistant_run_artifact",
-        ):
-            if _table_exists(conn, table):
-                conn.execute(text(f"DELETE FROM {table}"))
-        conn.execute(text("DELETE FROM assistant_chat_run WHERE runtime_kind = 'main_agent'"))
-    if _table_exists(conn, "assistant_worker_registration"):
-        conn.execute(text("DELETE FROM assistant_worker_registration"))
-    if _table_exists(conn, "assistant_run_artifact_gc"):
-        conn.execute(text("DELETE FROM assistant_run_artifact_gc"))
-
-
 def _ensure_at_current_head() -> None:
     _configure_database_env(_POSTGRES_URL)
     with _engine() as engine:
-        rev = _current_revision(engine)
-    if rev != PLAN2_HEAD:
-        _reset_to_revision(PLAN2_HEAD)
+        reset_disposable_public_schema(engine)
+    upgrade_clean_root_checked(
+        _POSTGRES_URL,
+        deployment_class="rehearsal",
+        app_env="test",
+        build_revision="test-durable-interrupt",
+    )
 
 
 def _make_run(session: Session, *, status: str = "waiting_approval", state_revision: int = 2):
@@ -358,24 +251,6 @@ def _create_pending(
     )
     session.flush()
     return repo, result, parent
-
-
-def test_upgrade_creates_interrupt_schema_and_indexes() -> None:
-    # This is a historical migration test.  Start at the exact parent instead
-    # of attempting an "upgrade" target below an already-current database.
-    _reset_to_revision(PLAN06_HEAD)
-    try:
-        _run_alembic("upgrade", PLAN07_INTERRUPT_REVISION)
-        with _engine() as engine:
-            assert _current_revision(engine) == PLAN07_INTERRUPT_REVISION
-            with engine.connect() as conn:
-                assert _table_exists(conn, "assistant_run_interrupt")
-                indexes = _index_names(conn, "assistant_run_interrupt")
-                assert "uq_assistant_run_interrupt_run_key" in indexes
-                assert "uq_assistant_run_interrupt_one_pending" in indexes
-                assert "uq_assistant_run_interrupt_resolution_request" in indexes
-    finally:
-        _reset_to_revision(PLAN2_HEAD)
 
 
 def test_unique_logical_key_and_one_pending_partial() -> None:
@@ -610,89 +485,3 @@ def test_run_first_lock_order_resolution_path() -> None:
             )
             session.commit()
             assert cancelled.interrupt.status == "cancelled"
-
-
-def _insert_plan09_active_run(engine: Engine) -> uuid.UUID:
-    """Create an active Run using the pre-Plan-2 table shape only."""
-    conversation_id = uuid.uuid4()
-    run_id = uuid.uuid4()
-    with engine.begin() as conn:
-        conn.execute(
-            text(
-                """
-                INSERT INTO assistant_conversation
-                    (id, title, is_archived, created_at, updated_at)
-                VALUES (:id, :title, false, NOW(), NOW())
-                """
-            ),
-            {
-                "id": conversation_id,
-                "title": f"plan09-interrupt-{conversation_id.hex[:8]}",
-            },
-        )
-        conn.execute(
-            text(
-                """
-                INSERT INTO assistant_chat_run (
-                    id, conversation_id, status, runtime_kind,
-                    runtime_contract_version, required_app_build_revision,
-                    capability_ledger_mode, state_revision, last_event_seq,
-                    checkpoint_seq, lease_generation, recovery_count,
-                    memory_commit_status, created_at, updated_at
-                ) VALUES (
-                    :id, :conversation_id, 'waiting_approval', 'main_agent',
-                    1, 'plan09-history-build', 'enforced', 2, 0,
-                    0, 0, 0, 'pending', NOW(), NOW()
-                )
-                """
-            ),
-            {"id": run_id, "conversation_id": conversation_id},
-        )
-    return run_id
-
-
-def test_upgrade_downgrade_upgrade_refuses_historical_active_run() -> None:
-    # Current ORM maps the Plan 2 frozen fields, so this historical-schema
-    # migration test must seed the Plan 09 row with its actual SQL shape.
-    _reset_to_revision(PLAN09_HEAD)
-    try:
-        with _engine() as engine:
-            _insert_plan09_active_run(engine)
-
-        with pytest.raises(Exception) as exc_info:
-            _run_alembic("downgrade", PLAN06_HEAD)
-        assert any(
-            token in _err_text(exc_info.value)
-            for token in (
-                DOWNGRADE_BLOCKED_TOKEN,
-                "MINDATLAS_PLAN08_DOWNGRADE_BLOCKED_LEDGER_DATA",
-            )
-        )
-
-        # Purging active durable state with the explicit test-only acknowledgments
-        # permits the historical downgrade and re-upgrade sequence.
-        with _engine() as engine:
-            with engine.begin() as conn:
-                _purge_interrupt_and_active(conn)
-
-        prior_ack = os.environ.get("MINDATLAS_PLAN08_DOWNGRADE_ACK_PURGE_LEDGER_DATA")
-        os.environ["MINDATLAS_PLAN08_DOWNGRADE_ACK_PURGE_LEDGER_DATA"] = "1"
-        try:
-            _run_alembic("downgrade", PLAN06_HEAD)
-        finally:
-            if prior_ack is None:
-                os.environ.pop("MINDATLAS_PLAN08_DOWNGRADE_ACK_PURGE_LEDGER_DATA", None)
-            else:
-                os.environ["MINDATLAS_PLAN08_DOWNGRADE_ACK_PURGE_LEDGER_DATA"] = prior_ack
-        with _engine() as engine:
-            assert _current_revision(engine) == PLAN06_HEAD
-            with engine.connect() as conn:
-                assert not _table_exists(conn, "assistant_run_interrupt")
-
-        _run_alembic("upgrade", PLAN09_HEAD)
-        with _engine() as engine:
-            assert _current_revision(engine) == PLAN09_HEAD
-            with engine.connect() as conn:
-                assert _table_exists(conn, "assistant_run_interrupt")
-    finally:
-        _reset_to_revision(PLAN2_HEAD)

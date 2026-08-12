@@ -167,6 +167,22 @@ docker compose up -d
 
 ## 常见问题排查
 
+### 0. Schema migration 与回滚边界
+
+- 默认部署路径只对空库或已有 clean-family `alembic_version` 的数据库执行
+  `alembic upgrade head`；非空但未版本化的数据库会以
+  `unsupported_nonempty_unversioned_database` 失败，绝不会自动 `stamp`。
+- GA 前恢复优先使用同一 clean-family/revision 的备份，或删除并重新创建
+  disposable 数据库后从 `pre_ga_v1_0001` fresh upgrade。不要重新启用归档的旧
+  Alembic lineage，也不要把归档文件复制回 live `versions/`。
+- root downgrade 只允许在测试环境、精确 acknowledgement 且数据库没有任何保留
+  业务/运行时数据时执行；它会销毁到空 schema，不是生产回滚，也不会重建 Legacy。
+- guarded rebaseline 是非生产本地维护命令，不由 Compose 启动路径调用。它要么完整
+  提交 clean-family marker 与版本，要么事务回滚并保持源库不变。
+- API readiness 和 Assistant Worker 在 family、revision、fingerprint、deployment
+  class 或 runtime contract 漂移时 fail closed；修复方式是前向部署兼容的 clean
+  revision 或恢复同一 clean-family 备份。
+
 ### 1. 数据库连接失败
 
 **症状**: 后端启动失败，日志显示数据库连接错误
@@ -352,3 +368,44 @@ If Setup-authorized initialization commits the singleton operator but initial-se
 ### Compose injection
 
 `deploy/docker-compose.yml` passes the four operator-auth variables and `CORS_ORIGINS` into the `api` service with empty defaults so local quick-start does not invent secrets. Production must supply real values via a secret store or deploy `.env` (see `deploy/.env.example` commented placeholders). Local development may keep them blank through `docker-compose.override.yml`.
+
+### Pre-GA schema rebaseline boundary
+
+The supported schema family starts at `pre_ga_v1_0001`. A fresh deployment resets
+or restores a compatible clean-family database and runs `alembic upgrade head`;
+it never downgrades or reconnects to the archived 60-revision lineage. The
+archived files under `backend/alembic/archive/pre_ga_v1_superseded/` are
+non-importable historical evidence, not an upgrade or restore source.
+
+The guarded rebaseline command is exceptional local maintenance only. It may
+run only when the process deployment class (`development` or `rehearsal`) and
+the exact database-local comment `mindatlas:deployment_class=<same-value>`
+agree, the database is writable/not in recovery, and the operator supplies the
+literal acknowledgement
+`I_ACKNOWLEDGE_THIS_IS_A_RESETTABLE_NON_PRODUCTION_DATABASE`. It verifies the
+old head, exact source fingerprint, exclusion definitions, retained-data
+invariants, and a keyed before/after snapshot before it stamps the clean root.
+Production, shared, unknown, drifted, or non-empty Legacy databases fail closed.
+
+Use `inspect` for a read-only preflight and `apply` only for the disposable
+database selected by the local maintenance procedure:
+
+```bash
+cd backend
+python scripts/rebaseline_pre_ga_v1.py inspect \
+  --database-url-env DATABASE_URL \
+  --report-file ../docs/superpowers/evidence/local-pre-ga-rebaseline-inspect.json
+
+python scripts/rebaseline_pre_ga_v1.py apply \
+  --database-url-env DATABASE_URL \
+  --report-file ../docs/superpowers/evidence/local-pre-ga-rebaseline-apply.json \
+  --acknowledge-local-maintenance \
+    I_ACKNOWLEDGE_THIS_IS_A_RESETTABLE_NON_PRODUCTION_DATABASE
+```
+
+The command has no `--force` or `--skip` escape hatch. A failed apply rolls back
+PostgreSQL DDL, seed deletion, stamp, and marker insertion together. Recovery
+before GA is database recreation or restoration of a backup already identified
+as the same clean family/revision; the clean root is not an operational
+rollback to Legacy. API/Worker incompatibility remains fail-closed until a
+compatible clean-family binary/schema/backup is deployed.

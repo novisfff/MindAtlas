@@ -18,6 +18,7 @@ from sqlalchemy import (
     LargeBinary,
     String,
     Text,
+    UniqueConstraint,
     text,
 )
 from sqlalchemy.dialects.postgresql import UUID
@@ -28,13 +29,26 @@ from app.common.time import utcnow
 from app.database import Base
 
 
-# Portable length checks for ORM/SQLite create_all. Full lowercase-hex regex
-# is enforced by the PostgreSQL migration (Task 10 gate).
 def _sha256_check(column: str, *, name: str) -> CheckConstraint:
-    return CheckConstraint(f"length({column}) = 64", name=name)
+    return CheckConstraint(f"{column} ~ '^[0-9a-f]{{64}}$'", name=name)
 
 
 def _nullable_sha256_check(column: str, *, name: str) -> CheckConstraint:
+    return CheckConstraint(
+        f"{column} IS NULL OR {column} ~ '^[0-9a-f]{{64}}$'",
+        name=name,
+    )
+
+
+def _portable_sha256_check(column: str, *, name: str) -> CheckConstraint:
+    return CheckConstraint(f"length({column}) = 64", name=name)
+
+
+def _portable_nullable_sha256_check(
+    column: str,
+    *,
+    name: str,
+) -> CheckConstraint:
     return CheckConstraint(
         f"{column} IS NULL OR length({column}) = 64",
         name=name,
@@ -46,7 +60,7 @@ class AssistantSkillPackage(UuidPrimaryKeyMixin, TimestampMixin, Base):
 
     __tablename__ = "assistant_skill_package"
 
-    canonical_name = Column(String(64), nullable=False, unique=True, index=True)
+    canonical_name = Column(String(64), nullable=False, index=True)
     display_name = Column(String(128), nullable=False)
     description = Column(String(1024), nullable=False, default="")
     draft_version_id = Column(
@@ -116,6 +130,10 @@ class AssistantSkillPackage(UuidPrimaryKeyMixin, TimestampMixin, Base):
     )
 
     __table_args__ = (
+        UniqueConstraint(
+            "canonical_name",
+            name="assistant_skill_package_canonical_name_key",
+        ),
         CheckConstraint(
             "migration_state IN ('shadow','native','cutover')",
             name="ck_assistant_skill_package_migration_state",
@@ -131,7 +149,7 @@ class AssistantSkillPackage(UuidPrimaryKeyMixin, TimestampMixin, Base):
             "(archived_at IS NOT NULL)",
             name="ck_assistant_skill_package_archived_shape",
         ),
-        _nullable_sha256_check(
+        _portable_nullable_sha256_check(
             "last_admin_request_digest",
             name="ck_assistant_skill_package_last_admin_request_digest",
         ),
@@ -158,7 +176,7 @@ class AssistantSkillPackageAlias(UuidPrimaryKeyMixin, Base):
         index=True,
     )
     alias = Column(String(512), nullable=False)
-    normalized_alias = Column(String(512), nullable=False, unique=True, index=True)
+    normalized_alias = Column(String(512), nullable=False, index=True)
     alias_type = Column(String(32), nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
     # Plan 09: soft-disable custom aliases; names remain reserved (never delete/reassign).
@@ -172,6 +190,10 @@ class AssistantSkillPackageAlias(UuidPrimaryKeyMixin, Base):
     )
 
     __table_args__ = (
+        UniqueConstraint(
+            "normalized_alias",
+            name="assistant_skill_package_alias_normalized_alias_key",
+        ),
         CheckConstraint(
             "alias_type IN ('canonical','legacy','custom')",
             name="ck_assistant_skill_package_alias_type",
@@ -401,19 +423,16 @@ class AssistantSkillCapabilityBinding(UuidPrimaryKeyMixin, Base):
         UUID(as_uuid=True),
         ForeignKey("assistant_tool.id", ondelete="RESTRICT"),
         nullable=True,
-        index=True,
     )
     resolved_workflow_version_id = Column(
         UUID(as_uuid=True),
         ForeignKey("assistant_workflow_version.id", ondelete="RESTRICT"),
         nullable=True,
-        index=True,
     )
     resolved_agent_version_id = Column(
         UUID(as_uuid=True),
         ForeignKey("assistant_agent_profile_version.id", ondelete="RESTRICT"),
         nullable=True,
-        index=True,
     )
     resolved_revision = Column(Integer, nullable=True)
     input_schema_digest = Column(String(64), nullable=True)
@@ -450,6 +469,19 @@ class AssistantSkillCapabilityBinding(UuidPrimaryKeyMixin, Base):
         CheckConstraint(
             "resolved_revision IS NULL OR resolved_revision > 0",
             name="ck_assistant_skill_capability_binding_revision_positive",
+        ),
+        CheckConstraint(
+            "resolution_status = 'unresolved' OR ("
+            "  (resolution_snapshot::jsonb) ? 'outputSchema'"
+            "  AND (resolution_snapshot::jsonb) ? 'outputSchemaDigest'"
+            "  AND (resolution_snapshot::jsonb) ? 'inputSchema'"
+            "  AND (resolution_snapshot::jsonb) ? 'inputSchemaDigest'"
+            "  AND ((resolution_snapshot::jsonb)->>'outputSchemaDigest')"
+            " = output_schema_digest"
+            "  AND ((resolution_snapshot::jsonb)->>'inputSchemaDigest')"
+            " = input_schema_digest"
+            ")",
+            name="ck_assistant_skill_capability_binding_snapshot_schema_pair",
         ),
         # Unresolved drafts: no typed FKs / complete digest set / snapshot.
         # Resolved: target_identity + full digest set + snapshot; one target shape.
@@ -550,6 +582,18 @@ class AssistantSkillCapabilityBinding(UuidPrimaryKeyMixin, Base):
             "skill_version_id",
             "ordinal",
         ),
+        Index(
+            "ix_as_skill_cap_bind_res_agent_ver",
+            "resolved_agent_version_id",
+        ),
+        Index(
+            "ix_as_skill_cap_bind_res_tool",
+            "resolved_tool_id",
+        ),
+        Index(
+            "ix_as_skill_cap_bind_res_wf_ver",
+            "resolved_workflow_version_id",
+        ),
     )
 
 
@@ -572,25 +616,21 @@ class AssistantSkillCapabilityDependency(UuidPrimaryKeyMixin, Base):
         UUID(as_uuid=True),
         ForeignKey("assistant_tool.id", ondelete="RESTRICT"),
         nullable=True,
-        index=True,
     )
     resolved_workflow_version_id = Column(
         UUID(as_uuid=True),
         ForeignKey("assistant_workflow_version.id", ondelete="RESTRICT"),
         nullable=True,
-        index=True,
     )
     resolved_agent_version_id = Column(
         UUID(as_uuid=True),
         ForeignKey("assistant_agent_profile_version.id", ondelete="RESTRICT"),
         nullable=True,
-        index=True,
     )
     resolved_model_id = Column(
         UUID(as_uuid=True),
         ForeignKey("ai_model.id", ondelete="RESTRICT"),
         nullable=True,
-        index=True,
     )
     target_revision = Column(Integer, nullable=True)
     input_schema_digest = Column(String(64), nullable=True)
@@ -683,6 +723,22 @@ class AssistantSkillCapabilityDependency(UuidPrimaryKeyMixin, Base):
             "dependency_path",
             unique=True,
         ),
+        Index(
+            "ix_as_skill_cap_dep_res_agent_ver",
+            "resolved_agent_version_id",
+        ),
+        Index(
+            "ix_as_skill_cap_dep_res_model",
+            "resolved_model_id",
+        ),
+        Index(
+            "ix_as_skill_cap_dep_res_tool",
+            "resolved_tool_id",
+        ),
+        Index(
+            "ix_as_skill_cap_dep_res_wf_ver",
+            "resolved_workflow_version_id",
+        ),
     )
 
 
@@ -691,7 +747,7 @@ class AssistantMainAgentProfile(UuidPrimaryKeyMixin, TimestampMixin, Base):
 
     __tablename__ = "assistant_main_agent_profile"
 
-    profile_key = Column(String(64), nullable=False, unique=True, index=True)
+    profile_key = Column(String(64), nullable=False, index=True)
     display_name = Column(String(128), nullable=False)
     is_default = Column(Boolean, nullable=False, default=False, server_default=text("false"))
     draft_version_id = Column(
@@ -744,6 +800,10 @@ class AssistantMainAgentProfile(UuidPrimaryKeyMixin, TimestampMixin, Base):
     )
 
     __table_args__ = (
+        UniqueConstraint(
+            "profile_key",
+            name="assistant_main_agent_profile_profile_key_key",
+        ),
         CheckConstraint(
             "migration_state IN ('bootstrap','shadow','native','cutover')",
             name="ck_assistant_main_agent_profile_migration_state",
@@ -754,7 +814,7 @@ class AssistantMainAgentProfile(UuidPrimaryKeyMixin, TimestampMixin, Base):
             "aggregate_revision >= 0",
             name="ck_assistant_main_agent_profile_aggregate_revision",
         ),
-        _nullable_sha256_check(
+        _portable_nullable_sha256_check(
             "last_admin_request_digest",
             name="ck_assistant_main_agent_profile_last_admin_request_digest",
         ),
@@ -891,23 +951,23 @@ class AssistantSkillImportPreview(UuidPrimaryKeyMixin, TimestampMixin, Base):
             "principal_role IN ('operator', 'viewer')",
             name="ck_assistant_skill_import_preview_principal_role",
         ),
-        _sha256_check(
+        _portable_sha256_check(
             "actor_scope_digest",
             name="ck_assistant_skill_import_preview_actor_scope_digest",
         ),
-        _sha256_check(
+        _portable_sha256_check(
             "upload_digest",
             name="ck_assistant_skill_import_preview_upload_digest",
         ),
-        _sha256_check(
+        _portable_sha256_check(
             "candidate_content_digest",
             name="ck_assistant_skill_import_preview_content_digest",
         ),
-        _sha256_check(
+        _portable_sha256_check(
             "preview_digest",
             name="ck_assistant_skill_import_preview_preview_digest",
         ),
-        _nullable_sha256_check(
+        _portable_nullable_sha256_check(
             "applied_request_digest",
             name="ck_assistant_skill_import_preview_applied_request_digest",
         ),

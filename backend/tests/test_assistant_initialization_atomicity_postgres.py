@@ -16,16 +16,21 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from tests._bootstrap import bootstrap_backend_imports, reset_caches
-from tests.postgres_destructive_guard import assert_disposable_postgres_target
+from tests.postgres_destructive_guard import (
+    assert_disposable_postgres_target,
+    reset_disposable_public_schema,
+)
+from tests.schema_baseline_support import upgrade_clean_root_checked
 
 bootstrap_backend_imports()
 reset_caches()
 
 os.environ.setdefault("APP_ENV", "test")
+os.environ.setdefault("MINDATLAS_DEPLOYMENT_CLASS", "rehearsal")
 os.environ.setdefault("APP_BUILD_REVISION", "test-build-bootstrap-task4")
 os.environ.setdefault(
     "AI_PROVIDER_FERNET_KEY",
-    "07v02gVBdreNrXjLJZkIMdohHtgy6aDFKBHxakHjbrQ=",
+    "b98esSSrtceWc4IUOFGR-f_6I8FfnxtpjjYQZN51RCw=",
 )
 
 _POSTGRES_URL = os.environ.get("MINDATLAS_TEST_POSTGRES_URL", "").strip()
@@ -65,7 +70,7 @@ def _as_sqlalchemy_url(url: str) -> str:
 
 def _configure_database_env(url: str) -> None:
     os.environ["DATABASE_URL"] = url
-    os.environ.setdefault("MINDATLAS_PLAN10_B2_TEST_OVERRIDE", "1")
+    os.environ["MINDATLAS_DEPLOYMENT_CLASS"] = "rehearsal"
     reset_caches()
     try:
         from app.config import get_settings
@@ -99,20 +104,13 @@ def _session(engine) -> Iterator[Session]:
 
 
 def _ensure_schema(engine) -> None:
-    from app.database import Base
-
-    # Import model modules so Base.metadata is complete.
-    import app.ai_registry.models  # noqa: F401
-    import app.assistant.models  # noqa: F401
-    import app.assistant.runtime.models  # noqa: F401
-    import app.assistant.skills.models  # noqa: F401
-    import app.assistant_config.models  # noqa: F401
-    import app.entry_type.models  # noqa: F401
-    import app.operator_auth.models  # noqa: F401
-    import app.relation.models  # noqa: F401
-    import app.system_settings.models  # noqa: F401
-
-    Base.metadata.create_all(bind=engine)
+    reset_disposable_public_schema(engine)
+    upgrade_clean_root_checked(
+        _POSTGRES_URL,
+        deployment_class="rehearsal",
+        app_env="test",
+        build_revision="test-build-bootstrap-task4",
+    )
 
 
 def _truncate_owned(engine) -> None:

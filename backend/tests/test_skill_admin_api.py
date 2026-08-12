@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import unittest
 import uuid
-from pathlib import Path
 
 from tests._bootstrap import bootstrap_backend_imports, reset_caches
 
@@ -233,34 +232,6 @@ class SkillAdminMigrationModelTests(unittest.TestCase):
         for a in aliases:
             self.assertIsNone(a.disabled_at)
             self.assertIsNone(a.disabled_by)
-
-    def test_migration_revision_parent_and_unique_id(self) -> None:
-        import re
-
-        versions = Path(__file__).resolve().parents[1] / "alembic" / "versions"
-        lifecycle = list(versions.glob("*_add_skill_package_admin_lifecycle.py"))
-        self.assertEqual(len(lifecycle), 1)
-        text = lifecycle[0].read_text(encoding="utf-8")
-        self.assertIn('down_revision = "d7e8f9a0b1c3"', text)
-        self.assertNotIn("b4c5d6e7f8a9", text)
-        rev_match = re.search(r'revision\s*=\s*["\']([0-9a-f]+)["\']', text)
-        self.assertIsNotNone(rev_match)
-        rev = rev_match.group(1)  # type: ignore[union-attr]
-        self.assertNotEqual(rev, "b4c5d6e7f8a9")
-        self.assertNotEqual(rev, "d7e8f9a0b1c3")
-        children = []
-        for path in versions.glob("*.py"):
-            if path.name.startswith("__"):
-                continue
-            content = path.read_text(encoding="utf-8")
-            m = re.search(r"down_revision\s*=\s*[\"']([^\"']+)[\"']", content)
-            if m and m.group(1) == rev:
-                children.append(path.name)
-        self.assertTrue(
-            any("add_skill_evaluation_workbench" in name for name in children),
-            f"expected evaluation migration to descend from Task 1 head; got {children}",
-        )
-
 
 if __name__ == "__main__":
     unittest.main()

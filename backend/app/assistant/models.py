@@ -114,13 +114,23 @@ class AssistantChatRun(UuidPrimaryKeyMixin, TimestampMixin, Base):
         nullable=True,
         index=True,
     )
-    status = Column(String(32), nullable=False, default="queued", index=True)
+    status = Column(
+        String(32),
+        nullable=False,
+        default="queued",
+        server_default=text("'queued'"),
+        index=True,
+    )
     error_message = Column(Text, nullable=True)
     cancel_requested_at = Column(DateTime(timezone=True), nullable=True)
     started_at = Column(DateTime(timezone=True), nullable=True)
     ended_at = Column(DateTime(timezone=True), nullable=True)
-    last_event_seq = Column(Integer, nullable=False, default=0)
-    checkpoint_seq = Column(Integer, nullable=False, default=0)
+    last_event_seq = Column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    checkpoint_seq = Column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
 
     # Plan 2 Main-Agent-only runtime identity (frozen after insert).
     runtime_kind = Column(
@@ -131,16 +141,27 @@ class AssistantChatRun(UuidPrimaryKeyMixin, TimestampMixin, Base):
     )
     main_agent_rollout_revision_id = Column(
         UUID(as_uuid=True),
-        ForeignKey("assistant_main_agent_rollout_revision.id"),
+        ForeignKey(
+            "assistant_main_agent_rollout_revision.id",
+            name="fk_assistant_chat_run_main_agent_rollout_revision_id",
+        ),
         nullable=False,
     )
     main_agent_profile_version_id = Column(
         UUID(as_uuid=True),
-        ForeignKey("assistant_main_agent_profile_version.id"),
+        ForeignKey(
+            "assistant_main_agent_profile_version.id",
+            name="fk_assistant_chat_run_main_agent_profile_version_id",
+        ),
         nullable=False,
     )
     resolved_model_id = Column(
-        UUID(as_uuid=True), ForeignKey("ai_model.id"), nullable=False
+        UUID(as_uuid=True),
+        ForeignKey(
+            "ai_model.id",
+            name="fk_assistant_chat_run_resolved_model_id",
+        ),
+        nullable=False,
     )
     runtime_closure_digest = Column(String(64), nullable=False)
     runtime_contract_version = Column(Integer, nullable=False)
@@ -268,12 +289,10 @@ class AssistantChatRun(UuidPrimaryKeyMixin, TimestampMixin, Base):
             "runtime_contract_version > 0 AND required_checkpoint_codec_version > 0",
             name="ck_assistant_chat_run_positive_runtime_contract",
         ),
-        # Portable length checks for SQLite; PostgreSQL migration adds full
-        # lowercase-hex regex via ck_assistant_chat_run_runtime_digests.
         CheckConstraint(
-            "length(runtime_closure_digest) = 64 "
-            "AND length(required_capability_feature_digest) = 64",
-            name="ck_assistant_chat_run_runtime_digests_len",
+            "runtime_closure_digest ~ '^[0-9a-f]{64}$' "
+            "AND required_capability_feature_digest ~ '^[0-9a-f]{64}$'",
+            name="ck_assistant_chat_run_runtime_digests",
         ),
         CheckConstraint(
             "memory_commit_status IN ('not_applicable','pending','committed','failed')",
@@ -376,10 +395,16 @@ class AssistantConversationL1Memory(UuidPrimaryKeyMixin, TimestampMixin, Base):
         ForeignKey("assistant_conversation.id", ondelete="CASCADE"),
         nullable=False,
     )
-    summary_text = Column(Text, nullable=False, default="")
+    summary_text = Column(
+        Text, nullable=False, default="", server_default=text("''")
+    )
     last_applied_run_id = Column(
         UUID(as_uuid=True),
-        ForeignKey("assistant_chat_run.id", ondelete="SET NULL"),
+        ForeignKey(
+            "assistant_chat_run.id",
+            ondelete="SET NULL",
+            name="fk_assistant_l1_memory_last_applied_run_id",
+        ),
         nullable=True,
     )
 
@@ -406,17 +431,25 @@ class AssistantConversationSkillL2Memory(UuidPrimaryKeyMixin, TimestampMixin, Ba
         nullable=False,
     )
     facts = Column(JSON, nullable=False, default=list)
-    version = Column(Integer, nullable=False, default=1)
+    version = Column(Integer, nullable=False, default=1, server_default=text("1"))
     skill_package_id = Column(
         UUID(as_uuid=True),
-        ForeignKey("assistant_skill_package.id", ondelete="RESTRICT"),
+        ForeignKey(
+            "assistant_skill_package.id",
+            ondelete="RESTRICT",
+            name="fk_assistant_l2_memory_skill_package_id",
+        ),
         nullable=False,
     )
     memory_namespace = Column(String(128), nullable=False)
     facts_v2 = Column(JSON, nullable=True)
     last_applied_run_id = Column(
         UUID(as_uuid=True),
-        ForeignKey("assistant_chat_run.id", ondelete="SET NULL"),
+        ForeignKey(
+            "assistant_chat_run.id",
+            ondelete="SET NULL",
+            name="fk_assistant_l2_memory_last_applied_run_id",
+        ),
         nullable=True,
     )
 
@@ -462,7 +495,7 @@ class AssistantConversationWorkflowCallMemory(UuidPrimaryKeyMixin, TimestampMixi
     )
     summary_text = Column(Text, nullable=False, default="")
     facts = Column(JSON, nullable=False, default=list)
-    version = Column(Integer, nullable=False, default=1)
+    version = Column(Integer, nullable=False, default=1, server_default=text("1"))
 
     conversation = relationship("Conversation", back_populates="workflow_call_memories")
 

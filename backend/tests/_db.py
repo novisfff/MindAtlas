@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import atexit
+import re
 import sys
 import tempfile
 import uuid
@@ -9,7 +10,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
-from sqlalchemy import JSON, CheckConstraint, create_engine, event
+from sqlalchemy import JSON, CheckConstraint, create_engine, event, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import Session, sessionmaker
@@ -63,7 +64,67 @@ def _compile_jsonb_for_sqlite(_type, _compiler, **_kwargs):  # noqa: ANN001
     return "JSON"
 
 
-def _normalize_report_tables_for_sqlite() -> None:
+_SHA256_REGEX_SQL = re.compile(
+    r"(?P<column>[a-z_][a-z0-9_]*) ~ '\^\[0-9a-f\]\{64\}\$'"
+)
+_JSONB_TYPEOF_SQL = re.compile(
+    r"jsonb_typeof\((?P<column>[a-z_][a-z0-9_]*)\)"
+)
+_JSONB_HAS_KEY_SQL = re.compile(
+    r"\((?P<column>[a-z_][a-z0-9_]*)::jsonb\) \? '(?P<key>[A-Za-z0-9_]+)'"
+)
+_JSONB_TEXT_VALUE_SQL = re.compile(
+    r"\(\((?P<column>[a-z_][a-z0-9_]*)::jsonb\)->>'(?P<key>[A-Za-z0-9_]+)'\)"
+)
+
+
+@compiles(CheckConstraint, "sqlite")
+def _compile_check_constraint_for_sqlite(
+    constraint,  # noqa: ANN001
+    compiler,  # noqa: ANN001
+    **kwargs,
+):  # noqa: ANN201
+    rendered = compiler.visit_check_constraint(constraint, **kwargs)
+    rendered = _SHA256_REGEX_SQL.sub(
+        lambda match: f"length({match.group('column')}) = 64",
+        rendered,
+    )
+    rendered = _JSONB_TYPEOF_SQL.sub(
+        lambda match: f"json_type({match.group('column')})",
+        rendered,
+    )
+    rendered = _JSONB_HAS_KEY_SQL.sub(
+        lambda match: (
+            f"json_type({match.group('column')}, '$.{match.group('key')}')"
+            " IS NOT NULL"
+        ),
+        rendered,
+    )
+    return _JSONB_TEXT_VALUE_SQL.sub(
+        lambda match: (
+            f"json_extract({match.group('column')}, '$.{match.group('key')}')"
+        ),
+        rendered,
+    )
+
+
+@contextmanager
+def _sqlite_metadata_compatibility(metadata):  # noqa: ANN001, ANN201
+    metadata_default = metadata.tables["operator_audit_event"].c[
+        "metadata_json"
+    ].server_default
+    assert metadata_default is not None
+    original = metadata_default.arg
+    metadata_default.arg = text("'{}'")
+    try:
+        with _normalize_report_tables_for_sqlite():
+            yield
+    finally:
+        metadata_default.arg = original
+
+
+@contextmanager
+def _normalize_report_tables_for_sqlite():  # noqa: ANN201
     from app.report.models import MonthlyReport, WeeklyReport  # noqa: E402
 
     report_tables = (
@@ -77,17 +138,28 @@ def _normalize_report_tables_for_sqlite() -> None:
         ),
     )
 
-    for table, ignored_check_names in report_tables:
-        content_column = table.columns.get("content")
-        if content_column is not None:
-            content_column.type = JSON()
+    original_types: list[tuple[Any, Any]] = []
+    removed_constraints: list[tuple[Any, CheckConstraint]] = []
+    try:
+        for table, ignored_check_names in report_tables:
+            content_column = table.columns.get("content")
+            if content_column is not None:
+                original_types.append((content_column, content_column.type))
+                content_column.type = JSON()
 
-        for constraint in list(table.constraints):
-            if (
-                isinstance(constraint, CheckConstraint)
-                and constraint.name in ignored_check_names
-            ):
-                table.constraints.discard(constraint)
+            for constraint in list(table.constraints):
+                if (
+                    isinstance(constraint, CheckConstraint)
+                    and constraint.name in ignored_check_names
+                ):
+                    table.constraints.discard(constraint)
+                    removed_constraints.append((table, constraint))
+        yield
+    finally:
+        for table, constraint in removed_constraints:
+            table.append_constraint(constraint)
+        for column, original_type in original_types:
+            column.type = original_type
 
 
 def _install_module_sessionlocals(factory: Any) -> None:
@@ -103,6 +175,19 @@ def _apply_global_factory(factory: Any, engine: Any) -> None:
     app_database.engine = engine
     app_database.SessionLocal = factory
     _install_module_sessionlocals(factory)
+
+
+def create_sqlite_schema(engine: Any, *, tables: Any = None) -> None:
+    """Create current live metadata with the SQLite compatibility shims."""
+    from app.database import Base
+    from app.model_registry import load_all_live_models
+
+    load_all_live_models()
+    with _sqlite_metadata_compatibility(Base.metadata):
+        if tables is None:
+            Base.metadata.create_all(engine)
+        else:
+            Base.metadata.create_all(engine, tables=tables)
 
 
 def _latest_active_binding() -> dict[str, Any] | None:
@@ -167,29 +252,9 @@ def make_session() -> Session:
     reset_caches()
 
     from app.database import Base  # noqa: E402
+    from app.model_registry import load_all_live_models  # noqa: E402
 
-    import app.ai_provider.models  # noqa: F401,E402
-    import app.ai_registry.models  # noqa: F401,E402
-    import app.assistant.models  # noqa: F401,E402
-    import app.assistant.runtime.models  # noqa: F401,E402
-    import app.assistant.durable.models  # noqa: F401,E402
-    import app.assistant.capability_calls.models  # noqa: F401,E402
-    import app.assistant.skills.models  # noqa: F401,E402
-    import app.assistant.evaluation.models  # noqa: F401,E402
-    import app.assistant.migration.models  # noqa: F401,E402
-    import app.assistant_config.models  # noqa: F401,E402
-    import app.attachment.models  # noqa: F401,E402
-    import app.entry.models  # noqa: F401,E402
-    import app.entry_type.models  # noqa: F401,E402
-    import app.openclaw_integration.models  # noqa: F401,E402
-    import app.relation.models  # noqa: F401,E402
-    import app.tag.models  # noqa: F401,E402
-    import app.lightrag.models  # noqa: F401,E402
-    import app.report.models  # noqa: F401,E402
-    import app.system_settings.models  # noqa: F401,E402
-    import app.operator_auth.models  # noqa: F401,E402
-
-    _normalize_report_tables_for_sqlite()
+    load_all_live_models()
 
     tmp = tempfile.NamedTemporaryFile(prefix="mindatlas-test-", suffix=".sqlite", delete=False)
     tmp_path = Path(tmp.name)
@@ -208,7 +273,8 @@ def make_session() -> Session:
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.close()
 
-    Base.metadata.create_all(engine)
+    with _sqlite_metadata_compatibility(Base.metadata):
+        Base.metadata.create_all(engine)
 
     import app.database as app_database  # noqa: E402
 
