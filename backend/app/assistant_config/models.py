@@ -139,6 +139,13 @@ class AssistantTool(UuidPrimaryKeyMixin, TimestampMixin, Base):
         server_default=text("1"),
     )
 
+    __table_args__ = (
+        CheckConstraint(
+            "config_revision > 0",
+            name="ck_assistant_tool_config_revision_positive",
+        ),
+    )
+
 
 
 class AssistantTargetFolder(UuidPrimaryKeyMixin, TimestampMixin, Base):
@@ -147,15 +154,25 @@ class AssistantTargetFolder(UuidPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "assistant_target_folder"
 
     name = Column(String(128), nullable=False, index=True)
-    description = Column(String(512), nullable=False, default="")
+    description = Column(
+        String(512), nullable=False, default="", server_default=text("''")
+    )
     parent_id = Column(
         UUID(as_uuid=True),
-        ForeignKey("assistant_target_folder.id", ondelete="SET NULL"),
+        ForeignKey(
+            "assistant_target_folder.id",
+            ondelete="SET NULL",
+            name="fk_assistant_target_folder_parent_id",
+        ),
         nullable=True,
         index=True,
     )
-    color_token = Column(String(32), nullable=False, default="slate")
-    icon_key = Column(String(32), nullable=False, default="folder")
+    color_token = Column(
+        String(32), nullable=False, default="slate", server_default=text("'slate'")
+    )
+    icon_key = Column(
+        String(32), nullable=False, default="folder", server_default=text("'folder'")
+    )
 
     parent = relationship(
         "AssistantTargetFolder",
@@ -185,21 +202,39 @@ class AssistantWorkflow(UuidPrimaryKeyMixin, TimestampMixin, Base):
     workflow_viewport = Column(JSON, nullable=True)
     draft_version_id = Column(
         UUID(as_uuid=True),
-        ForeignKey("assistant_workflow_version.id", ondelete="SET NULL"),
+        ForeignKey(
+            "assistant_workflow_version.id",
+            ondelete="SET NULL",
+            name="fk_assistant_workflow_draft_version",
+            use_alter=True,
+        ),
         nullable=True,
         index=True,
     )
     published_version_id = Column(
         UUID(as_uuid=True),
-        ForeignKey("assistant_workflow_version.id", ondelete="SET NULL"),
+        ForeignKey(
+            "assistant_workflow_version.id",
+            ondelete="SET NULL",
+            name="fk_assistant_workflow_published_version",
+            use_alter=True,
+        ),
         nullable=True,
         index=True,
     )
-    is_system = Column(Boolean, nullable=False, default=False)
-    enabled = Column(Boolean, nullable=False, default=True)
+    is_system = Column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    enabled = Column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
     folder_id = Column(
         UUID(as_uuid=True),
-        ForeignKey("assistant_target_folder.id", ondelete="SET NULL"),
+        ForeignKey(
+            "assistant_target_folder.id",
+            ondelete="SET NULL",
+            name="fk_assistant_workflow_folder_id",
+        ),
         nullable=True,
         index=True,
     )
@@ -268,7 +303,6 @@ class AssistantWorkflowVersion(UuidPrimaryKeyMixin, TimestampMixin, Base):
         UUID(as_uuid=True),
         ForeignKey("assistant_workflow.id", ondelete="CASCADE"),
         nullable=False,
-        index=True,
     )
     sequence_no = Column(Integer, nullable=False)
     version_name = Column(String(255), nullable=False)
@@ -299,21 +333,39 @@ class AssistantAgentProfile(UuidPrimaryKeyMixin, TimestampMixin, Base):
     tools = Column(JSON, nullable=True)
     draft_version_id = Column(
         UUID(as_uuid=True),
-        ForeignKey("assistant_agent_profile_version.id", ondelete="SET NULL"),
+        ForeignKey(
+            "assistant_agent_profile_version.id",
+            ondelete="SET NULL",
+            name="fk_assistant_agent_profile_draft_version",
+            use_alter=True,
+        ),
         nullable=True,
         index=True,
     )
     published_version_id = Column(
         UUID(as_uuid=True),
-        ForeignKey("assistant_agent_profile_version.id", ondelete="SET NULL"),
+        ForeignKey(
+            "assistant_agent_profile_version.id",
+            ondelete="SET NULL",
+            name="fk_assistant_agent_profile_published_version",
+            use_alter=True,
+        ),
         nullable=True,
         index=True,
     )
-    is_system = Column(Boolean, nullable=False, default=False)
-    enabled = Column(Boolean, nullable=False, default=True)
+    is_system = Column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    enabled = Column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
     folder_id = Column(
         UUID(as_uuid=True),
-        ForeignKey("assistant_target_folder.id", ondelete="SET NULL"),
+        ForeignKey(
+            "assistant_target_folder.id",
+            ondelete="SET NULL",
+            name="fk_assistant_agent_profile_folder_id",
+        ),
         nullable=True,
         index=True,
     )
@@ -337,7 +389,6 @@ class AssistantAgentProfileVersion(UuidPrimaryKeyMixin, TimestampMixin, Base):
         UUID(as_uuid=True),
         ForeignKey("assistant_agent_profile.id", ondelete="CASCADE"),
         nullable=False,
-        index=True,
     )
     sequence_no = Column(Integer, nullable=False)
     version_name = Column(String(255), nullable=False)
@@ -391,5 +442,3 @@ class AssistantSystemBehaviorBinding(UuidPrimaryKeyMixin, TimestampMixin, Base):
             name="ck_assistant_system_behavior_binding_single_target",
         ),
     )
-
-

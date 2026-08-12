@@ -42,6 +42,13 @@ class AiCredential(UuidPrimaryKeyMixin, TimestampMixin, Base):
         passive_deletes=True,
     )
 
+    __table_args__ = (
+        CheckConstraint(
+            "runtime_revision > 0",
+            name="ck_ai_credential_runtime_revision_positive",
+        ),
+    )
+
 
 class AiModelCapabilityProbe(UuidPrimaryKeyMixin, Base):
     """Immutable live model capability probe evidence (Plan 03 Task 8).
@@ -54,9 +61,12 @@ class AiModelCapabilityProbe(UuidPrimaryKeyMixin, Base):
 
     model_id = Column(
         UUID(as_uuid=True),
-        ForeignKey("ai_model.id", ondelete="CASCADE"),
+        ForeignKey(
+            "ai_model.id",
+            ondelete="CASCADE",
+            name="fk_ai_model_capability_probe_model_id",
+        ),
         nullable=False,
-        index=True,
     )
     probe_contract_version = Column(Integer, nullable=False)
     adapter_key = Column(String(64), nullable=False)
@@ -67,7 +77,12 @@ class AiModelCapabilityProbe(UuidPrimaryKeyMixin, Base):
     probe_digest = Column(String(64), nullable=False)
     safe_error_code = Column(String(64), nullable=True)
     safe_error_summary = Column(String(200), nullable=True)
-    created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+        server_default=text("now()"),
+    )
 
     model = relationship(
         "AiModel",
@@ -85,12 +100,12 @@ class AiModelCapabilityProbe(UuidPrimaryKeyMixin, Base):
             name="ck_ai_model_capability_probe_status",
         ),
         CheckConstraint(
-            "length(model_config_digest) = 64",
-            name="ck_ai_model_capability_probe_model_config_digest_len",
+            "model_config_digest ~ '^[0-9a-f]{64}$'",
+            name="ck_ai_model_capability_probe_model_config_digest_hex",
         ),
         CheckConstraint(
-            "length(probe_digest) = 64",
-            name="ck_ai_model_capability_probe_probe_digest_len",
+            "probe_digest ~ '^[0-9a-f]{64}$'",
+            name="ck_ai_model_capability_probe_probe_digest_hex",
         ),
         CheckConstraint(
             "length(adapter_key) >= 1 AND length(adapter_key) <= 64",
@@ -108,8 +123,10 @@ class AiModelCapabilityProbe(UuidPrimaryKeyMixin, Base):
             "safe_error_summary IS NULL OR (length(safe_error_summary) >= 1 AND length(safe_error_summary) <= 200)",
             name="ck_ai_model_capability_probe_safe_error_summary_len",
         ),
-        # PostgreSQL migration adds jsonb_typeof(object) CHECK; SQLite create_all
-        # relies on service-layer Pydantic validation only.
+        CheckConstraint(
+            "jsonb_typeof(capabilities) = 'object'",
+            name="ck_ai_model_capability_probe_capabilities_object",
+        ),
         Index(
             "idx_ai_model_capability_probe_model_created_id",
             "model_id",
@@ -152,7 +169,6 @@ class AiModel(UuidPrimaryKeyMixin, TimestampMixin, Base):
             name="fk_ai_model_current_capability_probe_id",
         ),
         nullable=True,
-        index=True,
     )
 
     credential = relationship("AiCredential", back_populates="models")
@@ -171,6 +187,10 @@ class AiModel(UuidPrimaryKeyMixin, TimestampMixin, Base):
 
     __table_args__ = (
         CheckConstraint("model_type IN ('llm','embedding')", name="ck_ai_model_type"),
+        CheckConstraint(
+            "runtime_revision > 0",
+            name="ck_ai_model_runtime_revision_positive",
+        ),
         Index(
             "uq_ai_model_credential_name_type",
             "credential_id",
@@ -179,6 +199,10 @@ class AiModel(UuidPrimaryKeyMixin, TimestampMixin, Base):
             unique=True,
         ),
         Index("idx_ai_model_credential_type", "credential_id", "model_type"),
+        Index(
+            "idx_ai_model_current_capability_probe_id",
+            "current_capability_probe_id",
+        ),
     )
 
 

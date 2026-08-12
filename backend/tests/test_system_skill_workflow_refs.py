@@ -458,26 +458,5 @@ class SystemSkillWorkflowReferenceTests(unittest.TestCase):
             f"{skill.name} branch targets from {source_node_id} should split vertically",
         )
 
-    def test_legacy_shadow_name_mapping_vectors(self) -> None:
-        """Repository regression: underscore names map to hyphen packages only as aliases."""
-        from types import SimpleNamespace
-        from uuid import uuid4
-
-        from app.assistant.migration.legacy_names import (
-            legacy_skill_canonical_name,
-            map_legacy_name_to_canonical_base,
-        )
-
-        sid = uuid4()
-        self.assertEqual(map_legacy_name_to_canonical_base("quick_stats", sid), "quick-stats")
-        self.assertEqual(map_legacy_name_to_canonical_base("smart_capture", sid), "smart-capture")
-        self.assertEqual(
-            legacy_skill_canonical_name(SimpleNamespace(id=sid, name="quick_stats")),
-            "quick-stats",
-        )
-        with self.assertRaises(ValueError):
-            legacy_skill_canonical_name(SimpleNamespace(id=sid, name="general_chat"))
-
-
 if __name__ == "__main__":
     unittest.main()

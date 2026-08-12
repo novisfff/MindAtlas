@@ -582,48 +582,6 @@ class CapabilityCallModelTests(unittest.TestCase):
         self.assertEqual(legacy.capability_ledger_mode, "legacy_read_only")
 
 
-class CapabilityCallMigrationMetaTests(unittest.TestCase):
-    def test_revision_parent_and_sole_head(self) -> None:
-        """Plan 08 ledger chain remains an ancestor of the sole migration head."""
-        from pathlib import Path
-        from alembic.config import Config
-        from alembic.script import ScriptDirectory
-
-        backend = Path(__file__).resolve().parents[1]
-        cfg = Config(str(backend / "alembic.ini"))
-        cfg.set_main_option("script_location", str(backend / "alembic"))
-        script = ScriptDirectory.from_config(cfg)
-        heads = script.get_heads()
-        self.assertEqual(len(heads), 1, heads)
-        head = heads[0]
-        # Plan 2 is the sole script head; the Plan 1 tip remains its parent.
-        self.assertEqual(head, "b6e2d4f8a901")
-        plan2 = script.get_revision(head)
-        self.assertEqual(plan2.down_revision, "9f3c1a7e2b40")
-        plan1 = script.get_revision(plan2.down_revision)
-        self.assertEqual(plan1.down_revision, "3bd7bc4257c9")
-
-        plan09_eval = script.get_revision("027869a00a47")
-        self.assertEqual(plan09_eval.down_revision, "403414a62e55")
-        self.assertIn("skill_evaluation_workbench", plan09_eval.path)
-
-        plan09_lifecycle = script.get_revision(plan09_eval.down_revision)
-        self.assertEqual(plan09_lifecycle.down_revision, "d7e8f9a0b1c3")
-        self.assertIn("skill_package_admin_lifecycle", plan09_lifecycle.path)
-
-        # Plan 08 tip remains the parent of Plan 09 Task 1.
-        plan08_evidence = script.get_revision(plan09_lifecycle.down_revision)
-        self.assertEqual(plan08_evidence.revision, "d7e8f9a0b1c3")
-        self.assertEqual(plan08_evidence.down_revision, "f2c3a4b5d6e7")
-        self.assertIn("reconciliation_evidence", plan08_evidence.path)
-        lifecycle = script.get_revision(plan08_evidence.down_revision)
-        self.assertEqual(lifecycle.down_revision, "984c07876856")
-        self.assertIn("capability_attempt_lifecycle", lifecycle.path)
-        ledger = script.get_revision(lifecycle.down_revision)
-        self.assertEqual(ledger.down_revision, "7a3dac0ac2a8")
-        self.assertIn("capability_call_ledger", ledger.path)
-
-
 if __name__ == "__main__":
     unittest.main()
 

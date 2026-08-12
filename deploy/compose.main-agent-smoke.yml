@@ -36,8 +36,8 @@ services:
       args:
         APP_BUILD_REVISION: ${APP_BUILD_REVISION:?Set APP_BUILD_REVISION}
     environment:
-      # Fresh disposable DB only — Plan 10 B2 preflight gate for empty upgrade path.
-      MINDATLAS_PLAN10_B2_TEST_OVERRIDE: "1"
+      # Fresh disposable DB and rehearsal identity for the clean-root path.
+      MINDATLAS_DEPLOYMENT_CLASS: rehearsal
 
   provider-stub:
     image: python:3.11-slim
@@ -68,6 +68,7 @@ services:
     environment:
       APP_ENV: test
       APP_BUILD_REVISION: ${APP_BUILD_REVISION:?Set APP_BUILD_REVISION}
+      MINDATLAS_DEPLOYMENT_CLASS: rehearsal
       ASSISTANT_NEW_RUNS_ENABLED: "true"
       ASSISTANT_MAIN_AGENT_WRITE_MODE: "off"
       MINDATLAS_TEST_PROVIDER_HOST: provider-stub
@@ -112,6 +113,7 @@ services:
     environment:
       APP_ENV: test
       APP_BUILD_REVISION: ${APP_BUILD_REVISION:?Set APP_BUILD_REVISION}
+      MINDATLAS_DEPLOYMENT_CLASS: rehearsal
       ASSISTANT_NEW_RUNS_ENABLED: "true"
       ASSISTANT_MAIN_AGENT_WRITE_MODE: "off"
       MINDATLAS_TEST_PROVIDER_HOST: provider-stub
@@ -138,12 +140,14 @@ services:
     environment:
       LIGHTRAG_WORKER_ENABLED: "false"
       LIGHTRAG_ENABLED: "false"
+      MINDATLAS_DEPLOYMENT_CLASS: rehearsal
 
   docling-worker:
     container_name: ${COMPOSE_PROJECT_NAME:-ma-smoke}-docling-worker
     profiles: ["smoke-disabled"]
     environment:
       DOCLING_WORKER_ENABLED: "false"
+      MINDATLAS_DEPLOYMENT_CLASS: rehearsal
 
   web:
     container_name: ${COMPOSE_PROJECT_NAME:-ma-smoke}-web

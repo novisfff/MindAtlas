@@ -8,13 +8,10 @@ convergence, and gap-free sequence allocation under real row locks.
 from __future__ import annotations
 
 import os
-import subprocess
-import sys
 import threading
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Iterator
 
 import pytest
@@ -24,6 +21,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from tests._bootstrap import bootstrap_backend_imports, reset_caches
 from tests.postgres_destructive_guard import reset_disposable_public_schema
+from tests.schema_baseline_support import upgrade_clean_root_checked
 
 bootstrap_backend_imports()
 reset_caches()
@@ -36,9 +34,6 @@ _REQUIRE_POSTGRES = os.environ.get("MINDATLAS_REQUIRE_POSTGRES", "").strip() in 
     "yes",
     "YES",
 }
-
-PLAN2_HEAD = "b6e2d4f8a901"
-_BACKEND_DIR = Path(__file__).resolve().parents[1]
 
 if not _POSTGRES_URL and _REQUIRE_POSTGRES:
     pytest.fail(
@@ -68,8 +63,9 @@ def _as_sqlalchemy_url(url: str) -> str:
 
 def _configure_database_env(url: str) -> None:
     os.environ["DATABASE_URL"] = url
-    os.environ.setdefault("APP_ENV", "test")
-    os.environ.setdefault("MINDATLAS_PLAN10_B2_TEST_OVERRIDE", "1")
+    os.environ["APP_ENV"] = "test"
+    os.environ["MINDATLAS_DEPLOYMENT_CLASS"] = "rehearsal"
+    os.environ["APP_BUILD_REVISION"] = "test-durable-run-events"
     reset_caches()
     try:
         from app.config import get_settings
@@ -77,14 +73,6 @@ def _configure_database_env(url: str) -> None:
         get_settings.cache_clear()
     except Exception:
         pass
-
-
-def _alembic_env() -> dict[str, str]:
-    env = os.environ.copy()
-    env["DATABASE_URL"] = _POSTGRES_URL
-    env["APP_ENV"] = "test"
-    env["MINDATLAS_PLAN10_B2_TEST_OVERRIDE"] = "1"
-    return env
 
 
 @contextmanager
@@ -110,31 +98,16 @@ def _session(engine) -> Iterator[Session]:
         session.close()
 
 
-def _drop_public_schema(engine: Engine) -> None:
-    reset_disposable_public_schema(engine)
-
-
-def _upgrade_to_plan2_head() -> None:
-    completed = subprocess.run(
-        [sys.executable, "-m", "alembic", "upgrade", PLAN2_HEAD],
-        cwd=str(_BACKEND_DIR),
-        env=_alembic_env(),
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if completed.returncode != 0:
-        raise AssertionError(
-            f"alembic upgrade {PLAN2_HEAD} failed:\n"
-            f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
-        )
-
-
 @pytest.fixture(scope="module", autouse=True)
-def _current_plan2_schema() -> Iterator[None]:
+def _current_clean_root_schema() -> Iterator[None]:
     with _engine() as engine:
-        _drop_public_schema(engine)
-    _upgrade_to_plan2_head()
+        reset_disposable_public_schema(engine)
+    upgrade_clean_root_checked(
+        _POSTGRES_URL,
+        deployment_class="rehearsal",
+        app_env="test",
+        build_revision="test-durable-run-events",
+    )
     yield
 
 

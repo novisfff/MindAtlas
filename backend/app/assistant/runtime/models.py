@@ -13,10 +13,11 @@ from sqlalchemy import (
     Integer,
     JSON,
     String,
+    UniqueConstraint,
     event,
     text,
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapper
 
 from app.assistant.runtime.contracts import (
@@ -28,9 +29,7 @@ from app.database import Base
 
 
 def _sha256_check(column: str, *, name: str) -> CheckConstraint:
-    # Portable length check for SQLite create_all. Full lowercase-hex regex is
-    # enforced by the PostgreSQL migration.
-    return CheckConstraint(f"length({column}) = 64", name=name)
+    return CheckConstraint(f"{column} ~ '^[0-9a-f]{{64}}$'", name=name)
 
 
 _ACTION_SQL = ", ".join(f"'{a}'" for a in ROLLOUT_EVENT_ACTIONS)
@@ -42,7 +41,7 @@ class AssistantMainAgentRolloutRevision(Base):
     __tablename__ = "assistant_main_agent_rollout_revision"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
-    revision_label = Column(String(128), nullable=False, unique=True)
+    revision_label = Column(String(128), nullable=False)
     profile_version_id = Column(
         UUID(as_uuid=True),
         ForeignKey("assistant_main_agent_profile_version.id"),
@@ -51,7 +50,7 @@ class AssistantMainAgentRolloutRevision(Base):
     profile_content_digest = Column(String(64), nullable=False)
     model_id = Column(UUID(as_uuid=True), ForeignKey("ai_model.id"), nullable=False)
     model_identity_digest = Column(String(64), nullable=False)
-    package_closure_json = Column(JSON, nullable=False)
+    package_closure_json = Column(JSONB, nullable=False)
     package_closure_digest = Column(String(64), nullable=False)
     capability_closure_digest = Column(String(64), nullable=False)
     seed_manifest_digest = Column(String(64), nullable=False)
@@ -59,16 +58,29 @@ class AssistantMainAgentRolloutRevision(Base):
     runtime_contract_version = Column(Integer, nullable=False)
     checkpoint_codec_version = Column(Integer, nullable=False)
     capability_feature_digest = Column(String(64), nullable=False)
-    revision_digest = Column(String(64), nullable=False, unique=True)
+    revision_digest = Column(String(64), nullable=False)
     prepared_by_operator_id = Column(
         UUID(as_uuid=True),
         ForeignKey("operator_account.id"),
         nullable=True,
     )
     prepared_reason = Column(String(500), nullable=False)
-    created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+        server_default=text("now()"),
+    )
 
     __table_args__ = (
+        UniqueConstraint(
+            "revision_digest",
+            name="uq_ma_rollout_revision_digest",
+        ),
+        UniqueConstraint(
+            "revision_label",
+            name="uq_ma_rollout_revision_label",
+        ),
         CheckConstraint(
             "runtime_contract_version > 0 AND checkpoint_codec_version > 0",
             name="ck_ma_rollout_revision_positive_contract",
@@ -130,7 +142,6 @@ class AssistantRuntimeBootstrapGateUse(Base):
         UUID(as_uuid=True),
         ForeignKey("assistant_main_agent_rollout_revision.id"),
         nullable=False,
-        unique=True,
     )
     rollout_revision_digest = Column(String(64), nullable=False)
     profile_version_id = Column(
@@ -161,15 +172,28 @@ class AssistantRuntimeBootstrapGateUse(Base):
     checkpoint_codec_version = Column(Integer, nullable=False)
     capability_feature_digest = Column(String(64), nullable=False)
     closure_digest = Column(String(64), nullable=False)
-    bootstrap_request_id = Column(UUID(as_uuid=True), nullable=False, unique=True)
+    bootstrap_request_id = Column(UUID(as_uuid=True), nullable=False)
     operator_id = Column(
         UUID(as_uuid=True),
         ForeignKey("operator_account.id"),
         nullable=False,
     )
-    created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+        server_default=text("now()"),
+    )
 
     __table_args__ = (
+        UniqueConstraint(
+            "bootstrap_request_id",
+            name="uq_runtime_bootstrap_gate_use_request_id",
+        ),
+        UniqueConstraint(
+            "rollout_revision_id",
+            name="uq_runtime_bootstrap_gate_use_rollout_revision_id",
+        ),
         CheckConstraint(
             "action = 'system_bootstrap'",
             name="ck_runtime_bootstrap_gate_use_action",
@@ -240,8 +264,18 @@ class AssistantMainAgentRolloutControl(Base):
     new_runs_enabled = Column(
         Boolean, nullable=False, server_default=text("true"), default=True
     )
-    created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
-    updated_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+        server_default=text("now()"),
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+        server_default=text("now()"),
+    )
 
     __table_args__ = (
         CheckConstraint(
@@ -273,7 +307,7 @@ class AssistantMainAgentRolloutEvent(Base):
     )
     action = Column(String(32), nullable=False)
     control_revision = Column(Integer, nullable=False)
-    request_id = Column(UUID(as_uuid=True), nullable=False, unique=True)
+    request_id = Column(UUID(as_uuid=True), nullable=False)
     request_digest = Column(String(64), nullable=False)
     operator_id = Column(
         UUID(as_uuid=True), ForeignKey("operator_account.id"), nullable=True
@@ -283,10 +317,19 @@ class AssistantMainAgentRolloutEvent(Base):
     )
     reason = Column(String(500), nullable=False)
     evidence_digest = Column(String(64), nullable=False)
-    result_json = Column(JSON, nullable=False)
-    created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+    result_json = Column(JSONB, nullable=False)
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+        server_default=text("now()"),
+    )
 
     __table_args__ = (
+        UniqueConstraint(
+            "request_id",
+            name="uq_ma_rollout_event_request_id",
+        ),
         CheckConstraint(
             f"action IN ({_ACTION_SQL})",
             name="ck_ma_rollout_event_action",

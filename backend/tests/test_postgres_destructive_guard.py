@@ -12,7 +12,7 @@ from tests.postgres_destructive_guard import (
 )
 
 
-_SAFE_DATABASE = "mindatlas_test_plan08_guard"
+_SAFE_DATABASE = "mindatlas_test_pre_ga_v1_guard"
 
 
 class _NeverTouchedEngine:

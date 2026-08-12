@@ -92,12 +92,12 @@ def test_run_revoke_documented_dual_key_sequence_with_real_service(
     from sqlalchemy.orm import sessionmaker
 
     from app.config import Settings
-    from app.database import Base
     from app.operator_auth.models import OperatorSession
     from app.operator_auth.repository import OperatorRepository
     from app.operator_auth.service import OperatorAuthService
     from app.operator_auth.tokens import SessionMacKeyRing
     from app.operator_auth.contracts import RequestSecurityContext
+    from tests._db import create_sqlite_schema
     from scripts.revoke_unverifiable_operator_sessions import run_revoke
 
     def _hex(n: int) -> str:
@@ -140,7 +140,7 @@ def test_run_revoke_documented_dual_key_sequence_with_real_service(
     import app.operator_auth.models  # noqa: F401
     import app.system_settings.models  # noqa: F401
 
-    Base.metadata.create_all(engine)
+    create_sqlite_schema(engine)
     factory = sessionmaker(
         bind=engine, autoflush=False, autocommit=False, expire_on_commit=False, future=True
     )

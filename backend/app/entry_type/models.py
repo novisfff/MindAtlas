@@ -9,7 +9,7 @@ from app.database import Base
 class EntryType(UuidPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "entry_type"
 
-    code = Column(String(64), nullable=False, unique=True)
+    code = Column(String(64), nullable=False, unique=True, index=True)
     name = Column(String(128), nullable=False)
     description = Column(String(512), nullable=True)
     color = Column(String(32), nullable=True)

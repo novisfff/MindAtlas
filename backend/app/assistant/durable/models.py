@@ -26,10 +26,25 @@ from app.database import Base
 
 
 def _sha256_check(column: str, *, name: str) -> CheckConstraint:
-    return CheckConstraint(f"length({column}) = 64", name=name)
+    return CheckConstraint(f"{column} ~ '^[0-9a-f]{{64}}$'", name=name)
 
 
 def _nullable_sha256_check(column: str, *, name: str) -> CheckConstraint:
+    return CheckConstraint(
+        f"{column} IS NULL OR {column} ~ '^[0-9a-f]{{64}}$'",
+        name=name,
+    )
+
+
+def _portable_sha256_check(column: str, *, name: str) -> CheckConstraint:
+    return CheckConstraint(f"length({column}) = 64", name=name)
+
+
+def _portable_nullable_sha256_check(
+    column: str,
+    *,
+    name: str,
+) -> CheckConstraint:
     return CheckConstraint(
         f"{column} IS NULL OR length({column}) = 64",
         name=name,
@@ -721,23 +736,23 @@ class AssistantRunInterrupt(UuidPrimaryKeyMixin, Base):
             ")",
             name="ck_assistant_run_interrupt_resolution_pair",
         ),
-        _sha256_check(
+        _portable_sha256_check(
             "budget_suspension_digest",
             name="ck_assistant_run_interrupt_budget_suspension_digest",
         ),
-        _sha256_check(
+        _portable_sha256_check(
             "request_digest",
             name="ck_assistant_run_interrupt_request_digest",
         ),
-        _nullable_sha256_check(
+        _portable_nullable_sha256_check(
             "field_schema_digest",
             name="ck_assistant_run_interrupt_field_schema_digest",
         ),
-        _nullable_sha256_check(
+        _portable_nullable_sha256_check(
             "resume_token_digest",
             name="ck_assistant_run_interrupt_resume_token_digest",
         ),
-        _nullable_sha256_check(
+        _portable_nullable_sha256_check(
             "resolution_digest",
             name="ck_assistant_run_interrupt_resolution_digest",
         ),

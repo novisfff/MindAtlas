@@ -44,6 +44,8 @@ _BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(_BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(_BACKEND_ROOT))
 
+from app.schema.contracts import CLEAN_ROOT_REVISION  # noqa: E402
+
 ALLOWED_EVIDENCE_KEYS: set[str] = {
     "schemaVersion",
     "verificationKind",
@@ -77,13 +79,16 @@ SENSITIVE_FRAGMENTS: tuple[str, ...] = (
 
 VERIFICATION_KIND = "main_agent_bootstrap_readiness"
 SCHEMA_VERSION = "2"
-PLAN2_ALEMBIC_HEAD = "b6e2d4f8a901"
+CLEAN_SCHEMA_REVISION = CLEAN_ROOT_REVISION
 SMOKE_MODEL = "mindatlas-smoke-model"
 PROVIDER_BASE_URL = "http://provider-stub:8089/v1"
 CHAT_MESSAGE = "Return the deterministic smoke response."
 TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
 EXPECTED_RUNTIME_KIND = "main_agent"
-_ALEMBIC_REVISION_RE = re.compile(r"[0-9a-f]{12}")
+# Alembic revisions are opaque identifiers.  The current clean root is
+# intentionally human-readable, so validate a conservative scalar and then
+# enforce exact equality in ``collect_database_evidence``.
+_ALEMBIC_REVISION_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}")
 _NON_NEGATIVE_INTEGER_RE = re.compile(r"(?:0|[1-9][0-9]*)")
 _SOURCE_COMMIT_SHA_RE = re.compile(r"[0-9a-f]{40}")
 
@@ -245,8 +250,8 @@ def collect_database_evidence(
     """
     alembic_head = compose.observed_alembic_head()
     chat_run_count = compose.observed_conversation_run_count(conversation_id)
-    if alembic_head != PLAN2_ALEMBIC_HEAD:
-        raise SmokeFailure("database alembic head did not match Plan 2")
+    if alembic_head != CLEAN_SCHEMA_REVISION:
+        raise SmokeFailure("database alembic head did not match clean schema root")
     if chat_run_count != 1:
         raise SmokeFailure("database chat run count did not equal one")
     return alembic_head, chat_run_count
@@ -1303,12 +1308,12 @@ def build_compose_env(
             "LIGHTRAG_WORKER_ENABLED": "false",
             "DOCLING_WORKER_ENABLED": "false",
             "SCHEDULER_ENABLED": "false",
-            # Fresh disposable DB only — Plan 10 B2 empty-upgrade preflight.
-            "MINDATLAS_PLAN10_B2_TEST_OVERRIDE": "1",
+            # Fresh disposable DB with an explicit rehearsal schema identity.
+            "MINDATLAS_DEPLOYMENT_CLASS": "rehearsal",
             # Disposable DB credentials (not production).
             "POSTGRES_USER": "mindatlas",
             "POSTGRES_PASSWORD": "mindatlas_smoke",
-            "POSTGRES_DB": "mindatlas_smoke",
+            "POSTGRES_DB": "mindatlas_test_pre_ga_v1_smoke",
             "MINIO_ACCESS_KEY": "minioadmin",
             "MINIO_SECRET_KEY": "minioadmin",
             "NEO4J_USER": "neo4j",

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import BigInteger, Boolean, Column, DateTime, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import BigInteger, Boolean, Column, DateTime, ForeignKey, Index, Integer, String, Text, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
@@ -20,7 +20,9 @@ class Attachment(UuidPrimaryKeyMixin, TimestampMixin, Base):
     content_type = Column("mime_type", String(128), nullable=False)
 
     # Knowledge graph indexing fields
-    index_to_knowledge_graph = Column(Boolean, nullable=True, default=False)
+    index_to_knowledge_graph = Column(
+        Boolean, nullable=True, default=False, server_default=text("false")
+    )
     parse_status = Column(String(20), nullable=True)
     parsed_text = Column(Text, nullable=True)
     parsed_at = Column(DateTime(timezone=True), nullable=True)
@@ -29,15 +31,45 @@ class Attachment(UuidPrimaryKeyMixin, TimestampMixin, Base):
     # Relationships
     entry = relationship("Entry", lazy="joined")
 
+    __table_args__ = (
+        Index("ix_attachment_entry_id", "entry_id"),
+        Index("ix_attachment_id", "id"),
+    )
+
 
 class AttachmentParseOutbox(UuidPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "attachment_parse_outbox"
 
     attachment_id = Column(UUID(as_uuid=True), ForeignKey("attachment.id", ondelete="CASCADE"), nullable=False)
     entry_id = Column(UUID(as_uuid=True), nullable=False)
-    status = Column(String(20), nullable=False, default="pending")
-    attempts = Column(Integer, nullable=False, default=0)
-    available_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+    status = Column(
+        String(20),
+        nullable=False,
+        default="pending",
+        server_default=text("'pending'"),
+    )
+    attempts = Column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    available_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+        server_default=text("now()"),
+    )
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+        server_default=text("now()"),
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+        onupdate=utcnow,
+        server_default=text("now()"),
+    )
     locked_at = Column(DateTime(timezone=True), nullable=True)
     locked_by = Column(String(64), nullable=True)
     last_error = Column(Text, nullable=True)
