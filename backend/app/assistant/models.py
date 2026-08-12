@@ -167,6 +167,10 @@ class AssistantChatRun(UuidPrimaryKeyMixin, TimestampMixin, Base):
     runtime_contract_version = Column(Integer, nullable=False)
     required_checkpoint_codec_version = Column(Integer, nullable=False)
     required_capability_feature_digest = Column(String(64), nullable=False)
+    required_create_entry_contract_digest = Column(String(64), nullable=False)
+    required_write_policy_digest = Column(String(64), nullable=False)
+    required_write_cohort_digest = Column(String(64), nullable=False)
+    required_reconciliation_contract_version = Column(Integer, nullable=False)
     required_app_build_revision = Column(String(128), nullable=False)
     state_revision = Column(
         Integer,
@@ -286,12 +290,16 @@ class AssistantChatRun(UuidPrimaryKeyMixin, TimestampMixin, Base):
             name="ck_assistant_chat_run_recovery_count",
         ),
         CheckConstraint(
-            "runtime_contract_version > 0 AND required_checkpoint_codec_version > 0",
+            "runtime_contract_version > 0 AND required_checkpoint_codec_version > 0 "
+            "AND required_reconciliation_contract_version > 0",
             name="ck_assistant_chat_run_positive_runtime_contract",
         ),
         CheckConstraint(
             "runtime_closure_digest ~ '^[0-9a-f]{64}$' "
-            "AND required_capability_feature_digest ~ '^[0-9a-f]{64}$'",
+            "AND required_capability_feature_digest ~ '^[0-9a-f]{64}$' "
+            "AND required_create_entry_contract_digest ~ '^[0-9a-f]{64}$' "
+            "AND required_write_policy_digest ~ '^[0-9a-f]{64}$' "
+            "AND required_write_cohort_digest ~ '^[0-9a-f]{64}$'",
             name="ck_assistant_chat_run_runtime_digests",
         ),
         CheckConstraint(

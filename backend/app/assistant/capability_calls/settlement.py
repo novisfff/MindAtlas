@@ -12,7 +12,7 @@ import hashlib
 import hmac
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Literal, NoReturn
+from typing import Any, Literal, NoReturn
 from uuid import UUID, uuid4
 
 from sqlalchemy.orm import Session
@@ -196,9 +196,12 @@ class SettlementRequest:
 class CapabilityCallSettlementRepository:
     """Settle already-started call evidence under Run ``cancelling``."""
 
-    def __init__(self, db: Session) -> None:
+    def __init__(self, db: Session, *, write_safety_lock: Any | None = None) -> None:
         self.db = db
-        self.calls = CapabilityCallRepository(db)
+        self.calls = CapabilityCallRepository(
+            db,
+            write_safety_lock=write_safety_lock,
+        )
 
     def settle_while_cancelling(
         self,
@@ -217,6 +220,15 @@ class CapabilityCallSettlementRepository:
                 CODE_SETTLEMENT_EVIDENCE_INVALID,
                 f"unsupported settlement outcome {request.outcome!r}",
             )
+        if request.outcome == "unknown":
+            from app.assistant.capability_calls.write_guard import (
+                acquire_write_safety_advisory_lock,
+            )
+
+            if self.calls.write_safety_lock is None:
+                acquire_write_safety_advisory_lock(self.db)
+            else:
+                self.calls.write_safety_lock.acquire(self.db)
         ts = now or utcnow()
         probe = self.calls.get_call(request.call_id)
         if probe is None:

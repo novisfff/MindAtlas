@@ -142,10 +142,13 @@ def test_call_owned_pause_commits_one_waiting_aggregate() -> None:
                 )
             ),
         )
+        from tests._db import allowing_test_write_guard
+
         aggregate = DurableCapabilityLedgerAggregate(
             db=db,
             authorization_factory=factory,
             idempotency_secret="s" * 32,
+            write_guard=allowing_test_write_guard(db),
             lease=LeaseToken(
                 run_id=run.id, worker_id="worker-1", lease_generation=1
             ),
@@ -234,6 +237,16 @@ def test_call_owned_pause_commits_one_waiting_aggregate() -> None:
         assert decoded.capability_calls[0].interrupt_id == interrupt.id
         assert db.query(AssistantRunArtifact).count() == 2
 
+        factory.decision_for_call = lambda **_kwargs: SimpleNamespace(
+            dispatch_disposition="deny"
+        )
+        aggregate.reserve_siblings((request,), provider_messages)
+        replayed_pause = aggregate.prepare(request)
+        assert replayed_pause.kind == "pause"
+        assert replayed_pause.call_id == call.id
+        assert db.query(AssistantCapabilityCall).count() == 1
+        factory.decision_for_call = lambda **_kwargs: decision
+
         # After HTTP approval and the next worker claim, server policy still
         # derives awaiting_call_approval. The stored exact approval must narrow
         # that decision to this call only and must not create a second pause.
@@ -249,6 +262,7 @@ def test_call_owned_pause_commits_one_waiting_aggregate() -> None:
             db=db,
             authorization_factory=factory,
             idempotency_secret="s" * 32,
+            write_guard=allowing_test_write_guard(db),
             lease=LeaseToken(
                 run_id=run.id, worker_id="worker-2", lease_generation=2
             ),

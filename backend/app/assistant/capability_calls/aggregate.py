@@ -77,13 +77,130 @@ class DurableCapabilityLedgerAggregate:
     db: Session
     authorization_factory: Any
     idempotency_secret: str | bytes
+    write_guard: Any
     lease: LeaseToken | None = None
     runtime_snapshot_provider: Callable[[], Mapping[str, Any]] | None = None
+    runtime_closure_provider: Callable[[Any], Any] | None = None
 
     def __post_init__(self) -> None:
-        self.calls = CapabilityCallRepository(self.db)
+        if self.write_guard is None or not hasattr(self.write_guard, "lock_port"):
+            raise ValueError("production write guard is required")
+        self.calls = CapabilityCallRepository(
+            self.db,
+            write_safety_lock=self.write_guard.lock_port,
+        )
         self._pending_pause: dict[str, Any] | None = None
         self._pending_result: dict[str, Any] | None = None
+        self._local_attempt_id: UUID | None = None
+
+    def _acquire_write_safety_before_run_lock(self) -> None:
+        """Enforce the global advisory -> Run -> Call lock order."""
+        try:
+            self.write_guard.lock_port.acquire(self.db)
+        except Exception as exc:
+            raise CapabilityCallConflict(
+                "write_safety_blocked",
+                "production write safety lock is unavailable",
+            ) from exc
+
+    def _write_closure(self, run: Any) -> Any:
+        if self.runtime_closure_provider is not None:
+            return self.runtime_closure_provider(run)
+        injected = getattr(self.write_guard, "runtime_closure_provider", None)
+        if injected is not None:
+            return injected(run)
+        from app.assistant.runtime.closure import AssistantRuntimeClosureBuilder
+
+        return AssistantRuntimeClosureBuilder(self.db).build(
+            rollout_revision_id=run.main_agent_rollout_revision_id,
+            lock=True,
+        )
+
+    @staticmethod
+    def _verify_existing_write_request(
+        existing: Any,
+        *,
+        call_id: UUID,
+        input_digest: str,
+        descriptor_digest: str,
+    ) -> None:
+        if (
+            existing.id != call_id
+            or str(existing.input_digest) != input_digest
+            or str(existing.descriptor_digest) != str(descriptor_digest)
+        ):
+            raise CapabilityCallConflict(
+                "call_identity_mismatch",
+                "replayed Provider identity does not match the exact write request",
+                call=existing,
+            )
+
+    def _replay_existing_prepare(
+        self,
+        request: Any,
+        existing: Any,
+    ) -> LedgerPrepareOutcome | None:
+        """Return an exact existing state before admitting any new write.
+
+        ``proposed`` and ``authorized`` are the only existing states that need
+        the normal locked progression path; every other state is replayed or
+        rejected without consulting current new-write admission.
+        """
+        status = str(existing.status)
+        if status in {"proposed", "authorized"}:
+            return None
+        if status == "succeeded":
+            result = self._replay(request, existing)
+            revision = int(existing.state_revision)
+            self.db.rollback()
+            return LedgerPrepareOutcome(
+                kind="replay",
+                call_id=existing.id,
+                call_revision=revision,
+                provider_result=result,
+            )
+        if status == "awaiting_approval":
+            interrupt = (
+                self.db.get(AssistantRunInterrupt, existing.interrupt_id)
+                if existing.interrupt_id is not None
+                else None
+            )
+            proposal = dict(getattr(interrupt, "request_payload", None) or {})
+            if (
+                interrupt is None
+                or interrupt.capability_call_id != existing.id
+                or str(interrupt.interrupt_origin) != "capability_call"
+                or str(interrupt.status) != "pending"
+                or str(proposal.get("callId") or "") != str(existing.id)
+                or str(proposal.get("approvalBindingDigest") or "")
+                != str(existing.approval_binding_digest or "")
+            ):
+                self.db.rollback()
+                raise CapabilityCallConflict(
+                    "approval_binding_mismatch",
+                    "stored pending approval does not match the exact call",
+                )
+            revision = int(existing.state_revision)
+            self.db.rollback()
+            return LedgerPrepareOutcome(
+                kind="pause",
+                call_id=existing.id,
+                call_revision=revision,
+                pause_proposal=proposal,
+            )
+        reason = (
+            "reconciliation_required"
+            if status in {"unknown", "needs_reconciliation"}
+            else str(existing.failure_code or "call_not_dispatchable")
+        )
+        revision = int(existing.state_revision)
+        self.db.rollback()
+        return LedgerPrepareOutcome(
+            kind="deny",
+            call_id=existing.id,
+            call_revision=revision,
+            reason_code=reason,
+        )
 
     def _stage_runtime_snapshot(
         self, run: Any, *, manifest_override: Any | None = None
@@ -455,6 +572,32 @@ class DurableCapabilityLedgerAggregate:
             )
         run_id = next(iter(run_ids))
         try:
+            existing_by_provider_id: dict[str, Any] = {}
+            has_new_local = False
+            for request in requests:
+                logical_key = f"provider:{request.call.call_id}"
+                call_id = _stable_uuid(f"mindatlas:{run_id}:{logical_key}")
+                input_digest = sha256_bytes(
+                    canonical_json_bytes(dict(request.call.arguments))
+                )
+                existing = self.calls.find_by_logical_identity(
+                    run_id=run_id,
+                    logical_call_key=logical_key,
+                    provider_tool_call_id=request.call.call_id,
+                    for_update=False,
+                )
+                if existing is not None:
+                    self._verify_existing_write_request(
+                        existing,
+                        call_id=call_id,
+                        input_digest=input_digest,
+                        descriptor_digest=request.descriptor.descriptor_digest,
+                    )
+                    existing_by_provider_id[str(request.call.call_id)] = existing
+                elif str(request.descriptor.behavior.side_effect) == "write_local":
+                    has_new_local = True
+            if has_new_local:
+                self._acquire_write_safety_before_run_lock()
             run = self.calls.get_run(run_id, for_update=True)
             if str(run.capability_ledger_mode) != "enforced":
                 raise CapabilityCallConflict(
@@ -464,6 +607,28 @@ class DurableCapabilityLedgerAggregate:
             reserved_artifacts: list[AssistantRunArtifact] = []
             created_any = False
             for request in requests:
+                logical_key = f"provider:{request.call.call_id}"
+                call_id = _stable_uuid(f"mindatlas:{run.id}:{logical_key}")
+                input_payload = canonical_json_bytes(dict(request.call.arguments))
+                input_digest = sha256_bytes(input_payload)
+                side_effect = str(request.descriptor.behavior.side_effect)
+                existing = existing_by_provider_id.get(str(request.call.call_id))
+                if existing is not None:
+                    # Lock order remains Run -> Call for the already-admitted
+                    # identity after the replay-before-guard probe above.
+                    existing = self.calls.get_call(existing.id, for_update=True)
+                    if existing is None:  # pragma: no cover - FK lifetime defense
+                        raise CapabilityCallConflict(
+                            "call_not_found", "reserved capability call disappeared"
+                        )
+                    self._verify_existing_write_request(
+                        existing,
+                        call_id=call_id,
+                        input_digest=input_digest,
+                        descriptor_digest=request.descriptor.descriptor_digest,
+                    )
+                    continue
+
                 decision = self.authorization_factory.decision_for_call(
                     call_id=request.call.call_id
                 )
@@ -499,11 +664,20 @@ class DurableCapabilityLedgerAggregate:
                         "ledger reservation requires a frozen owner",
                     )
 
-                logical_key = f"provider:{request.call.call_id}"
-                call_id = _stable_uuid(f"mindatlas:{run.id}:{logical_key}")
-                input_payload = canonical_json_bytes(dict(request.call.arguments))
-                input_digest = sha256_bytes(input_payload)
-                side_effect = str(request.descriptor.behavior.side_effect)
+                if side_effect == "write_local" and disposition != "deny":
+                    guard = self.write_guard.evaluate_new_proposal_locked(
+                        run=run,
+                        closure=self._write_closure(run),
+                        domain_key=request.call.domain_key,
+                        binding=request.binding,
+                        approval_mode="call_owned_durable",
+                        lock_already_held=True,
+                    )
+                    if not guard.allowed:
+                        raise CapabilityCallConflict(
+                            guard.reason_code or "write_safety_blocked",
+                            "new local write proposal failed production admission",
+                        )
                 approval_binding_digest = None
                 if disposition == "awaiting_call_approval":
                     approval_binding_digest = build_approval_binding(
@@ -800,7 +974,40 @@ class DurableCapabilityLedgerAggregate:
             raise CapabilityCallConflict(
                 "ledger_decision_required", "tagged v2 ledger decision is required"
             )
-        run = self.calls.get_run(request.execution_scope.run_id, for_update=True)
+        logical_key = f"provider:{request.call.call_id}"
+        run_id = request.execution_scope.run_id
+        call_id = _stable_uuid(f"mindatlas:{run_id}:{logical_key}")
+        input_payload = canonical_json_bytes(dict(request.call.arguments))  # type: ignore[arg-type]
+        input_digest = sha256_bytes(input_payload)
+        side_effect = str(request.descriptor.behavior.side_effect)
+        existing_probe = self.calls.find_by_logical_identity(
+            run_id=run_id,
+            logical_call_key=logical_key,
+            provider_tool_call_id=request.call.call_id,
+            for_update=False,
+        )
+        if existing_probe is not None:
+            self._verify_existing_write_request(
+                existing_probe,
+                call_id=call_id,
+                input_digest=input_digest,
+                descriptor_digest=request.descriptor.descriptor_digest,
+            )
+            replay = self._replay_existing_prepare(request, existing_probe)
+            if replay is not None:
+                return replay
+        if side_effect == "write_local":
+            try:
+                self._acquire_write_safety_before_run_lock()
+            except CapabilityCallConflict:
+                self.db.rollback()
+                return LedgerPrepareOutcome(
+                    kind="deny",
+                    call_id=call_id,
+                    call_revision=0,
+                    reason_code="write_safety_blocked",
+                )
+        run = self.calls.get_run(run_id, for_update=True)
         if str(run.capability_ledger_mode) != "enforced":
             raise CapabilityCallConflict(
                 "ledger_mode_mismatch", "run is not frozen in enforced ledger mode"
@@ -809,12 +1016,40 @@ class DurableCapabilityLedgerAggregate:
             raise CapabilityCallConflict(
                 "ledger_lease_required", "enforced dispatch requires a claimed Run lease"
             )
-        logical_key = f"provider:{request.call.call_id}"
-        call_id = _stable_uuid(f"mindatlas:{run.id}:{logical_key}")
-        input_payload = canonical_json_bytes(dict(request.call.arguments))  # type: ignore[arg-type]
-        input_digest = sha256_bytes(input_payload)
-        side_effect = str(request.descriptor.behavior.side_effect)
         approval_satisfied = False
+        existing_identity = self.calls.find_by_logical_identity(
+            run_id=run.id,
+            logical_call_key=logical_key,
+            provider_tool_call_id=request.call.call_id,
+            for_update=True,
+        )
+        if existing_identity is not None:
+            self._verify_existing_write_request(
+                existing_identity,
+                call_id=call_id,
+                input_digest=input_digest,
+                descriptor_digest=request.descriptor.descriptor_digest,
+            )
+            replay = self._replay_existing_prepare(request, existing_identity)
+            if replay is not None:
+                return replay
+        if side_effect == "write_local" and existing_identity is None:
+            guard = self.write_guard.evaluate_new_proposal_locked(
+                run=run,
+                closure=self._write_closure(run),
+                domain_key=request.call.domain_key,
+                binding=request.binding,
+                approval_mode="call_owned_durable",
+                lock_already_held=True,
+            )
+            if not guard.allowed:
+                self.db.rollback()
+                return LedgerPrepareOutcome(
+                    kind="deny",
+                    call_id=call_id,
+                    call_revision=0,
+                    reason_code=guard.reason_code or "write_safety_blocked",
+                )
 
         if disposition == "deny":
             owner = self._trusted_denial_owner(request, decision)
@@ -1003,6 +1238,10 @@ class DurableCapabilityLedgerAggregate:
                             else _stable_uuid(f"mindatlas:interrupt:{call_id}")
                         ),
                         "approvalBindingDigest": binding.approval_binding_digest,
+                        "bindingContractDigest": (
+                            request.binding.ref.binding_contract_digest
+                        ),
+                        "targetDigest": request.binding.ref.resolution_digest,
                         "logicalCallKey": logical_key,
                         "safeRequestPayload": redact_mapping(
                             {
@@ -1090,6 +1329,19 @@ class DurableCapabilityLedgerAggregate:
                 to_status="authorized",
                 lease=self.lease,
             )
+        local_dispatch = side_effect == "write_local"
+        if local_dispatch:
+            if request.call.domain_key != "create_entry":
+                self.db.rollback()
+                raise CapabilityCallConflict(
+                    "local_write_binding_forbidden",
+                    "only the frozen create_entry binding may execute locally",
+                )
+            return LedgerPrepareOutcome(
+                kind="dispatch_local",
+                call_id=call.id,
+                call_revision=int(call.state_revision),
+            )
         from app.assistant.capability_calls.reconciliation import (
             validate_retry_authorization_for_dispatch,
         )
@@ -1121,17 +1373,9 @@ class DurableCapabilityLedgerAggregate:
             to_status="dispatched",
             request_digest=input_digest,
         )
-        local_dispatch = side_effect == "write_local"
-        if local_dispatch and request.call.domain_key != "create_entry":
-            self.db.rollback()
-            raise CapabilityCallConflict(
-                "local_write_binding_forbidden",
-                "only the frozen golden create_entry binding may execute locally",
-            )
-        if not local_dispatch:
-            self._commit_attempt_started(run=run, call=call, attempt=attempt)
+        self._commit_attempt_started(run=run, call=call, attempt=attempt)
         return LedgerPrepareOutcome(
-            kind="dispatch_local" if local_dispatch else "dispatch",
+            kind="dispatch",
             call_id=call.id,
             call_revision=int(call.state_revision),
             attempt_id=attempt.id,
@@ -1148,17 +1392,19 @@ class DurableCapabilityLedgerAggregate:
         call = self.calls.get_call(outcome.call_id, for_update=True)
         if (
             call is None
-            or str(call.status) != "executing"
+            or str(call.status) != "authorized"
             or str(call.domain_key) != "create_entry"
             or str(call.execution_mode) != "local_transactional"
         ):
             raise CapabilityCallConflict(
                 "local_write_binding_forbidden",
-                "local write call identity is not the golden create_entry binding",
+                "local write call identity is not the create_entry binding",
             )
         from app.assistant.capabilities.contracts import (
+            CapabilityError,
             CapabilityMetrics,
             completed_result,
+            failed_result,
         )
         from app.assistant.capability_calls.local_write import stage_create_entry_local
         from app.assistant.tools.entry_tools import _build_entry_request
@@ -1177,11 +1423,75 @@ class DurableCapabilityLedgerAggregate:
         }
         create_args.update(arguments)
         entry_request = _build_entry_request(self.db, **create_args)
+        run = self.calls.get_run(call.run_id, for_update=True)
+        interrupt = (
+            self.db.query(AssistantRunInterrupt)
+            .filter(AssistantRunInterrupt.id == call.interrupt_id)
+            .populate_existing()
+            .with_for_update()
+            .one_or_none()
+            if call.interrupt_id is not None
+            else None
+        )
+        post_approval = self.write_guard.evaluate_post_approval_locked(
+            call=call,
+            run=run,
+            closure=self._write_closure(run),
+            binding=request.binding,
+            approved_interrupt=interrupt,
+            lock_already_held=True,
+        )
+        if not post_approval.allowed:
+            reason = post_approval.reason_code or "write_safety_blocked"
+            call = self.calls.fail_before_side_effect(
+                call,
+                expected_run_revision=int(run.state_revision),
+                failure_code=reason,
+                lease=self.lease,
+            )
+            return ProviderDispatchResult(
+                capability_result=failed_result(
+                    error=CapabilityError(
+                        error_type="unauthorized",
+                        safe_code=reason,
+                        safe_message="create_entry blocked by production write safety",
+                        retry_disposition="never",
+                        call_id=str(call.provider_tool_call_id),
+                        target_identity="system-tool:create_entry",
+                    ),
+                    metrics=CapabilityMetrics(
+                        duration_ms=0.0,
+                        input_bytes=len(canonical_json_bytes(arguments)),
+                        output_bytes=0,
+                    ),
+                ),
+                next_manifest=request.current_manifest,
+            )
+
+        # This is intentionally the first operation after the post-approval
+        # decision: the advisory lock and launch-state row locks stay held by
+        # this transaction through Entry/result/checkpoint commit.
         entry = stage_create_entry_local(
             session=self.db,
             request=entry_request,
             call_id=call.id,
         )
+        claim_now = utcnow()
+        call, attempt = self.calls.claim_attempt(
+            call_id=call.id,
+            expected_call_revision=int(call.state_revision),
+            expected_run_revision=int(run.state_revision),
+            lease=self.lease,
+            worker_id=self.lease.worker_id,
+            now=claim_now,
+        )
+        attempt = self.calls.transition_attempt(
+            attempt_id=attempt.id,
+            expected_status="claimed",
+            to_status="dispatched",
+            request_digest=str(call.input_digest),
+        )
+        self._local_attempt_id = attempt.id
         return ProviderDispatchResult(
             capability_result=completed_result(
                 user_text=f"Created entry {entry.title}",
@@ -1243,11 +1553,27 @@ class DurableCapabilityLedgerAggregate:
 
         repo = DurableRunRepository(self.db)
         try:
+            if staged["sideEffect"] == "write_local":
+                self._acquire_write_safety_before_run_lock()
             run = repo.get_run(request.execution_scope.run_id, for_update=True)
             if run is None:
                 raise CapabilityCallConflict("run_not_found", "Run is unavailable")
             repo._verify_lease(run, self.lease)  # noqa: SLF001 - shared aggregate lock
             expected_revision = int(run.state_revision)
+            if staged["sideEffect"] == "write_local":
+                guard = self.write_guard.evaluate_new_proposal_locked(
+                    run=run,
+                    closure=self._write_closure(run),
+                    domain_key=request.call.domain_key,
+                    binding=request.binding,
+                    approval_mode="call_owned_durable",
+                    lock_already_held=True,
+                )
+                if not guard.allowed:
+                    raise CapabilityCallConflict(
+                        guard.reason_code or "write_safety_blocked",
+                        "local write proposal failed commit-time production admission",
+                    )
             manifest = self._manifest_row(request)
             input_artifact = self._input_artifact(request)
             idem = make_server_idempotency_key(
@@ -1577,7 +1903,7 @@ class DurableCapabilityLedgerAggregate:
 
         tripwire_production_writer("DurableCapabilityLedgerAggregate.commit")
         call_hint = self.calls.get_call(outcome.call_id)
-        if call_hint is None or outcome.attempt_id is None:
+        if call_hint is None:
             raise CapabilityCallConflict("call_not_found", "dispatch call is unavailable")
         self.calls.get_run(call_hint.run_id, for_update=True)
         call = self.calls.get_call(outcome.call_id, for_update=True)
@@ -1603,33 +1929,46 @@ class DurableCapabilityLedgerAggregate:
         )
         self.db.add(artifact)
         self.db.flush()
-        self.calls.transition_attempt(
-            attempt_id=outcome.attempt_id,
-            expected_status="dispatched",
-            to_status="response_received",
-            response_digest=encoded.digest,
-        )
-        self.calls.transition_attempt(
-            attempt_id=outcome.attempt_id,
-            expected_status="response_received",
-            to_status="committed",
-        )
+        attempt_id = outcome.attempt_id or self._local_attempt_id
+        if attempt_id is not None:
+            self.calls.transition_attempt(
+                attempt_id=attempt_id,
+                expected_status="dispatched",
+                to_status="response_received",
+                response_digest=encoded.digest,
+            )
+            self.calls.transition_attempt(
+                attempt_id=attempt_id,
+                expected_status="response_received",
+                to_status="committed",
+            )
         target = "succeeded" if result.capability_result.status == "completed" else "failed"
-        call = self.calls.transition_call(
-            call_id=call.id,
-            expected_call_revision=int(call.state_revision),
-            expected_run_revision=int(self.calls.get_run(call.run_id).state_revision),
-            to_status=target,
-            lease=self.lease,
-            output_artifact_id=artifact.id,
-            failure_code=(None if target == "succeeded" else "capability_failed"),
-            side_effect_started_at=(
-                utcnow()
-                if target == "succeeded"
-                and str(call.execution_mode) == "local_transactional"
-                else None
-            ),
-        )
+        if str(call.status) == "failed":
+            if target != "failed" or attempt_id is not None:
+                self.db.rollback()
+                raise CapabilityCallConflict(
+                    "result_not_terminal",
+                    "pre-side-effect write denial has mismatched result evidence",
+                )
+            call.output_artifact_id = artifact.id
+            call.updated_at = utcnow()
+            self.db.flush()
+        else:
+            call = self.calls.transition_call(
+                call_id=call.id,
+                expected_call_revision=int(call.state_revision),
+                expected_run_revision=int(self.calls.get_run(call.run_id).state_revision),
+                to_status=target,
+                lease=self.lease,
+                output_artifact_id=artifact.id,
+                failure_code=(None if target == "succeeded" else "capability_failed"),
+                side_effect_started_at=(
+                    utcnow()
+                    if target == "succeeded"
+                    and str(call.execution_mode) == "local_transactional"
+                    else None
+                ),
+            )
         if self._pending_result is not None:
             self.db.rollback()
             raise CapabilityCallConflict(
@@ -1642,6 +1981,7 @@ class DurableCapabilityLedgerAggregate:
             "artifact": artifact,
             "callId": call.id,
         }
+        self._local_attempt_id = None
         return result
 
     def commit_progress(

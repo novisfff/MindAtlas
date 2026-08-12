@@ -1,8 +1,12 @@
 {
   "buildCompatibility": {
-    "capabilityFeatureDigest": "11af8408a0d3a6ff93a5170a9bb6758f430773d1e1343ee3982396f0ed9cd3b4",
+    "capabilityFeatureDigest": "713209b8d6bf8b1aa945c5628c0802d6b7c5216b566276cff3fca1e7c54a336b",
     "checkpointCodecVersion": 3,
-    "runtimeContractVersion": 1
+    "createEntryContractDigest": "bd26f5f59e3897ba3b3a9fa2a3c0a6b9d3e2644c4defd4355db8f83906e04d1d",
+    "reconciliationContractVersion": 1,
+    "runtimeContractVersion": 1,
+    "writeCohortDigest": "598c2cebcbe9536936170d80d9de86a0901c1e42ffa02b938eef610880de5c2a",
+    "writePolicyDigest": "6fa2437b97e655f46be40b7078f00b45f52977fc58f32e21981047b6c07ee5ff"
   },
   "capabilityBindings": [
     {
@@ -21,7 +25,7 @@
       "type": "tool"
     }
   ],
-  "manifestDigest": "933417b0783f803459205aab8f3a3a695c98bff28fe568f4a21dd803d93b30b0",
+  "manifestDigest": "49167d930900a2f78f96718e2f17b62bab552099d76ea236812a2dcf1b0e4823",
   "modelBindingSlots": [
     "assistant"
   ],
@@ -32,7 +36,7 @@
     "sha256": "0d755a8ab001de152508b4a3a8474fc8c037fe80bed2b46a7ac0dadf364aed11"
   },
   "schemaVersion": 1,
-  "seedContractDigest": "a728d696b086b0ced78a37de80a7831cd788e22f7668f083a7245706b13334ba",
+  "seedContractDigest": "de04ae0e555c2edfc4d18cbab1bf5c62061f4ce9b938c2f1cfcc8a3d42d106e9",
   "skillArtifacts": [
     {
       "byteSize": 655,

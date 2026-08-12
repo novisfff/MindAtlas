@@ -273,10 +273,13 @@ def test_server_decision_forces_write_pause_without_orphan_call() -> None:
                 )
             ),
         )
+        from tests._db import allowing_test_write_guard
+
         aggregate = DurableCapabilityLedgerAggregate(
             db=db,
             authorization_factory=factory,
             idempotency_secret="s" * 32,
+            write_guard=allowing_test_write_guard(db),
             lease=LeaseToken(
                 run_id=run.id, worker_id="worker-1", lease_generation=2
             ),

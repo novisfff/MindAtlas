@@ -303,6 +303,121 @@ class LocalTransactionalGoldenPathTests(unittest.TestCase):
         self.assertEqual(result2.entry_id, result.entry_id)
         self.assertEqual(self.db.query(Entry).count(), 1)
 
+    def test_post_approval_guard_denial_is_durable_without_attempt_or_entry(self) -> None:
+        from types import SimpleNamespace
+
+        from app.assistant.capability_calls.aggregate import (
+            DurableCapabilityLedgerAggregate,
+        )
+        from app.assistant.capability_calls.models import (
+            AssistantCapabilityCall,
+            AssistantCapabilityCallAttempt,
+        )
+        from app.assistant.provider_loop.contracts import LedgerPrepareOutcome
+        from app.entry.models import Entry
+        from app.lightrag.models import EntryIndexOutbox
+        from tests.test_agent_policy_runtime import _base_manifest
+        from tests._db import allowing_test_write_guard
+
+        guard = allowing_test_write_guard(self.db)
+        guard.evaluate_post_approval_locked = lambda **_kwargs: SimpleNamespace(
+            allowed=False,
+            reason_code="pre_ga_launch_unapproved",
+        )
+        aggregate = DurableCapabilityLedgerAggregate(
+            db=self.db,
+            authorization_factory=SimpleNamespace(),
+            idempotency_secret="s" * 32,
+            write_guard=guard,
+            lease=self.lease,
+        )
+        seeded_call = self.db.get(AssistantCapabilityCall, self.call_id)
+        seeded_call.provider_tool_call_id = "post-approval-denied"
+        self.db.commit()
+        outcome = LedgerPrepareOutcome(
+            kind="dispatch_local",
+            call_id=self.call_id,
+            call_revision=1,
+        )
+        current_manifest, _surface = _base_manifest(run_id=self.run.id)
+        request = SimpleNamespace(
+            call=SimpleNamespace(
+                call_id="post-approval-denied",
+                arguments={
+                    "title": "must not exist",
+                    "content": "blocked",
+                    "type_code": "KNOWLEDGE",
+                    "tags": [],
+                    "time_mode": "POINT",
+                    "time_at": "2026-07-18",
+                },
+            ),
+            binding=SimpleNamespace(),
+            current_manifest=current_manifest,
+        )
+
+        result = aggregate.execute_local(outcome, request)
+        self.assertEqual(result.capability_result.status, "failed")
+        self.assertEqual(
+            result.capability_result.error.safe_code,
+            "pre_ga_launch_unapproved",
+        )
+        self.assertEqual(result.capability_result.error.retry_disposition, "never")
+        aggregate.commit_result(outcome, result)
+        from app.assistant.provider_loop.messages import (
+            ProviderAssistantMessage,
+            ProviderToolMessage,
+            ProviderUserMessage,
+            project_tool_result_envelope,
+        )
+        from tests.test_durable_checkpoint_codec import _manifest, _surface, _tool_call
+
+        tool_call = _tool_call(_surface(_manifest())).model_copy(
+            update={"call_id": "post-approval-denied"}
+        )
+        tool_message = ProviderToolMessage(
+            call_id="post-approval-denied",
+            provider_alias=tool_call.provider_alias,
+            content=project_tool_result_envelope(
+                domain_key="create_entry",
+                result=result.capability_result,
+            ),
+        )
+        aggregate.commit_progress(
+            (
+                ProviderUserMessage(content="create it"),
+                ProviderAssistantMessage(content=None, tool_calls=(tool_call,)),
+                tool_message,
+            )
+        )
+
+        call = self.db.get(AssistantCapabilityCall, self.call_id)
+        self.assertIsNotNone(call)
+        self.assertEqual(call.status, "failed")
+        self.assertEqual(call.failure_code, "pre_ga_launch_unapproved")
+        self.assertIsNone(call.side_effect_started_at)
+        self.assertIsNotNone(call.output_artifact_id)
+        self.assertEqual(
+            self.db.query(AssistantCapabilityCallAttempt)
+            .filter_by(call_id=self.call_id)
+            .count(),
+            0,
+        )
+        self.assertEqual(
+            self.db.query(Entry)
+            .filter_by(source_capability_call_id=self.call_id)
+            .count(),
+            0,
+        )
+        self.assertEqual(self.db.query(EntryIndexOutbox).count(), 0)
+        from app.assistant.durable.models import AssistantRunCheckpoint
+
+        self.db.refresh(self.run)
+        checkpoint = self.db.get(AssistantRunCheckpoint, self.run.current_checkpoint_id)
+        self.assertEqual(checkpoint.state_payload["capabilityCalls"][0]["status"], "failed")
+        with self.assertRaisesRegex(Exception, "local write call identity"):
+            aggregate.execute_local(outcome, request)
+
     def test_aggregate_local_dispatch_commits_entry_attempt_and_result_together(self) -> None:
         from types import SimpleNamespace
 
@@ -371,12 +486,15 @@ class LocalTransactionalGoldenPathTests(unittest.TestCase):
                 )
             ),
         )
+        from tests._db import allowing_test_write_guard
+
         aggregate = DurableCapabilityLedgerAggregate(
             db=self.db,
             authorization_factory=SimpleNamespace(
                 decision_for_call=lambda **_kwargs: decision
             ),
             idempotency_secret="s" * 32,
+            write_guard=allowing_test_write_guard(self.db),
             lease=self.lease,
         )
 
@@ -447,12 +565,15 @@ class LocalTransactionalGoldenPathTests(unittest.TestCase):
         self.run.lease_generation = 1
         self.db.commit()
 
+        from tests._db import allowing_test_write_guard
+
         aggregate = DurableCapabilityLedgerAggregate(
             db=self.db,
             authorization_factory=SimpleNamespace(
                 decision_for_call=lambda **_kwargs: decision
             ),
             idempotency_secret="s" * 32,
+            write_guard=allowing_test_write_guard(self.db),
             lease=self.lease,
         )
         outcome = aggregate.prepare(request)
@@ -506,12 +627,15 @@ class LocalTransactionalGoldenPathTests(unittest.TestCase):
 
         # Replay the whole logical invocation after rollback; deterministic
         # call identity converges and the complete set commits once.
+        from tests._db import allowing_test_write_guard
+
         aggregate = DurableCapabilityLedgerAggregate(
             db=self.db,
             authorization_factory=SimpleNamespace(
                 decision_for_call=lambda **_kwargs: decision
             ),
             idempotency_secret="s" * 32,
+            write_guard=allowing_test_write_guard(self.db),
             lease=self.lease,
         )
         outcome = aggregate.prepare(request)

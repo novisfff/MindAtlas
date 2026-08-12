@@ -41,6 +41,13 @@ def plan08_capability_ledger_feature_digest() -> str:
     enforced Runs require this exact contract before any worker can execute
     them.
     """
+    from app.assistant.capability_calls.write_guard import (
+        CREATE_ENTRY_CONTRACT_DIGEST,
+        RECONCILIATION_CONTRACT_VERSION,
+        WRITE_COHORT_DIGEST,
+        WRITE_POLICY_DIGEST,
+    )
+
     return sha256_canonical_json(
         {
             "runtimeContractVersion": RUNTIME_CONTRACT_VERSION,
@@ -57,6 +64,12 @@ def plan08_capability_ledger_feature_digest() -> str:
                     "committed",
                 ],
                 "checkpointSchemaVersion": 3,
+            },
+            "createEntryWriteSafety": {
+                "createEntryContractDigest": CREATE_ENTRY_CONTRACT_DIGEST,
+                "writePolicyDigest": WRITE_POLICY_DIGEST,
+                "writeCohortDigest": WRITE_COHORT_DIGEST,
+                "reconciliationContractVersion": RECONCILIATION_CONTRACT_VERSION,
             },
         }
     )
@@ -144,6 +157,10 @@ class WorkerCompatibility:
     runtime_contract_version: int
     required_checkpoint_codec_version: int
     required_capability_feature_digest: str
+    required_create_entry_contract_digest: str | None = None
+    required_write_policy_digest: str | None = None
+    required_write_cohort_digest: str | None = None
+    required_reconciliation_contract_version: int | None = None
 
     def __post_init__(self) -> None:
         if not str(self.app_build_revision or "").strip():
@@ -157,6 +174,53 @@ class WorkerCompatibility:
             raise ValueError(
                 "required_capability_feature_digest must be a 64-char hex digest"
             )
+        from app.assistant.capability_calls.write_guard import (
+            CREATE_ENTRY_CONTRACT_DIGEST,
+            RECONCILIATION_CONTRACT_VERSION,
+            WRITE_COHORT_DIGEST,
+            WRITE_POLICY_DIGEST,
+        )
+
+        write_requirements = (
+            CREATE_ENTRY_CONTRACT_DIGEST
+            if self.required_create_entry_contract_digest is None
+            else self.required_create_entry_contract_digest,
+            WRITE_POLICY_DIGEST
+            if self.required_write_policy_digest is None
+            else self.required_write_policy_digest,
+            WRITE_COHORT_DIGEST
+            if self.required_write_cohort_digest is None
+            else self.required_write_cohort_digest,
+            RECONCILIATION_CONTRACT_VERSION
+            if self.required_reconciliation_contract_version is None
+            else self.required_reconciliation_contract_version,
+        )
+        for name, value in zip(
+            (
+                "required_create_entry_contract_digest",
+                "required_write_policy_digest",
+                "required_write_cohort_digest",
+            ),
+            write_requirements[:3],
+            strict=True,
+        ):
+            digest = str(value or "")
+            if len(digest) != 64 or any(
+                char not in "0123456789abcdef" for char in digest.lower()
+            ):
+                raise ValueError(f"{name} must be a 64-char hex digest")
+        if int(write_requirements[3] or 0) <= 0:
+            raise ValueError(
+                "required_reconciliation_contract_version must be positive"
+            )
+        object.__setattr__(
+            self, "required_create_entry_contract_digest", write_requirements[0]
+        )
+        object.__setattr__(self, "required_write_policy_digest", write_requirements[1])
+        object.__setattr__(self, "required_write_cohort_digest", write_requirements[2])
+        object.__setattr__(
+            self, "required_reconciliation_contract_version", write_requirements[3]
+        )
 
     @classmethod
     def from_closure(cls, closure: Any) -> "WorkerCompatibility":
@@ -171,6 +235,18 @@ class WorkerCompatibility:
             ),
             required_capability_feature_digest=str(
                 getattr(closure, "capability_feature_digest", "") or ""
+            ),
+            required_create_entry_contract_digest=str(
+                getattr(closure, "create_entry_contract_digest", "") or ""
+            ),
+            required_write_policy_digest=str(
+                getattr(closure, "write_policy_digest", "") or ""
+            ),
+            required_write_cohort_digest=str(
+                getattr(closure, "write_cohort_digest", "") or ""
+            ),
+            required_reconciliation_contract_version=int(
+                getattr(closure, "reconciliation_contract_version", 0) or 0
             ),
         )
 
@@ -194,6 +270,18 @@ class WorkerCompatibility:
             required_capability_feature_digest=str(
                 getattr(run, "required_capability_feature_digest", "") or ""
             ),
+            required_create_entry_contract_digest=str(
+                getattr(run, "required_create_entry_contract_digest", "") or ""
+            ),
+            required_write_policy_digest=str(
+                getattr(run, "required_write_policy_digest", "") or ""
+            ),
+            required_write_cohort_digest=str(
+                getattr(run, "required_write_cohort_digest", "") or ""
+            ),
+            required_reconciliation_contract_version=int(
+                getattr(run, "required_reconciliation_contract_version", 0) or 0
+            ),
         )
 
     def matches(self, identity: WorkerIdentity | AssistantWorkerRegistration) -> bool:
@@ -208,11 +296,23 @@ class WorkerCompatibility:
         except (TypeError, ValueError):
             return False
         feature_digest = str(getattr(identity, "capability_feature_digest", "") or "")
+        from app.assistant.capability_calls.write_guard import (
+            CREATE_ENTRY_CONTRACT_DIGEST,
+            RECONCILIATION_CONTRACT_VERSION,
+            WRITE_COHORT_DIGEST,
+            WRITE_POLICY_DIGEST,
+        )
         return (
             build == str(self.app_build_revision)
             and contract == int(self.runtime_contract_version)
             and int(self.required_checkpoint_codec_version) in supported_set
             and feature_digest == str(self.required_capability_feature_digest)
+            and self.required_create_entry_contract_digest
+            == CREATE_ENTRY_CONTRACT_DIGEST
+            and self.required_write_policy_digest == WRITE_POLICY_DIGEST
+            and self.required_write_cohort_digest == WRITE_COHORT_DIGEST
+            and self.required_reconciliation_contract_version
+            == RECONCILIATION_CONTRACT_VERSION
         )
 
 

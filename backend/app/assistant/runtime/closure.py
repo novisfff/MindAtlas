@@ -17,6 +17,12 @@ from sqlalchemy.orm import Session
 from app.ai_registry.models import AiComponentBinding, AiCredential, AiModel
 from app.assistant.domain.contracts import create_provider_ref
 from app.assistant.domain.digests import sha256_canonical_json
+from app.assistant.capability_calls.write_guard import (
+    CREATE_ENTRY_CONTRACT_DIGEST,
+    RECONCILIATION_CONTRACT_VERSION,
+    WRITE_COHORT_DIGEST,
+    WRITE_POLICY_DIGEST,
+)
 from app.assistant.durable.codec import CURRENT_CHECKPOINT_CODEC_VERSION
 from app.assistant.durable.worker_registry import (
     RUNTIME_CONTRACT_VERSION,
@@ -339,6 +345,10 @@ def compute_closure_digest(
         "runtimeContractVersion": subject.runtime_contract_version,
         "checkpointCodecVersion": subject.checkpoint_codec_version,
         "capabilityFeatureDigest": subject.capability_feature_digest,
+        "createEntryContractDigest": subject.create_entry_contract_digest,
+        "writePolicyDigest": subject.write_policy_digest,
+        "writeCohortDigest": subject.write_cohort_digest,
+        "reconciliationContractVersion": subject.reconciliation_contract_version,
     }
     return require_sha256(
         sha256_canonical_json(payload), field_name="closure_digest"
@@ -452,6 +462,10 @@ class AssistantRuntimeClosureBuilder:
             runtime_contract_version=RUNTIME_CONTRACT_VERSION,
             checkpoint_codec_version=CURRENT_CHECKPOINT_CODEC_VERSION,
             capability_feature_digest=default_capability_feature_digest(),
+            create_entry_contract_digest=CREATE_ENTRY_CONTRACT_DIGEST,
+            write_policy_digest=WRITE_POLICY_DIGEST,
+            write_cohort_digest=WRITE_COHORT_DIGEST,
+            reconciliation_contract_version=RECONCILIATION_CONTRACT_VERSION,
         )
 
     def build(
@@ -504,6 +518,10 @@ class AssistantRuntimeClosureBuilder:
             runtime_contract_version=subject.runtime_contract_version,
             checkpoint_codec_version=subject.checkpoint_codec_version,
             capability_feature_digest=subject.capability_feature_digest,
+            create_entry_contract_digest=subject.create_entry_contract_digest,
+            write_policy_digest=subject.write_policy_digest,
+            write_cohort_digest=subject.write_cohort_digest,
+            reconciliation_contract_version=subject.reconciliation_contract_version,
             closure_digest=closure_digest,
         )
 
@@ -579,6 +597,26 @@ class AssistantRuntimeClosureBuilder:
                 subject.capability_feature_digest,
                 str(rollout.capability_feature_digest),
                 "feature_digest",
+            ),
+            (
+                subject.create_entry_contract_digest,
+                str(rollout.required_create_entry_contract_digest),
+                "create_entry_contract_digest",
+            ),
+            (
+                subject.write_policy_digest,
+                str(rollout.required_write_policy_digest),
+                "write_policy_digest",
+            ),
+            (
+                subject.write_cohort_digest,
+                str(rollout.required_write_cohort_digest),
+                "write_cohort_digest",
+            ),
+            (
+                int(subject.reconciliation_contract_version),
+                int(rollout.required_reconciliation_contract_version),
+                "reconciliation_contract_version",
             ),
         )
         for left, right, code in checks:

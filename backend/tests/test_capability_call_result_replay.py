@@ -238,10 +238,13 @@ def test_durable_aggregate_replays_success_without_redispatch(side_effect: str) 
             "budget": live_ledger,
             "obligation": obligation_state,
         }
+        from tests._db import allowing_test_write_guard
+
         aggregate = DurableCapabilityLedgerAggregate(
             db=db,
             authorization_factory=factory,
             idempotency_secret="s" * 32,
+            write_guard=allowing_test_write_guard(db),
             lease=LeaseToken(
                 run_id=run.id, worker_id="worker-1", lease_generation=1
             ),
@@ -357,6 +360,15 @@ def test_durable_aggregate_replays_success_without_redispatch(side_effect: str) 
             assert settled.status == "needs_reconciliation"
             assert prepared_call.status == "needs_reconciliation"
             assert prepared_attempt.status == "uncertain"
+            # Existing exact identity replays its unresolved disposition before
+            # any newly-blocking policy/new-write admission is considered.
+            factory.decision_for_call = lambda **_kwargs: SimpleNamespace(
+                dispatch_disposition="deny"
+            )
+            aggregate.reserve_siblings((request,), base_messages)
+            unresolved_replay = aggregate.prepare(request)
+            assert unresolved_replay.kind == "deny"
+            assert unresolved_replay.reason_code == "reconciliation_required"
             return
 
         assert prepared_call.side_effect_started_at is None

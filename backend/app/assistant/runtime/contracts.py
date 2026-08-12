@@ -164,6 +164,10 @@ class AssistantRuntimeSubject(FrozenContract):
     runtime_contract_version: int = Field(gt=0)
     checkpoint_codec_version: int = Field(gt=0)
     capability_feature_digest: str
+    create_entry_contract_digest: str
+    write_policy_digest: str
+    write_cohort_digest: str
+    reconciliation_contract_version: int = Field(gt=0)
 
     @field_validator(
         "profile_content_digest",
@@ -172,6 +176,9 @@ class AssistantRuntimeSubject(FrozenContract):
         "capability_closure_digest",
         "seed_manifest_digest",
         "capability_feature_digest",
+        "create_entry_contract_digest",
+        "write_policy_digest",
+        "write_cohort_digest",
     )
     @classmethod
     def validate_digest(cls, value: str, info: ValidationInfo) -> str:
@@ -193,6 +200,10 @@ class AssistantRuntimeClosure(FrozenContract):
     runtime_contract_version: int = Field(gt=0)
     checkpoint_codec_version: int = Field(gt=0)
     capability_feature_digest: str
+    create_entry_contract_digest: str
+    write_policy_digest: str
+    write_cohort_digest: str
+    reconciliation_contract_version: int = Field(gt=0)
     closure_digest: str
 
     @field_validator(
@@ -203,6 +214,9 @@ class AssistantRuntimeClosure(FrozenContract):
         "capability_closure_digest",
         "seed_manifest_digest",
         "capability_feature_digest",
+        "create_entry_contract_digest",
+        "write_policy_digest",
+        "write_cohort_digest",
         "closure_digest",
     )
     @classmethod
@@ -316,6 +330,12 @@ def subject_to_persistent_fields(subject: AssistantRuntimeSubject) -> dict[str, 
         "runtime_contract_version": subject.runtime_contract_version,
         "checkpoint_codec_version": subject.checkpoint_codec_version,
         "capability_feature_digest": subject.capability_feature_digest,
+        "required_create_entry_contract_digest": subject.create_entry_contract_digest,
+        "required_write_policy_digest": subject.write_policy_digest,
+        "required_write_cohort_digest": subject.write_cohort_digest,
+        "required_reconciliation_contract_version": (
+            subject.reconciliation_contract_version
+        ),
     }
 
 
@@ -340,6 +360,10 @@ class PreparedRolloutRevision:
     runtime_contract_version: int
     checkpoint_codec_version: int
     capability_feature_digest: str
+    required_create_entry_contract_digest: str
+    required_write_policy_digest: str
+    required_write_cohort_digest: str
+    required_reconciliation_contract_version: int
 
     @classmethod
     def from_subject(

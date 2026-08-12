@@ -122,8 +122,9 @@ class ProposeCallSpec:
 class CapabilityCallRepository:
     """CAS repository for capability call ledger rows."""
 
-    def __init__(self, db: Session) -> None:
+    def __init__(self, db: Session, *, write_safety_lock: Any | None = None) -> None:
         self.db = db
+        self.write_safety_lock = write_safety_lock or db.info.get("write_safety_lock")
 
     # ------------------------------------------------------------------
     # Locks / loads
@@ -169,6 +170,24 @@ class CapabilityCallRepository:
         stmt = self.db.query(AssistantCapabilityCall).filter(
             AssistantCapabilityCall.run_id == run_id,
             AssistantCapabilityCall.logical_call_key == logical_call_key,
+        )
+        if for_update:
+            stmt = stmt.populate_existing().with_for_update()
+        return stmt.one_or_none()
+
+    def find_by_logical_identity(
+        self,
+        *,
+        run_id: UUID,
+        logical_call_key: str,
+        provider_tool_call_id: str,
+        for_update: bool = False,
+    ) -> AssistantCapabilityCall | None:
+        """Load the one exact Provider-owned logical identity, if present."""
+        stmt = self.db.query(AssistantCapabilityCall).filter(
+            AssistantCapabilityCall.run_id == run_id,
+            AssistantCapabilityCall.logical_call_key == logical_call_key,
+            AssistantCapabilityCall.provider_tool_call_id == provider_tool_call_id,
         )
         if for_update:
             stmt = stmt.populate_existing().with_for_update()
@@ -326,9 +345,21 @@ class CapabilityCallRepository:
         call_hint = self.get_call(call_id)
         if call_hint is None:
             raise CapabilityCallConflict(CODE_CALL_NOT_FOUND, f"call {call_id} not found")
-        # Global lock order is Run -> Interrupt/CapabilityCall. Resolve the
-        # parent id without a row lock, serialize on Run, then refresh+lock the
-        # call so a blocked Session cannot act on identity-map stale state.
+        if (
+            str(call_hint.status) in {"unknown", "needs_reconciliation"}
+            or to_status in {"unknown", "needs_reconciliation"}
+        ):
+            from app.assistant.capability_calls.write_guard import (
+                acquire_write_safety_advisory_lock,
+            )
+
+            if self.write_safety_lock is None:
+                acquire_write_safety_advisory_lock(self.db)
+            else:
+                self.write_safety_lock.acquire(self.db)
+        # Global write lock order is advisory -> Run -> Interrupt/CapabilityCall.
+        # Resolve the parent id without a row lock, serialize on Run, then
+        # refresh+lock the call so a blocked Session cannot act on stale state.
         run = self.get_run(call_hint.run_id, for_update=True)
         call = self.get_call(call_id, for_update=True)
         if call is None:
@@ -413,6 +444,30 @@ class CapabilityCallRepository:
             call.terminal_at = ts
         self.db.flush()
         return call
+
+    def fail_before_side_effect(
+        self,
+        call: AssistantCapabilityCall,
+        *,
+        expected_run_revision: int,
+        failure_code: str,
+        lease: LeaseToken | None,
+    ) -> AssistantCapabilityCall:
+        """Terminalize an authorized local write without creating an Attempt."""
+        if call.side_effect_started_at is not None or int(call.attempt_count or 0):
+            raise CapabilityCallConflict(
+                CODE_INVALID_TRANSITION,
+                "pre-side-effect failure cannot follow an Attempt or effect start",
+                call=call,
+            )
+        return self.transition_call(
+            call_id=call.id,
+            expected_call_revision=int(call.state_revision),
+            expected_run_revision=expected_run_revision,
+            to_status="failed",
+            lease=lease,
+            failure_code=failure_code,
+        )
 
     def claim_attempt(
         self,

@@ -218,10 +218,13 @@ def _harness(
             model_dump=lambda **_kwargs: {},
         ),
     }
+    from tests._db import allowing_test_write_guard
+
     aggregate = DurableCapabilityLedgerAggregate(
         db=db,
         authorization_factory=factory,
         idempotency_secret="s" * 32,
+        write_guard=allowing_test_write_guard(db),
         lease=LeaseToken(
             run_id=run.id,
             worker_id="worker-denial-ledger",
@@ -547,10 +550,13 @@ def test_real_v2_policy_deny_is_reserved_but_never_dispatched() -> None:
         run.current_budget_revision_id = budget.id
         run.current_obligation_revision_id = obligation.id
         db.commit()
+        from tests._db import allowing_test_write_guard
+
         aggregate = DurableCapabilityLedgerAggregate(
             db=db,
             authorization_factory=factory,
             idempotency_secret="s" * 32,
+            write_guard=allowing_test_write_guard(db),
             lease=LeaseToken(
                 run_id=run.id,
                 worker_id="worker-real-deny",

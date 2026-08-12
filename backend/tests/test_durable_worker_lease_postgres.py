@@ -21,7 +21,6 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from tests._bootstrap import bootstrap_backend_imports, reset_caches
 from tests.postgres_destructive_guard import reset_disposable_public_schema
-from tests.schema_baseline_support import upgrade_clean_root_checked
 
 bootstrap_backend_imports()
 reset_caches()
@@ -60,6 +59,17 @@ DIGEST_D = "d" * 64
 DIGEST_E = "e" * 64
 DIGEST_9 = "9" * 64
 CODEC = 3
+
+
+class _CurrentMetadataSchemaCompatibility:
+    """Task 2 fixture port: current metadata intentionally precedes Task 7."""
+
+    def is_compatible(self, _db: Session) -> bool:
+        return True
+
+
+def _current_metadata_schema_compatibility():
+    return _CurrentMetadataSchemaCompatibility()
 
 
 def _as_sqlalchemy_url(url: str) -> str:
@@ -110,24 +120,17 @@ def _drop_public_schema(engine: Engine) -> None:
 @pytest.fixture(scope="module", autouse=True)
 def _current_clean_schema() -> Iterator[None]:
     with _engine() as engine:
-        _drop_public_schema(engine)
-    upgrade_clean_root_checked(
-        _POSTGRES_URL,
-        deployment_class="rehearsal",
-        app_env="test",
-        build_revision=BUILD,
-    )
+        _ensure_schema(engine)
     yield
 
 
 def _ensure_schema(engine) -> None:
+    from app.database import Base
+    from app.model_registry import load_all_live_models
+
     reset_disposable_public_schema(engine)
-    upgrade_clean_root_checked(
-        _POSTGRES_URL,
-        deployment_class="rehearsal",
-        app_env="test",
-        build_revision=BUILD,
-    )
+    load_all_live_models()
+    Base.metadata.create_all(engine)
 
 
 def _seed_profile_version(session: Session):
@@ -177,6 +180,12 @@ def _prepared_revision(session: Session, **overrides):
         PreparedRolloutRevision,
     )
     from app.assistant.runtime.repository import AssistantRuntimeRepository
+    from app.assistant.capability_calls.write_guard import (
+        CREATE_ENTRY_CONTRACT_DIGEST,
+        RECONCILIATION_CONTRACT_VERSION,
+        WRITE_COHORT_DIGEST,
+        WRITE_POLICY_DIGEST,
+    )
 
     _, profile_version = _seed_profile_version(session)
     model = _seed_model(session)
@@ -197,6 +206,14 @@ def _prepared_revision(session: Session, **overrides):
         runtime_contract_version=overrides.get("runtime_contract_version", 1),
         checkpoint_codec_version=overrides.get("checkpoint_codec_version", CODEC),
         capability_feature_digest=overrides.get("capability_feature_digest", DIGEST),
+        create_entry_contract_digest=overrides.get(
+            "create_entry_contract_digest", CREATE_ENTRY_CONTRACT_DIGEST
+        ),
+        write_policy_digest=overrides.get("write_policy_digest", WRITE_POLICY_DIGEST),
+        write_cohort_digest=overrides.get("write_cohort_digest", WRITE_COHORT_DIGEST),
+        reconciliation_contract_version=overrides.get(
+            "reconciliation_contract_version", RECONCILIATION_CONTRACT_VERSION
+        ),
     )
     prepared = PreparedRolloutRevision.from_subject(
         subject=subject,
@@ -263,6 +280,10 @@ def _make_run(session: Session, *, status: str = "queued", **kwargs):
             kwargs.pop("required_capability_feature_digest", DIGEST)
         ),
         required_app_build_revision=build,
+        required_create_entry_contract_digest=prepared.required_create_entry_contract_digest,
+        required_write_policy_digest=prepared.required_write_policy_digest,
+        required_write_cohort_digest=prepared.required_write_cohort_digest,
+        required_reconciliation_contract_version=prepared.required_reconciliation_contract_version,
         capability_ledger_mode=kwargs.pop("capability_ledger_mode", "enforced"),
         state_revision=int(kwargs.pop("state_revision", 0)),
         last_event_seq=int(kwargs.pop("last_event_seq", 0)),
@@ -295,6 +316,7 @@ def test_two_session_claim_skip_locked_one_winner():
                     s,
                     identity=_identity(name, build=build),
                     lease_ttl=timedelta(seconds=30),
+                    schema_compatibility=_current_metadata_schema_compatibility(),
                 )
                 barrier.wait(timeout=10)
                 claimed = svc.claim_next()
@@ -337,7 +359,11 @@ def test_heartbeat_extends_without_revision_bump_and_lost_lease_zero_rows():
         with _session(engine) as s:
             run = _make_run(s, status="queued")
             build = str(run.required_app_build_revision)
-            svc = RunLeaseService(s, identity=_identity("hb-worker", build=build))
+            svc = RunLeaseService(
+                s,
+                identity=_identity("hb-worker", build=build),
+                schema_compatibility=_current_metadata_schema_compatibility(),
+            )
             claimed = svc.claim_next()
             assert claimed is not None
             rev = claimed.state_revision
@@ -396,7 +422,11 @@ def test_takeover_expired_running_to_recovering():
             run_id = run.id
             build = str(run.required_app_build_revision)
 
-            svc = RunLeaseService(s, identity=_identity("takeover-w", build=build))
+            svc = RunLeaseService(
+                s,
+                identity=_identity("takeover-w", build=build),
+                schema_compatibility=_current_metadata_schema_compatibility(),
+            )
             claimed = svc.claim_next()
             assert claimed is not None
             assert claimed.kind == "takeover_running"
@@ -431,7 +461,11 @@ def test_reclaim_expired_cancelling_cancellation_only():
                 cancel_requested_at=past,
             )
             build = str(run.required_app_build_revision)
-            svc = RunLeaseService(s, identity=_identity("cancel-w", build=build))
+            svc = RunLeaseService(
+                s,
+                identity=_identity("cancel-w", build=build),
+                schema_compatibility=_current_metadata_schema_compatibility(),
+            )
             claimed = svc.claim_next()
             assert claimed is not None
             assert claimed.kind == "reclaim_cancelling"
@@ -470,7 +504,9 @@ def test_build_mismatch_not_claimed():
                 required_app_build_revision=run_build,
             )
             svc = RunLeaseService(
-                s, identity=_identity("w1", build=f"mismatch-{uuid.uuid4().hex[:8]}")
+                s,
+                identity=_identity("w1", build=f"mismatch-{uuid.uuid4().hex[:8]}"),
+                schema_compatibility=_current_metadata_schema_compatibility(),
             )
             claimed = svc.claim_next()
             assert claimed is None
@@ -491,7 +527,11 @@ def test_codec_incompatible_worker_never_claims():
                 build=build,
                 codec_versions=(99,),
             )
-            svc = RunLeaseService(s, identity=identity)
+            svc = RunLeaseService(
+                s,
+                identity=identity,
+                schema_compatibility=_current_metadata_schema_compatibility(),
+            )
             claimed = svc.claim_next()
             assert claimed is None
 
@@ -511,6 +551,7 @@ def test_backoff_sets_next_attempt_and_clears_lease():
                 lease_ttl=timedelta(seconds=30),
                 retry_base_ms=500,
                 retry_max_ms=30000,
+                schema_compatibility=_current_metadata_schema_compatibility(),
             )
             claimed = svc.claim_next()
             assert claimed is not None
@@ -548,7 +589,11 @@ def test_draining_stops_claims():
         with _session(engine) as s:
             run = _make_run(s, status="queued")
             build = str(run.required_app_build_revision)
-            svc = RunLeaseService(s, identity=_identity("drain-w", build=build))
+            svc = RunLeaseService(
+                s,
+                identity=_identity("drain-w", build=build),
+                schema_compatibility=_current_metadata_schema_compatibility(),
+            )
             claimed = svc.claim_next(draining=True)
             assert claimed is None
 
@@ -575,7 +620,11 @@ def test_database_time_used_for_expiry_check():
                 heartbeat_at=past,
             )
             build = str(run.required_app_build_revision)
-            svc = RunLeaseService(s, identity=_identity("dbtime-w", build=build))
+            svc = RunLeaseService(
+                s,
+                identity=_identity("dbtime-w", build=build),
+                schema_compatibility=_current_metadata_schema_compatibility(),
+            )
             claimed = svc.claim_next()
             assert claimed is not None
             assert claimed.run_id == run.id
@@ -600,6 +649,10 @@ def test_live_lease_not_taken_over():
                 heartbeat_at=utcnow(),
             )
             build = str(run.required_app_build_revision)
-            svc = RunLeaseService(s, identity=_identity("other-w", build=build))
+            svc = RunLeaseService(
+                s,
+                identity=_identity("other-w", build=build),
+                schema_compatibility=_current_metadata_schema_compatibility(),
+            )
             claimed = svc.claim_next()
             assert claimed is None

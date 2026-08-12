@@ -293,11 +293,16 @@ class CapabilityReconciliationService:
         *,
         operator_authorizer: OperatorAuthorizer | None = None,
         evidence_verifier: HmacReconciliationEvidenceVerifier | None = None,
+        write_safety_lock: Any | None = None,
     ) -> None:
         self.db = db
-        self.calls = CapabilityCallRepository(db)
+        self.calls = CapabilityCallRepository(
+            db,
+            write_safety_lock=write_safety_lock,
+        )
         self.operator_authorizer = operator_authorizer
         self.evidence_verifier = evidence_verifier
+        self.write_safety_lock = self.calls.write_safety_lock
 
     def get_call(self, call_id: UUID) -> AssistantCapabilityCall | None:
         return self.calls.get_call(call_id)
@@ -347,8 +352,17 @@ class CapabilityReconciliationService:
                 "reconciliation requires a trusted evidence authenticity verifier",
             )
 
-        # Resolve the parent without a row lock, then obey the global lock order:
-        # Run -> Interrupt (none here) -> CapabilityCall.
+        from app.assistant.capability_calls.write_guard import (
+            acquire_write_safety_advisory_lock,
+        )
+
+        if self.write_safety_lock is None:
+            acquire_write_safety_advisory_lock(self.db)
+        else:
+            self.write_safety_lock.acquire(self.db)
+
+        # Advisory lock is already held; resolve the parent without a row lock,
+        # then continue Run -> Interrupt (none here) -> CapabilityCall.
         call_probe = self.calls.get_call(request.call_id)
         if call_probe is None:
             raise CapabilityCallConflict(

@@ -26,6 +26,7 @@ ALLOWED_CALL_TRANSITIONS: dict[tuple[str, str], str] = {
     ("awaiting_approval", "cancelled"): "cancel_unstarted",
     ("awaiting_approval", "expired"): "approval_expired",
     ("authorized", "executing"): "claim_attempt",
+    ("authorized", "failed"): "fail_before_side_effect",
     ("authorized", "cancelled"): "cancel_unstarted",
     ("executing", "succeeded"): "commit_success",
     ("executing", "failed"): "commit_failure",

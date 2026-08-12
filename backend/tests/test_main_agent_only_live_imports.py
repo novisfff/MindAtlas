@@ -43,7 +43,6 @@ INVENTORY_ALLOWLIST: frozenset[str] = frozenset(
         "test_assistant_runtime_config.py:27",
         "test_durable_main_agent_runner.py:156",
         "test_durable_run_repository.py:910",
-        "test_main_agent_golden_create_entry.py:92",
     }
 )
 

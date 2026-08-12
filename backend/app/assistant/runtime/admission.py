@@ -190,6 +190,14 @@ class AssistantChatAdmissionService:
                     runtime_contract_version=closure.runtime_contract_version,
                     required_checkpoint_codec_version=closure.checkpoint_codec_version,
                     required_capability_feature_digest=closure.capability_feature_digest,
+                    required_create_entry_contract_digest=(
+                        closure.create_entry_contract_digest
+                    ),
+                    required_write_policy_digest=closure.write_policy_digest,
+                    required_write_cohort_digest=closure.write_cohort_digest,
+                    required_reconciliation_contract_version=(
+                        closure.reconciliation_contract_version
+                    ),
                     required_app_build_revision=closure.build_revision,
                     capability_ledger_mode=self._frozen_ledger_mode(),
                     deadline_at=admission.deadline_at,
