@@ -1422,7 +1422,6 @@ class DurableCapabilityLedgerAggregate:
             "time_to": None,
         }
         create_args.update(arguments)
-        entry_request = _build_entry_request(self.db, **create_args)
         run = self.calls.get_run(call.run_id, for_update=True)
         interrupt = (
             self.db.query(AssistantRunInterrupt)
@@ -1471,6 +1470,7 @@ class DurableCapabilityLedgerAggregate:
         # This is intentionally the first operation after the post-approval
         # decision: the advisory lock and launch-state row locks stay held by
         # this transaction through Entry/result/checkpoint commit.
+        entry_request = _build_entry_request(self.db, **create_args)
         entry = stage_create_entry_local(
             session=self.db,
             request=entry_request,

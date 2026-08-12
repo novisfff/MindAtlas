@@ -316,6 +316,7 @@ class LocalTransactionalGoldenPathTests(unittest.TestCase):
         from app.assistant.provider_loop.contracts import LedgerPrepareOutcome
         from app.entry.models import Entry
         from app.lightrag.models import EntryIndexOutbox
+        from app.tag.models import Tag
         from tests.test_agent_policy_runtime import _base_manifest
         from tests._db import allowing_test_write_guard
 
@@ -340,6 +341,7 @@ class LocalTransactionalGoldenPathTests(unittest.TestCase):
             call_revision=1,
         )
         current_manifest, _surface = _base_manifest(run_id=self.run.id)
+        blocked_tag_name = f"blocked-post-approval-{uuid.uuid4().hex}"
         request = SimpleNamespace(
             call=SimpleNamespace(
                 call_id="post-approval-denied",
@@ -347,7 +349,7 @@ class LocalTransactionalGoldenPathTests(unittest.TestCase):
                     "title": "must not exist",
                     "content": "blocked",
                     "type_code": "KNOWLEDGE",
-                    "tags": [],
+                    "tags": [blocked_tag_name],
                     "time_mode": "POINT",
                     "time_at": "2026-07-18",
                 },
@@ -410,6 +412,10 @@ class LocalTransactionalGoldenPathTests(unittest.TestCase):
             0,
         )
         self.assertEqual(self.db.query(EntryIndexOutbox).count(), 0)
+        self.assertEqual(
+            self.db.query(Tag).filter(Tag.name == blocked_tag_name).count(),
+            0,
+        )
         from app.assistant.durable.models import AssistantRunCheckpoint
 
         self.db.refresh(self.run)
