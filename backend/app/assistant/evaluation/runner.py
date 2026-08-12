@@ -103,7 +103,7 @@ class EvaluationRunnerConfig:
     runtime_contract_version: int = 1
     build_revision: str = "development"
     # Injected for tests: ASSISTANT_MAIN_AGENT_WRITE_MODE value. Must not change results.
-    production_write_mode: Literal["off", "golden"] = "off"
+    production_write_mode: Literal["off", "create_entry"] = "off"
 
 
 @dataclass
