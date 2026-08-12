@@ -26,6 +26,10 @@ from app.assistant.capabilities.contracts import (
 )
 from app.assistant.capabilities.errors import CapabilityDomainError
 from app.assistant.capabilities.execution_closure import build_frozen_execution_closure
+from app.assistant.capabilities.supported_writes import (
+    unsupported_branch_for_capability_key,
+    unsupported_write_boundary,
+)
 from app.assistant.capabilities.ports import (
     ExecutableAgentVersionTarget,
     ExecutableToolTarget,
@@ -298,6 +302,10 @@ class CapabilityRegistry:
         identity = binding.resolved.target_identity
         tool_name = identity.split(":", 1)[1]
         target_identity = identity
+
+        unsupported_branch = unsupported_branch_for_capability_key(tool_name)
+        if unsupported_branch is not None:
+            unsupported_write_boundary(unsupported_branch, "capability_registry")
 
         if tool_name not in ToolRegistry.list_runtime_system_tool_names():
             raise _domain_error(

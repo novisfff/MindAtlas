@@ -4,14 +4,16 @@ from dataclasses import dataclass
 from typing import Literal
 
 from app.assistant.workflow.system_assets import (
-    CONTEXT_CAPTURE_ASSET_KEY,
+    PERIODIC_REVIEW_CORE_ASSET_KEY,
     clear_system_asset_registry_cache,
     get_system_asset,
     get_system_asset_by_canonical_name,
     list_system_assets,
 )
 
-StandaloneSystemWorkflowAssetKey = Literal["context_capture"]
+StandaloneSystemWorkflowAssetKey = Literal[
+    "periodic_review_core",
+]
 
 
 @dataclass(frozen=True)
@@ -69,7 +71,7 @@ def clear_standalone_system_target_registry_cache() -> None:
 
 
 __all__ = [
-    "CONTEXT_CAPTURE_ASSET_KEY",
+    "PERIODIC_REVIEW_CORE_ASSET_KEY",
     "StandaloneSystemWorkflowAssetKey",
     "StandaloneSystemWorkflowDefinition",
     "clear_standalone_system_target_registry_cache",

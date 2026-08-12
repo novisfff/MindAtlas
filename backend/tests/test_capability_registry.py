@@ -212,13 +212,13 @@ def test_list_runtime_system_tool_names_is_sorted_export_allowlist() -> None:
     assert names == tuple(sorted(names))
     assert set(names) == set(assistant_tools._EXPORTS.keys())
     for openclaw_name in (
-        "openclaw_capture_entry",
         "openclaw_search_entries",
         "openclaw_get_entry",
-        "openclaw_create_relation",
         "openclaw_query_knowledge_graph",
     ):
         assert openclaw_name in names
+    assert "openclaw_capture_entry" not in names
+    assert "openclaw_create_relation" not in names
     assert "kb_search" in names
     assert ToolRegistry.get_runtime_system_tool_definition("search_entries") is not None
     assert ToolRegistry.get_runtime_system_tool_definition("kb_search") is not None

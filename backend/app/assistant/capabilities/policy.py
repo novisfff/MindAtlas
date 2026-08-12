@@ -132,10 +132,8 @@ OPENCLAW_SYSTEM_ITEM_EFFECT_CEILINGS: dict[str, OpenClawEffectCeiling] = {
     for key, maximum in (
         ("search_entries", "read"),
         ("get_entry", "read"),
-        ("create_relation", "write_local"),
         ("query_knowledge_graph", "read"),
-        ("submit_context_capture", "write_local"),
-        ("generate_periodic_review", "write_local"),
+        ("generate_periodic_review", "read"),
     )
 }
 

@@ -125,26 +125,6 @@ _SYSTEM_TOOL_DISPLAY_METADATA: dict[str, dict[str, dict[str, str]]] = {
             "source_description": "Create a new structured entry in MindAtlas.",
         },
     },
-    "update_entry": {
-        "zh": {
-            "source_name": "更新记录",
-            "source_description": "根据记录 ID 更新一条已有记录的内容和字段。",
-        },
-        "en": {
-            "source_name": "Update Entry",
-            "source_description": "Update an existing entry by entry ID.",
-        },
-    },
-    "create_relation": {
-        "zh": {
-            "source_name": "创建关联",
-            "source_description": "在两条已有记录之间创建关系。",
-        },
-        "en": {
-            "source_name": "Create Relation",
-            "source_description": "Create a relation between two existing entries.",
-        },
-    },
     "query_knowledge_graph": {
         "zh": {
             "source_name": "查询知识图谱",
@@ -153,26 +133,6 @@ _SYSTEM_TOOL_DISPLAY_METADATA: dict[str, dict[str, dict[str, str]]] = {
         "en": {
             "source_name": "Query Knowledge Graph",
             "source_description": "Query cross-entry relationships and return a synthesized knowledge answer.",
-        },
-    },
-    "generate_weekly_report": {
-        "zh": {
-            "source_name": "生成周报",
-            "source_description": "生成或读取指定周的结构化周报。",
-        },
-        "en": {
-            "source_name": "Generate Weekly Report",
-            "source_description": "Generate or retrieve a structured weekly report.",
-        },
-    },
-    "generate_monthly_report": {
-        "zh": {
-            "source_name": "生成月报",
-            "source_description": "生成或读取指定月份的结构化月报。",
-        },
-        "en": {
-            "source_name": "Generate Monthly Report",
-            "source_description": "Generate or retrieve a structured monthly report.",
         },
     },
     "get_statistics": {
@@ -272,65 +232,10 @@ class ToolRegistry(_BaseRegistry):
                 "description": "相似记录候选列表。元素字段：id(string), title(string), content(string), type(string), type_code(string), summary(string), tags(array[string]), time_mode(string), time_at(string|null, ISO8601), time_from(string|null, ISO8601), time_to(string|null, ISO8601), created_at(string, ISO8601), updated_at(string, ISO8601), retrieval_rank(number), matched_source_kinds(array[string]), matched_snippets(array[string])。",
             },
         ],
-        "create_relation": [
-            {"name": "id", "param_type": "string", "description": "关系 UUID。"},
-            {"name": "source_entry_id", "param_type": "string", "description": "源记录 UUID。"},
-            {"name": "source_entry_title", "param_type": "string", "description": "源记录标题。"},
-            {"name": "target_entry_id", "param_type": "string", "description": "目标记录 UUID。"},
-            {"name": "target_entry_title", "param_type": "string", "description": "目标记录标题。"},
-            {"name": "relation_type_code", "param_type": "string", "description": "关系类型编码。"},
-            {"name": "relation_type_name", "param_type": "string", "description": "关系类型名称。"},
-            {"name": "description", "param_type": "string", "description": "关系说明。"},
-            {"name": "created_at", "param_type": "string", "description": "创建时间（ISO8601）。"},
-            {"name": "updated_at", "param_type": "string", "description": "更新时间（ISO8601）。"},
-        ],
         "query_knowledge_graph": [
             {"name": "answer", "param_type": "string", "description": "综合回答。"},
             {"name": "sources", "param_type": "array", "description": "引用来源列表。"},
             {"name": "metadata", "param_type": "object", "description": "查询元信息。"},
-        ],
-        "generate_weekly_report": [
-            {"name": "id", "param_type": "string", "description": "周报 UUID。"},
-            {"name": "week_start", "param_type": "string", "description": "周起始日期。"},
-            {"name": "week_end", "param_type": "string", "description": "周结束日期。"},
-            {"name": "entry_count", "param_type": "number", "description": "记录数量。"},
-            {"name": "content", "param_type": "object", "description": "周报内容对象。"},
-            {"name": "content_locale", "param_type": "string", "description": "内容语言。"},
-            {"name": "status", "param_type": "string", "description": "生成状态。"},
-            {"name": "attempts", "param_type": "number", "description": "生成尝试次数。"},
-            {"name": "last_error", "param_type": "string", "description": "最后一次错误。"},
-            {"name": "generated_at", "param_type": "string", "description": "生成时间。"},
-            {"name": "created_at", "param_type": "string", "description": "创建时间。"},
-            {"name": "updated_at", "param_type": "string", "description": "更新时间。"},
-        ],
-        "generate_monthly_report": [
-            {"name": "id", "param_type": "string", "description": "月报 UUID。"},
-            {"name": "month_start", "param_type": "string", "description": "月起始日期。"},
-            {"name": "month_end", "param_type": "string", "description": "月结束日期。"},
-            {"name": "entry_count", "param_type": "number", "description": "记录数量。"},
-            {"name": "content", "param_type": "object", "description": "月报内容对象。"},
-            {"name": "content_locale", "param_type": "string", "description": "内容语言。"},
-            {"name": "status", "param_type": "string", "description": "生成状态。"},
-            {"name": "attempts", "param_type": "number", "description": "生成尝试次数。"},
-            {"name": "last_error", "param_type": "string", "description": "最后一次错误。"},
-            {"name": "generated_at", "param_type": "string", "description": "生成时间。"},
-            {"name": "created_at", "param_type": "string", "description": "创建时间。"},
-            {"name": "updated_at", "param_type": "string", "description": "更新时间。"},
-        ],
-        "openclaw_capture_entry": [
-            {"name": "id", "param_type": "string", "description": "新建记录 UUID。"},
-            {"name": "title", "param_type": "string", "description": "记录标题。"},
-            {"name": "summary", "param_type": "string", "description": "记录摘要。"},
-            {"name": "content", "param_type": "string", "description": "记录正文。"},
-            {"name": "entryTypeCode", "param_type": "string", "description": "记录类型编码。"},
-            {"name": "entryTypeName", "param_type": "string", "description": "记录类型名称。"},
-            {"name": "tagNames", "param_type": "array", "description": "标签名称列表。"},
-            {"name": "timeMode", "param_type": "string", "description": "时间模式。"},
-            {"name": "timeAt", "param_type": "string", "description": "POINT 模式时间。"},
-            {"name": "timeFrom", "param_type": "string", "description": "RANGE 起始时间。"},
-            {"name": "timeTo", "param_type": "string", "description": "RANGE 结束时间。"},
-            {"name": "createdAt", "param_type": "string", "description": "创建时间。"},
-            {"name": "updatedAt", "param_type": "string", "description": "更新时间。"},
         ],
         "openclaw_search_entries": [
             {"name": "total", "param_type": "number", "description": "匹配记录总数。"},
@@ -350,16 +255,6 @@ class ToolRegistry(_BaseRegistry):
             {"name": "timeTo", "param_type": "string", "description": "RANGE 结束时间。"},
             {"name": "createdAt", "param_type": "string", "description": "创建时间。"},
             {"name": "updatedAt", "param_type": "string", "description": "更新时间。"},
-        ],
-        "openclaw_create_relation": [
-            {"name": "id", "param_type": "string", "description": "关系 UUID。"},
-            {"name": "sourceEntryId", "param_type": "string", "description": "源记录 UUID。"},
-            {"name": "sourceEntryTitle", "param_type": "string", "description": "源记录标题。"},
-            {"name": "targetEntryId", "param_type": "string", "description": "目标记录 UUID。"},
-            {"name": "targetEntryTitle", "param_type": "string", "description": "目标记录标题。"},
-            {"name": "relationTypeCode", "param_type": "string", "description": "关系类型编码。"},
-            {"name": "relationTypeName", "param_type": "string", "description": "关系类型名称。"},
-            {"name": "description", "param_type": "string", "description": "关系说明。"},
         ],
         "openclaw_query_knowledge_graph": [
             {"name": "answer", "param_type": "string", "description": "知识图谱回答。"},
@@ -383,20 +278,6 @@ class ToolRegistry(_BaseRegistry):
         ],
         "create_entry": [
             {"name": "id", "param_type": "string", "description": "新建记录 UUID。"},
-            {"name": "title", "param_type": "string", "description": "最终写入的标题。"},
-            {"name": "summary", "param_type": "string", "description": "最终写入的摘要。"},
-            {"name": "type", "param_type": "string", "description": "记录类型名称。"},
-            {"name": "type_code", "param_type": "string", "description": "记录类型编码。"},
-            {"name": "tags", "param_type": "array", "description": "标签名称数组。"},
-            {"name": "time_mode", "param_type": "string", "description": "时间模式（POINT/RANGE）。"},
-            {"name": "time_at", "param_type": "string", "description": "POINT 模式日期（YYYY-MM-DD 或 null）。"},
-            {"name": "time_from", "param_type": "string", "description": "RANGE 起始日期（YYYY-MM-DD 或 null）。"},
-            {"name": "time_to", "param_type": "string", "description": "RANGE 结束日期（YYYY-MM-DD 或 null）。"},
-            {"name": "created_at", "param_type": "string", "description": "创建时间（ISO8601）。"},
-            {"name": "updated_at", "param_type": "string", "description": "更新时间（ISO8601）。"},
-        ],
-        "update_entry": [
-            {"name": "id", "param_type": "string", "description": "更新记录 UUID。"},
             {"name": "title", "param_type": "string", "description": "最终写入的标题。"},
             {"name": "summary", "param_type": "string", "description": "最终写入的摘要。"},
             {"name": "type", "param_type": "string", "description": "记录类型名称。"},

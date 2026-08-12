@@ -14,25 +14,6 @@ reset_caches()
 import app.ai_registry.models  # noqa: F401,E402
 
 
-EXPECTED_CONTEXT_CAPTURE_POSITIONS = {
-    "start": (80, 320),
-    "tool_types": (490, 245),
-    "tool_tags": (490, 396),
-    "llm_materialize": (900, 320),
-    "llm_prepare_lookup": (1310, 320),
-    "tool_search_similar": (1720, 320),
-    "code_pick_top1": (2130, 320),
-    "llm_decide": (2540, 320),
-    "if_route": (2950, 320),
-    "tool_get_existing": (3360, 245),
-    "tool_create": (3360, 396),
-    "llm_merge_rewrite": (3770, 245),
-    "tool_update": (4180, 245),
-    "output_created": (3770, 396),
-    "output_merged": (4590, 245),
-}
-
-
 class AssistantConfigServiceMoreTests(unittest.TestCase):
     def setUp(self) -> None:
         self.db = make_session()
@@ -105,40 +86,26 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
         self.assertEqual(cfg.get("bindingMode"), "pinned")
         self.assertNotIn("targetSystemAssetKey", cfg)
 
-    def test_system_smart_capture_workflow_resolves_relation_followup_asset_to_pinned_target(self) -> None:
+    def test_system_smart_capture_workflow_is_create_only(self) -> None:
         from app.assistant_config.models import AssistantWorkflow  # noqa: E402
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
 
         svc = AssistantConfigService(self.db)
         svc.sync_system_skills()
-        svc.sync_standalone_system_targets()
 
-        wrapper = (
+        workflow = (
             self.db.query(AssistantWorkflow)
             .filter(AssistantWorkflow.name == "smart_capture__workflow")
             .first()
         )
-        followup = (
-            self.db.query(AssistantWorkflow)
-            .filter(AssistantWorkflow.name == "system_smart_capture_relation_followup__workflow")
-            .first()
-        )
 
-        self.assertIsNotNone(wrapper)
-        self.assertIsNotNone(followup)
-        assert wrapper is not None
-        assert followup is not None
-        self.assertIsNotNone(followup.published_version_id)
+        self.assertIsNotNone(workflow)
+        assert workflow is not None
+        tool_nodes = [node for node in (workflow.nodes or []) if node.node_type == "tool"]
+        self.assertEqual([node.config["toolName"] for node in tool_nodes], ["create_entry"])
+        self.assertFalse(any(node.node_type in {"workflow_call", "human_in_loop"} for node in (workflow.nodes or [])))
 
-        call_node = next(node for node in (wrapper.nodes or []) if node.node_id == "call_relation_followup")
-        cfg = dict(call_node.config or {})
-
-        self.assertEqual(cfg.get("targetWorkflowId"), str(followup.id))
-        self.assertEqual(cfg.get("targetPublishedVersionId"), str(followup.published_version_id))
-        self.assertEqual(cfg.get("bindingMode"), "pinned")
-        self.assertNotIn("targetSystemAssetKey", cfg)
-
-    def test_sync_standalone_system_targets_creates_context_capture_workflow_without_system_skill(self) -> None:
+    def test_sync_standalone_system_targets_does_not_seed_retired_write_workflows(self) -> None:
         from app.assistant_config.models import AssistantWorkflow  # noqa: E402
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
 
@@ -146,15 +113,13 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
         svc.sync_system_skills()
         svc.sync_standalone_system_targets()
 
-        workflow = (
-            self.db.query(AssistantWorkflow)
-            .filter(AssistantWorkflow.name == "system_context_capture__workflow")
-            .first()
-        )
-        self.assertIsNotNone(workflow)
-        self.assertTrue(bool(workflow.is_system))
-        linked_system_skills = []  # assistant_skill table removed
-        self.assertEqual(linked_system_skills, [])
+        workflow_names = {
+            row.name
+            for row in self.db.query(AssistantWorkflow.name).filter(AssistantWorkflow.is_system.is_(True)).all()
+        }
+        self.assertIn("system_periodic_review_core__workflow", workflow_names)
+        self.assertNotIn("system_context_capture__workflow", workflow_names)
+        self.assertNotIn("system_smart_capture_relation_followup__workflow", workflow_names)
 
     def test_sync_standalone_system_targets_can_republish_existing_workflow_without_duplicate_edges(self) -> None:
         from app.assistant_config.models import AssistantWorkflow  # noqa: E402
@@ -166,7 +131,7 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
 
         workflow = (
             self.db.query(AssistantWorkflow)
-            .filter(AssistantWorkflow.name == "system_context_capture__workflow")
+            .filter(AssistantWorkflow.name == "system_periodic_review_core__workflow")
             .first()
         )
         self.assertIsNotNone(workflow)
@@ -192,39 +157,6 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
         }
         self.assertEqual(len(refreshed.edges), len(edge_keys))
 
-    def test_sync_standalone_system_targets_renames_legacy_capture_workflow_in_place(self) -> None:
-        from app.assistant_config.models import AssistantWorkflow  # noqa: E402
-        from app.assistant_config.service import AssistantConfigService  # noqa: E402
-
-        legacy = AssistantWorkflow(
-            name="system_openclaw_context_capture__workflow",
-            description="legacy",
-            workflow_version=0,
-            workflow_viewport=None,
-            is_system=True,
-            enabled=True,
-        )
-        self.db.add(legacy)
-        self.db.commit()
-        legacy_id = legacy.id
-
-        svc = AssistantConfigService(self.db)
-        svc.sync_standalone_system_targets()
-
-        refreshed = (
-            self.db.query(AssistantWorkflow)
-            .filter(AssistantWorkflow.id == legacy_id)
-            .first()
-        )
-        self.assertIsNotNone(refreshed)
-        self.assertEqual(refreshed.name, "system_context_capture__workflow")
-        self.assertIsNotNone(refreshed.published_version_id)
-        self.assertIsNone(
-            self.db.query(AssistantWorkflow)
-            .filter(AssistantWorkflow.name == "system_openclaw_context_capture__workflow")
-            .first()
-        )
-
     def test_sync_standalone_system_targets_rejects_custom_name_conflict(self) -> None:
         from app.assistant_config.models import AssistantWorkflow  # noqa: E402
         from app.assistant_config.service import AssistantConfigService  # noqa: E402
@@ -232,7 +164,7 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
 
         self.db.add(
             AssistantWorkflow(
-                name="system_context_capture__workflow",
+                name="system_periodic_review_core__workflow",
                 description="custom conflict",
                 workflow_version=0,
                 workflow_viewport=None,
@@ -257,15 +189,15 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
 
         workflow = next(
             item for item in svc.list_workflows(include_disabled=True)
-            if item.name == "system_context_capture__workflow"
+            if item.name == "system_periodic_review_core__workflow"
         )
         serialized = svc.serialize_workflow(workflow)
         callable_items = svc.list_callable_workflows()
         callable_item = next(item for item in callable_items if item["id"] == workflow.id)
 
-        self.assertEqual(serialized["name"], "智能上下文入库工作流")
-        self.assertEqual(callable_item["name"], "智能上下文入库工作流")
-        self.assertIn("先提取检索线索与最终字段", serialized["description"])
+        self.assertEqual(serialized["name"], "周期回顾核心工作流")
+        self.assertEqual(callable_item["name"], "周期回顾核心工作流")
+        self.assertIn("结构化周期回顾核心流程", serialized["description"])
 
     def test_serialize_targets_include_openclaw_reference_count(self) -> None:
         from app.openclaw_integration.models import OpenClawCapabilityItem  # noqa: E402
@@ -324,7 +256,7 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
 
         workflow = next(
             item for item in svc.list_workflows(include_disabled=True)
-            if item.name == "system_context_capture__workflow"
+            if item.name == "system_periodic_review_core__workflow"
         )
         workflow_summary = svc.serialize_workflow_summary(workflow)
         self.assertFalse(workflow_summary["details_loaded"])
@@ -345,162 +277,6 @@ class AssistantConfigServiceMoreTests(unittest.TestCase):
         self.assertTrue(len(workflow_detail["nodes"]) > 0)
         self.assertTrue(agent_detail["details_loaded"])
         self.assertIsInstance(agent_detail["system_prompt"], str)
-
-    def test_standalone_system_workflow_start_field_description_explains_create_vs_merge_context(self) -> None:
-        from app.assistant_config.service import AssistantConfigService  # noqa: E402
-
-        svc = AssistantConfigService(self.db)
-        svc.sync_system_skills()
-        svc.sync_standalone_system_targets()
-
-        workflow = next(
-            item for item in svc.list_workflows(include_disabled=True)
-            if item.name == "system_context_capture__workflow"
-        )
-        start_node = next(node for node in workflow.nodes if node.node_id == "start")
-        start_cfg = dict(start_node.config or {})
-        structured_fields = start_cfg.get("structuredFields") or start_cfg.get("structured_fields") or []
-        context_field = next(item for item in structured_fields if item.get("name") == "context")
-
-        self.assertIn("新建记录还是修正、合并到已有记录", str(context_field.get("description") or ""))
-
-    def test_standalone_system_workflow_uses_lookup_preparation_and_top1_merge_gate(self) -> None:
-        from app.assistant_config.service import AssistantConfigService  # noqa: E402
-
-        svc = AssistantConfigService(self.db)
-        svc.sync_system_skills()
-        svc.sync_standalone_system_targets()
-
-        workflow = next(
-            item for item in svc.list_workflows(include_disabled=True)
-            if item.name == "system_context_capture__workflow"
-        )
-        node_by_id = {node.node_id: node for node in (workflow.nodes or [])}
-
-        start_cfg = dict(node_by_id["start"].config or {})
-        self.assertEqual(start_cfg.get("memoryMode"), "off")
-        self.assertIn("llm_prepare_lookup", node_by_id)
-        self.assertIn("tool_tags", node_by_id)
-        self.assertIn("tool_search_similar", node_by_id)
-        self.assertIn("code_pick_top1", node_by_id)
-
-        materialize_sources = {
-            edge.source_node_id
-            for edge in (workflow.edges or [])
-            if edge.target_node_id == "llm_materialize"
-        }
-        self.assertEqual(materialize_sources, {"tool_types", "tool_tags"})
-
-        lookup_sources = {
-            edge.source_node_id
-            for edge in (workflow.edges or [])
-            if edge.target_node_id == "llm_prepare_lookup"
-        }
-        self.assertEqual(lookup_sources, {"llm_materialize"})
-
-        search_cfg = dict(node_by_id["tool_search_similar"].config or {})
-        search_bindings = search_cfg.get("inputBindings") or search_cfg.get("input_bindings") or {}
-        self.assertEqual(search_cfg.get("toolName") or search_cfg.get("tool_name"), "search_similar_entries")
-        self.assertEqual(search_bindings.get("query"), "{{llm_prepare_lookup.lookup_query}}")
-        self.assertEqual(search_bindings.get("limit"), "8")
-
-        top1_sources = {
-            edge.source_node_id
-            for edge in (workflow.edges or [])
-            if edge.target_node_id == "code_pick_top1"
-        }
-        self.assertEqual(top1_sources, {"tool_search_similar"})
-
-        decide_sources = {
-            edge.source_node_id
-            for edge in (workflow.edges or [])
-            if edge.target_node_id == "llm_decide"
-        }
-        self.assertEqual(decide_sources, {"code_pick_top1"})
-
-        decide_cfg = dict(node_by_id["llm_decide"].config or {})
-        output_fields = decide_cfg.get("outputFields") or decide_cfg.get("output_fields") or []
-        output_names = {item.get("name") for item in output_fields if isinstance(item, dict)}
-        self.assertEqual(output_names, {"action", "entry_id", "reason"})
-        decide_user_input = str(decide_cfg.get("userInput") or decide_cfg.get("user_input") or "")
-        self.assertIn("top1_candidate", decide_user_input)
-        self.assertIn("candidate_found", decide_user_input)
-        self.assertNotIn("primary_candidates", decide_user_input)
-        self.assertNotIn("secondary_candidates", decide_user_input)
-
-        route_cfg = dict(node_by_id["if_route"].config or {})
-        branches = route_cfg.get("branches") or []
-        merge_branch = next(item for item in branches if item.get("id") == "merge")
-        merge_conditions = merge_branch.get("conditions") or []
-        self.assertIn(
-            {
-                "id": "merge_action",
-                "variable": "llm_decide.action",
-                "operator": "is",
-                "value": "merge",
-            },
-            merge_conditions,
-        )
-        self.assertIn(
-            {
-                "id": "merge_entry_id",
-                "variable": "llm_decide.entry_id",
-                "operator": "is_not_empty",
-                "value": "",
-            },
-            merge_conditions,
-        )
-
-    def test_standalone_system_workflow_context_capture_uses_horizontal_parallel_layout(self) -> None:
-        from app.assistant_config.service import AssistantConfigService  # noqa: E402
-
-        svc = AssistantConfigService(self.db)
-        svc.sync_system_skills()
-        svc.sync_standalone_system_targets()
-
-        workflow = next(
-            item for item in svc.list_workflows(include_disabled=True)
-            if item.name == "system_context_capture__workflow"
-        )
-        position_map = {
-            node.node_id: (int(round(float(node.position_x))), int(round(float(node.position_y))))
-            for node in (workflow.nodes or [])
-        }
-        for node_id, expected in EXPECTED_CONTEXT_CAPTURE_POSITIONS.items():
-            self.assertEqual(position_map.get(node_id), expected, f"context_capture.{node_id} position mismatch")
-
-        for edge in (workflow.edges or []):
-            source = next(node for node in workflow.nodes if node.node_id == edge.source_node_id)
-            target = next(node for node in workflow.nodes if node.node_id == edge.target_node_id)
-            self.assertGreater(
-                int(round(float(target.position_x))),
-                int(round(float(source.position_x))),
-                f"context_capture edge {edge.edge_id} should flow left-to-right",
-            )
-
-    def test_standalone_system_workflow_prompts_include_lookup_and_merge_guardrails(self) -> None:
-        from app.assistant_config.service import AssistantConfigService  # noqa: E402
-
-        svc = AssistantConfigService(self.db)
-        svc.sync_system_skills()
-        svc.sync_standalone_system_targets()
-
-        workflow = next(
-            item for item in svc.list_workflows(include_disabled=True)
-            if item.name == "system_context_capture__workflow"
-        )
-        node_by_id = {node.node_id: node for node in (workflow.nodes or [])}
-
-        lookup_prompt = str(dict(node_by_id["llm_prepare_lookup"].config or {}).get("systemPrompt") or "")
-        decide_prompt = str(dict(node_by_id["llm_decide"].config or {}).get("systemPrompt") or "")
-        merge_prompt = str(dict(node_by_id["llm_merge_rewrite"].config or {}).get("systemPrompt") or "")
-
-        self.assertIn("稳定主体/持久对象", lookup_prompt)
-        self.assertIn("不要把整句原文照抄", lookup_prompt)
-        self.assertIn("只负责找候选", decide_prompt)
-        self.assertIn("宁可多建一条，也不要错并", decide_prompt)
-        self.assertIn("兜底默认值", merge_prompt)
-        self.assertIn("今天", merge_prompt)
 
     def test_system_target_audit_reports_only_expected_origins(self) -> None:
         from app.assistant_config.models import AssistantWorkflow  # noqa: E402

@@ -417,18 +417,18 @@ class FaultMatrixUnitTests(unittest.TestCase):
         self.assertEqual(after.dispatch_disposition, "awaiting_call_approval")
 
     def test_F19_full_asset_fails_golden_audit(self) -> None:
-        import json
-        from pathlib import Path
         from app.assistant.capability_calls.release_admission import (
             audit_golden_workflow_graph,
         )
 
-        path = (
-            Path(__file__).resolve().parents[1]
-            / "app/assistant/workflow/system_assets/workflows/smart_capture.json"
-        )
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        audit = audit_golden_workflow_graph(payload, asset_key="smart_capture")
+        payload = {
+            "nodes": [
+                {"nodeType": "human_in_loop", "config": {}},
+                {"nodeType": "tool", "config": {"toolName": "update_entry"}},
+            ],
+            "edges": [],
+        }
+        audit = audit_golden_workflow_graph(payload, asset_key="synthetic_legacy_write_workflow")
         self.assertFalse(audit.ok)
         self.assertTrue(audit.has_human_node)
 

@@ -6,14 +6,12 @@ from app.assistant.workflow.system_assets.loader import (
     load_system_workflow_asset,
 )
 from app.assistant.workflow.system_assets.registry import (
-    CONTEXT_CAPTURE_ASSET_KEY,
     GENERAL_CHAT_ASSET_KEY,
     MONTHLY_REPORT_ASSET_KEY,
     PERIODIC_REVIEW_ASSET_KEY,
     PERIODIC_REVIEW_CORE_ASSET_KEY,
     QUICK_STATS_ASSET_KEY,
-    SMART_CAPTURE_ASSET_KEY,
-    SMART_CAPTURE_RELATION_FOLLOWUP_ASSET_KEY,
+    SMART_CAPTURE_GOLDEN_CREATE_ASSET_KEY,
     WEEKLY_REPORT_ASSET_KEY,
     SystemAgentAssetDefinition,
     SystemAssistantAssetDefinition,
@@ -26,14 +24,12 @@ from app.assistant.workflow.system_assets.registry import (
 )
 
 __all__ = [
-    "CONTEXT_CAPTURE_ASSET_KEY",
     "GENERAL_CHAT_ASSET_KEY",
     "MONTHLY_REPORT_ASSET_KEY",
     "PERIODIC_REVIEW_ASSET_KEY",
     "PERIODIC_REVIEW_CORE_ASSET_KEY",
     "QUICK_STATS_ASSET_KEY",
-    "SMART_CAPTURE_ASSET_KEY",
-    "SMART_CAPTURE_RELATION_FOLLOWUP_ASSET_KEY",
+    "SMART_CAPTURE_GOLDEN_CREATE_ASSET_KEY",
     "WEEKLY_REPORT_ASSET_KEY",
     "SystemAgentAssetDefinition",
     "SystemAssistantAssetDefinition",

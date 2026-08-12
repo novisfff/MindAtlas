@@ -53,20 +53,17 @@ from app.openclaw_integration.schemas import (
     OpenClawCatalogSourceListResponse,
     OpenClawCatalogSourceResponse,
     OpenClawCatalogSourceType,
-    OpenClawCreateRelationRequest,
     OpenClawEntryRecordResponse,
     OpenClawGetEntryRequest,
     OpenClawIntegrationSettingsResponse,
     OpenClawIntegrationUpdateRequest,
     OpenClawQueryKnowledgeGraphRequest,
-    OpenClawRelationRecordResponse,
     OpenClawRotateSecretResponse,
     OpenClawRuntimeCapabilityResponse,
     OpenClawSearchEntriesRequest,
     OpenClawSearchEntriesResponse,
     OpenClawToolResponseMode,
 )
-from app.relation.models import RelationType
 from app.system_settings.models import AppSetting
 from app.system_settings.runtime_config_service import resolve_runtime_knowledge_graph_config
 from app.system_settings.service import resolve_system_locale
@@ -76,8 +73,11 @@ logger = logging.getLogger(__name__)
 OPENCLAW_INTEGRATION_CONFIG_KEY = "openclaw_integration_config"
 OPENCLAW_CAPABILITY_KEY_RE = re.compile(r"^[a-z0-9_]+$")
 OPENCLAW_SCHEMA_FIELD_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-OPENCLAW_SYSTEM_ITEM_VERSION = 10
+OPENCLAW_SYSTEM_ITEM_VERSION = 11
 OPENCLAW_CAPTURE_RETIRED_SOURCE_TOOL_NAMES = frozenset({"openclaw_capture_entry"})
+OPENCLAW_RELATION_RETIRED_SOURCE_TOOL_NAMES = frozenset(
+    {"create_relation", "openclaw_create_relation"}
+)
 OPENCLAW_PERIODIC_REVIEW_RETIRED_SOURCE_TOOL_NAMES = frozenset(
     {
         "generate_weekly_report",
@@ -87,12 +87,13 @@ OPENCLAW_PERIODIC_REVIEW_RETIRED_SOURCE_TOOL_NAMES = frozenset(
     }
 )
 OPENCLAW_RETIRED_SOURCE_TOOL_NAMES = (
-    OPENCLAW_CAPTURE_RETIRED_SOURCE_TOOL_NAMES | OPENCLAW_PERIODIC_REVIEW_RETIRED_SOURCE_TOOL_NAMES
+    OPENCLAW_CAPTURE_RETIRED_SOURCE_TOOL_NAMES
+    | OPENCLAW_RELATION_RETIRED_SOURCE_TOOL_NAMES
+    | OPENCLAW_PERIODIC_REVIEW_RETIRED_SOURCE_TOOL_NAMES
 )
 OPENCLAW_SOURCE_TOOL_ALIAS_MAP: dict[str, str] = {
     "openclaw_search_entries": "search_entries",
     "openclaw_get_entry": "get_entry_detail",
-    "openclaw_create_relation": "create_relation",
     "openclaw_query_knowledge_graph": "query_knowledge_graph",
 }
 
@@ -648,21 +649,6 @@ def _build_openclaw_entry_record(payload: dict[str, Any]) -> dict[str, Any]:
     ).model_dump(mode="json", by_alias=True)
 
 
-def _build_openclaw_relation_record(payload: dict[str, Any]) -> dict[str, Any]:
-    return OpenClawRelationRecordResponse.model_validate(
-        {
-            "id": payload.get("id"),
-            "sourceEntryId": payload.get("source_entry_id", payload.get("sourceEntryId")),
-            "sourceEntryTitle": payload.get("source_entry_title", payload.get("sourceEntryTitle")),
-            "targetEntryId": payload.get("target_entry_id", payload.get("targetEntryId")),
-            "targetEntryTitle": payload.get("target_entry_title", payload.get("targetEntryTitle")),
-            "relationTypeCode": payload.get("relation_type_code", payload.get("relationTypeCode")),
-            "relationTypeName": payload.get("relation_type_name", payload.get("relationTypeName")),
-            "description": payload.get("description"),
-        }
-    ).model_dump(mode="json", by_alias=True)
-
-
 def _resolve_openclaw_entry_type_code(service: "OpenClawIntegrationService", entry_type: str | None) -> str | None:
     normalized = _normalize_optional_text(entry_type)
     if normalized is None:
@@ -684,12 +670,10 @@ def _resolve_openclaw_entry_type_code(service: "OpenClawIntegrationService", ent
 from app.openclaw_integration.capability_adapter import (  # noqa: E402
     OPENCLAW_TOOL_CONTRACT_ADAPTERS,
     OpenClawToolContractAdapter as _OpenClawToolContractAdapter,
-    build_create_relation_response as _build_create_relation_response,
     build_get_entry_response as _build_get_entry_response,
     build_query_knowledge_graph_response as _build_query_knowledge_graph_response,
     build_search_entries_response as _build_search_entries_response,
     execute_shared_capability,
-    prepare_create_relation_request as _prepare_create_relation_request,
     prepare_get_entry_request as _prepare_get_entry_request,
     prepare_query_knowledge_graph_request as _prepare_query_knowledge_graph_request,
     prepare_search_entries_request as _prepare_search_entries_request,
@@ -853,8 +837,14 @@ class OpenClawIntegrationService:
         if lowered in OPENCLAW_CAPTURE_RETIRED_SOURCE_TOOL_NAMES:
             return _localized_message(
                 locale,
-                zh="这个字段级创建记录来源已从 OpenClaw 官方能力目录中退役。请改用“智能创建记录（submit_context_capture）”系统能力，或重新绑定到其他来源。",
-                en="This field-level entry creation source has been retired from the official OpenClaw capability catalog. Use the smart create entry system capability instead, or rebind this item to another source.",
+                zh="这个字段级创建记录来源已从 OpenClaw 官方能力目录中退役。请重新绑定到受支持的只读来源。",
+                en="This field-level entry creation source has been retired from the official OpenClaw capability catalog. Rebind this item to a supported read-only source.",
+            )
+        if lowered in OPENCLAW_RELATION_RETIRED_SOURCE_TOOL_NAMES:
+            return _localized_message(
+                locale,
+                zh="创建关联不再是 OpenClaw Agent 能力。请重新绑定到受支持的只读来源。",
+                en="Creating relations is no longer an OpenClaw Agent capability. Rebind this item to a supported read-only source.",
             )
         if lowered in OPENCLAW_PERIODIC_REVIEW_RETIRED_SOURCE_TOOL_NAMES:
             return _localized_message(
@@ -868,6 +858,14 @@ class OpenClawIntegrationService:
             en="This source has been retired from the official OpenClaw capability catalog. Rebind this item to another source.",
         )
 
+    @staticmethod
+    def _unsupported_system_tool_source_reason(*, locale: str) -> str:
+        return _localized_message(
+            locale,
+            zh="该系统工具不受 OpenClaw 支持；只允许绑定显式适配的只读系统工具。",
+            en="This system tool is not supported by OpenClaw; only explicitly adapted read-only system tools may be bound.",
+        )
+
     def _retired_catalog_item_state(
         self,
         item: OpenClawCapabilityItem,
@@ -878,6 +876,17 @@ class OpenClawIntegrationService:
             return False, None
         if self._is_retired_source_tool_name(item.source_tool_name):
             return True, self._retired_source_reason(item.source_tool_name, locale=locale)
+        resolved = self._resolve_tool_source(
+            tool_id=item.tool_id,
+            source_tool_name=item.source_tool_name,
+            locale=locale,
+        )
+        if (
+            resolved is not None
+            and resolved.is_system
+            and self._resolve_tool_contract_adapter(resolved.source_tool_name) is None
+        ):
+            return True, self._unsupported_system_tool_source_reason(locale=locale)
         return False, None
 
     def _resolve_tool_source(
@@ -1269,15 +1278,6 @@ class OpenClawIntegrationService:
         )
         return [str(row[0]).strip() for row in rows if row and str(row[0]).strip()]
 
-    def _list_enabled_relation_type_codes(self) -> list[str]:
-        rows = (
-            self.db.query(RelationType.code)
-            .filter(RelationType.enabled.is_(True))
-            .order_by(func.lower(RelationType.code))
-            .all()
-        )
-        return [str(row[0]).strip() for row in rows if row and str(row[0]).strip()]
-
     def _get_catalog_item(self, item_id: UUID) -> OpenClawCapabilityItem:
         item = (
             self.db.query(OpenClawCapabilityItem)
@@ -1325,26 +1325,13 @@ class OpenClawIntegrationService:
                     zh="LightRAG 配置尚未完整就绪。",
                     en="LightRAG configuration is still incomplete.",
                 )
-        if definition.key in {"submit_context_capture", "search_entries", "get_entry"}:
+        if definition.key in {"search_entries", "get_entry"}:
             has_entry_type = self.db.query(EntryType.id).filter(EntryType.enabled.is_(True)).first() is not None
             if not has_entry_type:
                 return False, _localized_message(
                     locale,
                     zh="系统里还没有可用的记录类型。",
                     en="No enabled entry types are available yet.",
-                )
-        if definition.key == "create_relation":
-            has_relation_type = (
-                self.db.query(RelationType.id)
-                .filter(RelationType.enabled.is_(True))
-                .first()
-                is not None
-            )
-            if not has_relation_type:
-                return False, _localized_message(
-                    locale,
-                    zh="系统里还没有可用的关系类型。",
-                    en="No enabled relation types are available yet.",
                 )
         return True, None
 
@@ -1607,13 +1594,6 @@ class OpenClawIntegrationService:
                 entry_type_codes = self._list_enabled_entry_type_codes()
                 if entry_type_codes:
                     entry_type_schema["enum"] = entry_type_codes
-        elif source_tool_name == "create_relation":
-            relation_type_schema = properties.get("relationType")
-            if isinstance(relation_type_schema, dict):
-                relation_type_codes = self._list_enabled_relation_type_codes()
-                if relation_type_codes:
-                    relation_type_schema["enum"] = relation_type_codes
-
         return enriched
 
     def _serialize_catalog_item(
@@ -1979,6 +1959,12 @@ class OpenClawIntegrationService:
                     code=OPENCLAW_INVALID_SOURCE_ERROR_CODE,
                     message=self._retired_source_reason(resolved.source_tool_name, locale=locale),
                 )
+            if resolved.is_system and self._resolve_tool_contract_adapter(resolved.source_tool_name) is None:
+                raise ApiException(
+                    status_code=422,
+                    code=OPENCLAW_INVALID_SOURCE_ERROR_CODE,
+                    message=self._unsupported_system_tool_source_reason(locale=locale),
+                )
             default_input_schema, default_output_schema, default_input_summary, default_output_summary, default_mode = (
                 self._default_source_contract_for_tool(
                     tool_id=request.tool_id,
@@ -2064,6 +2050,8 @@ class OpenClawIntegrationService:
                 if name and not enabled
             }
             for definition in system_defs:
+                if self._resolve_tool_contract_adapter(definition.name) is None:
+                    continue
                 if self._is_retired_source_tool_name(definition.name):
                     continue
                 is_disabled = definition.name in disabled_tool_names

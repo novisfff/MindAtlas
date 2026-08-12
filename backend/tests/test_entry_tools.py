@@ -145,10 +145,11 @@ class EntryToolsValidationTests(unittest.TestCase):
                         **kwargs,
                     )
 
-    def test_update_entry_rejects_invalid_explicit_time_range(self) -> None:
+    def test_update_entry_is_an_unsupported_write_boundary(self) -> None:
+        from app.assistant.capabilities.supported_writes import CapabilityNotSupported  # noqa: E402
         from app.assistant.tools.entry_tools import update_entry  # noqa: E402
 
-        with self.assertRaises(ValueError) as ctx:
+        with self.assertRaises(CapabilityNotSupported) as ctx:
             self._with_db(
                 update_entry,
                 entry_id=str(self.existing_entry.id),
@@ -158,7 +159,7 @@ class EntryToolsValidationTests(unittest.TestCase):
                 time_to="2026-04-01",
             )
 
-        self.assertIn("time_from", str(ctx.exception))
+        self.assertEqual(ctx.exception.error.safe_code, "capability_not_supported")
 
     def test_search_similar_entries_groups_sources_by_entry_and_prioritizes_direct_entry_hits(self) -> None:
         from app.assistant.tools.entry_tools import build_search_similar_entries_payload  # noqa: E402

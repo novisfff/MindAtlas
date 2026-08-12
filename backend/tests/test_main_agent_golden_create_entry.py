@@ -156,21 +156,13 @@ class GoldenGraphAuditTests(unittest.TestCase):
         self.assertNotIn("workflow_call", audit.node_types)
         self.assertNotIn("code_executor", audit.node_types)
 
-    def test_full_smart_capture_fails_golden_audit(self) -> None:
-        from app.assistant.capability_calls.release_admission import (
-            audit_golden_workflow_graph,
-        )
-
+    def test_legacy_full_smart_capture_asset_is_removed(self) -> None:
         path = (
             Path(__file__).resolve().parents[1]
             / "app/assistant/workflow/system_assets/workflows"
             / "smart_capture.json"
         )
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        audit = audit_golden_workflow_graph(payload, asset_key="smart_capture")
-        self.assertFalse(audit.ok)
-        self.assertTrue(audit.has_human_node)
-        self.assertIn("update_entry", audit.tool_names)
+        self.assertFalse(path.exists())
 
     def test_registry_has_hidden_golden_asset(self) -> None:
         from app.assistant.workflow.system_assets.registry import (

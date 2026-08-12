@@ -11,13 +11,10 @@ SystemAssistantAssetKind = Literal["workflow", "agent"]
 SystemAssistantAssetUsageTag = Literal["skill_default", "standalone_target", "system_behavior_default"]
 
 QUICK_STATS_ASSET_KEY = "quick_stats"
-SMART_CAPTURE_ASSET_KEY = "smart_capture"
-SMART_CAPTURE_RELATION_FOLLOWUP_ASSET_KEY = "smart_capture_relation_followup"
 SMART_CAPTURE_GOLDEN_CREATE_ASSET_KEY = "smart_capture_golden_create"
 PERIODIC_REVIEW_ASSET_KEY = "periodic_review"
 PERIODIC_REVIEW_CORE_ASSET_KEY = "periodic_review_core"
 GENERAL_CHAT_ASSET_KEY = DEFAULT_SKILL_NAME
-CONTEXT_CAPTURE_ASSET_KEY = "context_capture"
 WEEKLY_REPORT_ASSET_KEY = "weekly_report"
 MONTHLY_REPORT_ASSET_KEY = "monthly_report"
 
@@ -118,53 +115,7 @@ _ASSET_TEMPLATES: tuple[_SystemAssistantAssetTemplate, ...] = (
             ),
         ),
     ),
-    _SystemAssistantAssetTemplate(
-        asset_key=SMART_CAPTURE_ASSET_KEY,
-        kind="workflow",
-        canonical_name="smart_capture__workflow",
-        display_name=_LocalizedText(
-            zh="智能创建记录工作流",
-            en="Smart Capture Workflow",
-        ),
-        description=_LocalizedText(
-            zh="智能创建记录（面向系统技能与应用内 AI 助手优先使用的引导式记录入库流程：先检索相似记录，再由用户决定新建或合并，写入成功后还可继续确认推荐关系；也适用于通用的创建/新增/记录/保存诉求）",
-            en="A guided capture workflow used primarily by system skills and the in-app AI assistant: it checks for similar entries first, lets the user choose create-new vs merge-into-existing, and can follow successful writes with relation suggestions. It still serves general create/add/save/capture intents as a reusable workflow.",
-        ),
-        usage_tags=("skill_default",),
-        skill_name="smart_capture",
-        skill_intent_examples=_LocalizedTextList(
-            zh=(
-                "帮我记录一下今天学到的 Python 技巧",
-                "把下面内容保存为一条笔记：……",
-                "创建一个新任务：下周一交报告",
-                "记笔记：React 19 的新特性包括...",
-                "我今天学习了React 19的特性",
-            ),
-            en=(
-                "Please save what I learned about Python today",
-                "Save the following as a note: ...",
-                "Create a new task: submit the report next Monday",
-                "Take a note: React 19 introduces...",
-                "Today I learned about the new features in React 19",
-            ),
-        ),
-    ),
-    _SystemAssistantAssetTemplate(
-        asset_key=SMART_CAPTURE_RELATION_FOLLOWUP_ASSET_KEY,
-        kind="workflow",
-        canonical_name="system_smart_capture_relation_followup__workflow",
-        display_name=_LocalizedText(
-            zh="智能创建记录关系补全工作流",
-            en="Smart Capture Relation Follow-up Workflow",
-        ),
-        description=_LocalizedText(
-            zh="供 smart_capture 在记录写入成功后复用的关系推荐与人工确认子流程，负责补全候选关系、批量确认并创建所选关联。",
-            en="A hidden follow-up workflow reused by smart_capture after record persistence. It enriches relation recommendations, asks for batch human confirmation, and creates the selected relations.",
-        ),
-        hidden=True,
-        usage_tags=("standalone_target",),
-    ),
-    # Plan 08 golden create-only path. Hidden; not a replacement for full smart_capture.
+    # Production's smart_capture skill uses this audited create-only path.
     # Topology: start -> reviewed structured create input -> create_entry -> output.
     # Approval is call-owned via LedgerDispatcher (no Workflow human_in_loop node).
     _SystemAssistantAssetTemplate(
@@ -176,15 +127,27 @@ _ASSET_TEMPLATES: tuple[_SystemAssistantAssetTemplate, ...] = (
             en="Smart Capture Golden Create",
         ),
         description=_LocalizedText(
-            zh="Plan 08 隐藏的 create-only golden 工作流：结构化准备后仅调用 create_entry。"
+            zh="受审计的 create-only 创建记录工作流：结构化准备后仅调用 create_entry。"
             "无人工节点、无更新/合并/关系/子流程。审批由 CapabilityCall 账本持有。",
-            en="Plan 08 hidden create-only golden workflow: structured preparation then "
+            en="Audited create-only workflow: structured preparation then "
             "exactly one create_entry call. No human nodes, update/merge/relation/"
             "follow-up edges. Approval is owned by the CapabilityCall ledger.",
         ),
         hidden=True,
-        usage_tags=("standalone_target",),
+        usage_tags=("skill_default",),
         skill_name="smart_capture",
+        skill_intent_examples=_LocalizedTextList(
+            zh=(
+                "帮我记录一下今天学到的 Python 技巧",
+                "把下面内容保存为一条笔记：……",
+                "创建一个新任务：下周一交报告",
+            ),
+            en=(
+                "Please save what I learned about Python today",
+                "Save the following as a note: ...",
+                "Create a new task: submit the report next Monday",
+            ),
+        ),
     ),
     _SystemAssistantAssetTemplate(
         asset_key=PERIODIC_REVIEW_ASSET_KEY,
@@ -249,21 +212,6 @@ _ASSET_TEMPLATES: tuple[_SystemAssistantAssetTemplate, ...] = (
             zh=(),
             en=(),
         ),
-    ),
-    _SystemAssistantAssetTemplate(
-        asset_key=CONTEXT_CAPTURE_ASSET_KEY,
-        kind="workflow",
-        canonical_name="system_context_capture__workflow",
-        display_name=_LocalizedText(
-            zh="智能上下文入库工作流",
-            en="Smart Context Capture Workflow",
-        ),
-        description=_LocalizedText(
-            zh="接收一段足以生成新记录或修正已有记录的候选上下文，先提取检索线索与最终字段，再判断应新建还是合并到已有记录的系统工作流。",
-            en="A system workflow that accepts a candidate record context rich enough to create a new record or correct an existing one, derives retrieval clues and final fields, and then decides whether to create a new entry or merge into an existing one.",
-        ),
-        legacy_canonical_names=("system_openclaw_context_capture__workflow",),
-        usage_tags=("standalone_target",),
     ),
     _SystemAssistantAssetTemplate(
         asset_key=WEEKLY_REPORT_ASSET_KEY,

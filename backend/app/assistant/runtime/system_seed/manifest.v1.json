@@ -7,21 +7,21 @@
   "capabilityBindings": [
     {
       "key": "create_entry",
-      "targetContractDigest": "78ea168c7d4db0042cb3f79db28dcd3a3753231985a09e7fa0ff28d866ed9980",
+      "targetContractDigest": "5c711cc8d634e1421ec1457613e2045626425a216b678544ca7172489befef20",
       "type": "tool"
     },
     {
       "key": "get_entry_detail",
-      "targetContractDigest": "830847261d280dece865b84226b5f35f8624ef2c98a4b6e9c1d461c9ba719793",
+      "targetContractDigest": "e6f1b403a34351a9f15dc19f527b86d1c8a46fe389bf7af5479dc4f4155e6880",
       "type": "tool"
     },
     {
       "key": "search_entries",
-      "targetContractDigest": "0f5c04d84f3954e58927c26b694dd9c8d135df472352b782c6f17123b1d58559",
+      "targetContractDigest": "397a732793c6a7ed07fceac3da3174298f7d82d25dc26a22a6300cdbf8a44b56",
       "type": "tool"
     }
   ],
-  "manifestDigest": "3ba69223e9c1a3ab1783c8a549a1b7cf56410f36f60a7fb67ba1f4fc84275237",
+  "manifestDigest": "933417b0783f803459205aab8f3a3a695c98bff28fe568f4a21dd803d93b30b0",
   "modelBindingSlots": [
     "assistant"
   ],
@@ -32,7 +32,7 @@
     "sha256": "0d755a8ab001de152508b4a3a8474fc8c037fe80bed2b46a7ac0dadf364aed11"
   },
   "schemaVersion": 1,
-  "seedContractDigest": "1b91fef44c4b1b0d68bcd5ebaf702c02985c41124f73a58a2e4a92f93f7ea040",
+  "seedContractDigest": "a728d696b086b0ced78a37de80a7831cd788e22f7668f083a7245706b13334ba",
   "skillArtifacts": [
     {
       "byteSize": 655,

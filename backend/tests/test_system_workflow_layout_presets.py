@@ -22,30 +22,10 @@ EXPECTED_WORKFLOW_POSITIONS: dict[str, dict[str, tuple[int, int]]] = {
         "output_final": (1760, 320),
     },
     "smart_capture": {
-        "start": (80, 320),
-        "tool_types": (480, 320),
-        "tool_tags": (880, 320),
-        "llm_prepare_lookup": (1280, 320),
-        "tool_search_similar": (1680, 320),
-        "llm_rank_candidates": (2080, 320),
-        "if_has_candidates": (2480, 320),
-        "human_triage": (2880, 170),
-        "output_triage_cancelled": (3280, 30),
-        "if_triage_route": (3280, 170),
-        "output_merge_target_required": (3680, 30),
-        "llm_materialize": (3680, 320),
-        "if_write_mode": (4080, 320),
-        "tool_get_existing": (4480, 170),
-        "llm_merge_rewrite": (4880, 170),
-        "code_prepare_write_payload": (5280, 320),
-        "human_confirm_write": (5680, 320),
-        "output_write_cancelled": (6080, 460),
-        "if_persist_route": (6080, 320),
-        "tool_update": (6480, 170),
-        "tool_create": (6480, 460),
-        "call_relation_followup": (6880, 320),
-        "llm_finalize_reply": (7280, 320),
-        "output_final": (7680, 320),
+        "start": (80, 240),
+        "llm_prepare_create": (480, 240),
+        "tool_create": (880, 240),
+        "output_final": (1280, 240),
     },
     "periodic_review": {
         "start": (120, 320),
@@ -54,24 +34,6 @@ EXPECTED_WORKFLOW_POSITIONS: dict[str, dict[str, tuple[int, int]]] = {
         "output_final": (1350, 320),
     },
 }
-
-EXPECTED_STANDALONE_WORKFLOW_POSITIONS: dict[str, dict[str, tuple[int, int]]] = {
-    "smart_capture_relation_followup": {
-        "start": (80, 320),
-        "code_normalize_persisted": (480, 320),
-        "tool_relation_recs": (880, 320),
-        "iter_relation_details": (1280, 320),
-        "if_relation_candidates": (1680, 320),
-        "human_confirm_relations": (2080, 320),
-        "output_no_relation_candidates": (1680, 460),
-        "if_selected_relations": (2480, 320),
-        "output_relations_rejected": (2080, 460),
-        "iter_create_relations": (2880, 320),
-        "output_no_relations_selected": (2480, 460),
-        "output_relations_created": (3280, 320),
-    },
-}
-
 
 def _node_position_map(workflow) -> dict[str, tuple[int, int]]:
     return {
@@ -210,19 +172,3 @@ class SystemWorkflowLayoutPresetTests(unittest.TestCase):
         refreshed = self.db.get(AssistantWorkflow, workflow_id)
         self.assertIsNotNone(refreshed)
         self.assertIsNone(refreshed.workflow_viewport)
-
-    def test_standalone_relation_followup_asset_uses_vertical_exit_layout(self) -> None:
-        from app.assistant.workflow.system_assets import load_system_workflow_asset  # noqa: E402
-
-        for locale in ("zh", "en"):
-            workflow = load_system_workflow_asset("smart_capture_relation_followup", locale=locale)
-            position_map = {
-                node.node_id: (int(round(float(node.position_x))), int(round(float(node.position_y))))
-                for node in (workflow.nodes or [])
-            }
-            for node_id, expected in EXPECTED_STANDALONE_WORKFLOW_POSITIONS["smart_capture_relation_followup"].items():
-                self.assertEqual(
-                    position_map.get(node_id),
-                    expected,
-                    f"smart_capture_relation_followup[{locale}].{node_id} position mismatch",
-                )

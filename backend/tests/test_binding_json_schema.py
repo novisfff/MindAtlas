@@ -387,25 +387,9 @@ SYSTEM_TOOL_GOLDEN_DIGESTS: dict[str, tuple[str, str]] = {
         "b77249cf8ba259c0b5482a4886f64c3877e306e0f97663e572ebb7d07e566091",
         "e468374fea087a54ad782602c8cf15e387e1d06977198fc0c3d870349249adba",
     ),
-    "update_entry": (
-        "d20d33f63ee93b6110399908ea3ae2d009021c1d4e3b9fb2484e92268ca1f8ed",
-        "306386d6bcde8e793a9c6bf9af755b379313cccbee1fcf905ba0f6f2a27b13f6",
-    ),
-    "create_relation": (
-        "61717edf33ae9570fb644c64dc1d1e91e0f4fb6f016e9f72567be96d24ebc389",
-        "f609b84310293c2fe4bb57a53fa257ba5c5ebd964e7bb6f5d811b3d55ff244ec",
-    ),
     "query_knowledge_graph": (
         "e5e366e05faddde4c4263b8c738ce7ad86408f0018bf41da2ced53b37399059e",
         "bf89bb7480489f550e86ee7a3cbb446c53fc1ff3a4eb1a274cff757ace9efaab",
-    ),
-    "generate_weekly_report": (
-        "30552b314371c3ffb2c170398bb463ec3c68e1f37bdb279b90ce6c2479ab2bb6",
-        "6ec9f4f024ea7f6a690c1105b23f75fdc61d58a5aee7305abbd77d1a80eba544",
-    ),
-    "generate_monthly_report": (
-        "c74660565952e1fceb3bbb7f1fc2927fd9093c9647ed710747808a24f2964c77",
-        "7c97201c36ec7992d2f3ab744ae8017ec87f503d011756c8b422449dc70f462a",
     ),
     "get_statistics": (
         "e23292601e9b7bc5964b6fb0a10871d437f22b8f4f344600ebfbe4ed3397e0dd",
@@ -438,7 +422,7 @@ SYSTEM_TOOL_GOLDEN_DIGESTS: dict[str, tuple[str, str]] = {
 }
 
 SYSTEM_TOOL_CONTRACT_SET_DIGEST = (
-    "4f5d489af8a500ab4b991b29d9e4ffa1ee75dbe1dfa76f4869ede655f4bb60bf"
+    "fb14255be369d04b575425f8e0eb0edcc8f358bd14343a45072da23e37c34448"
 )
 
 

@@ -48,12 +48,9 @@ class SystemDefaultsLoaderTests(unittest.TestCase):
             {item.asset_key for item in workflow_assets},
             {
                 "quick_stats",
-                "smart_capture",
                 "smart_capture_golden_create",
-                "smart_capture_relation_followup",
                 "periodic_review",
                 "periodic_review_core",
-                "context_capture",
                 "weekly_report",
                 "monthly_report",
             },
@@ -188,60 +185,22 @@ class SystemDefaultsLoaderTests(unittest.TestCase):
         self.assertEqual(core_nodes["output_final"].config["outputMode"], "structured")
         self.assertEqual(core_nodes["output_final"].config["outputFields"][0]["name"], "content")
 
-    def test_smart_capture_assets_expose_wrapper_and_relation_followup_workflows(self) -> None:
+    def test_smart_capture_golden_asset_is_create_only(self) -> None:
         from app.assistant.workflow.system_assets import load_system_workflow_asset  # noqa: E402
 
-        wrapper = load_system_workflow_asset("smart_capture", locale="zh")
-        followup = load_system_workflow_asset("smart_capture_relation_followup", locale="zh")
+        golden = load_system_workflow_asset("smart_capture_golden_create", locale="zh")
+        nodes = {node.node_id: node for node in golden.nodes}
 
-        wrapper_nodes = {node.node_id: node for node in wrapper.nodes}
-        followup_nodes = {node.node_id: node for node in followup.nodes}
+        self.assertEqual([node.node_id for node in golden.nodes], ["start", "llm_prepare_create", "tool_create", "output_final"])
+        self.assertEqual(nodes["start"].config["memoryMode"], "off")
+        self.assertEqual(nodes["llm_prepare_create"].config["outputMode"], "structured")
+        self.assertEqual(nodes["tool_create"].config["toolName"], "create_entry")
+        self.assertEqual(nodes["output_final"].config["outputMode"], "text")
 
-        self.assertEqual(wrapper_nodes["call_relation_followup"].node_type, "workflow_call")
-        self.assertEqual(
-            wrapper_nodes["call_relation_followup"].config["targetSystemAssetKey"],
-            "smart_capture_relation_followup",
-        )
-        self.assertEqual(
-            wrapper_nodes["call_relation_followup"].config["exposedOutputFields"],
-            ["relation_status", "relation_candidate_count", "relation_created_count"],
-        )
-        self.assertEqual(wrapper_nodes["llm_finalize_reply"].node_type, "llm")
-        self.assertEqual(wrapper_nodes["llm_finalize_reply"].config["outputMode"], "text")
-        self.assertIn("{{start.user_input}}", wrapper_nodes["llm_finalize_reply"].config["userInput"])
-        self.assertIn("relation_status", wrapper_nodes["llm_finalize_reply"].config["userInput"])
-        self.assertEqual(
-            wrapper_nodes["output_final"].config["textTemplate"],
-            "{{llm_finalize_reply.response}}",
-        )
-        self.assertEqual(followup_nodes["start"].config["inputMode"], "structured")
-        self.assertEqual(followup_nodes["start"].config["memoryMode"], "off")
-        followup_start_fields = followup_nodes["start"].config["structuredFields"]
-        followup_start_field_names = [item["name"] for item in followup_start_fields]
-        self.assertNotIn("candidate_count", followup_start_field_names)
-        self.assertNotIn("merge_target_title", followup_start_field_names)
-        normalize_output_fields = followup_nodes["code_normalize_persisted"].config["outputFields"]
-        normalize_output_names = [item["name"] for item in normalize_output_fields]
-        self.assertIn("write_summary", normalize_output_names)
-        self.assertEqual(followup_nodes["human_confirm_relations"].config["fields"][0]["widget"], "checkbox_group")
-        self.assertEqual(followup_nodes["tool_relation_recs"].config["toolName"], "kb_relation_recommendations")
-        self.assertEqual(
-            followup_nodes["human_confirm_relations"].config["instruction"],
-            "{{code_normalize_persisted.write_summary}}",
-        )
-        for node_id in (
-            "output_no_relation_candidates",
-            "output_relations_rejected",
-            "output_no_relations_selected",
-            "output_relations_created",
-        ):
-            node_cfg = followup_nodes[node_id].config
-            self.assertEqual(node_cfg["outputMode"], "structured")
-            output_names = [item["name"] for item in node_cfg["outputFields"]]
-            self.assertEqual(
-                output_names,
-                ["relation_status", "relation_candidate_count", "relation_created_count", "relation_summary"],
-            )
+        for retired_asset in ("smart_capture", "smart_capture_relation_followup", "context_capture"):
+            with self.subTest(asset_key=retired_asset):
+                with self.assertRaises(RuntimeError):
+                    load_system_workflow_asset(retired_asset, locale="zh")
 
     def test_quick_stats_asset_uses_focus_extraction_and_parallel_stats_tools(self) -> None:
         from app.assistant.workflow.system_assets import load_system_workflow_asset  # noqa: E402

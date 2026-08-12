@@ -7,7 +7,7 @@ import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
-from typing import Any, Optional
+from typing import Any, NoReturn, Optional
 from uuid import UUID
 
 from langchain_core.tools import tool
@@ -15,6 +15,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import joinedload, selectinload
 
 from app.common.exceptions import ApiException
+from app.assistant.capabilities.supported_writes import unsupported_write_boundary
 from app.common.color_utils import pick_material_600_color
 from app.entry.models import Entry, TimeMode
 from app.entry.schemas import EntryRequest, EntrySearchRequest
@@ -709,7 +710,6 @@ def create_entry(
     return _serialize_entry_tool_result(entry)
 
 
-@tool
 def update_entry(
     entry_id: str,
     title: Optional[str] = None,
@@ -721,41 +721,23 @@ def update_entry(
     time_at: Optional[str] = None,
     time_from: Optional[str] = None,
     time_to: Optional[str] = None,
-) -> str:
-    """更新已有记录（写入数据库）。
+) -> NoReturn:
+    """Reject the retired Agent update path before any database access.
 
-    Args:
-        entry_id: 目标记录 UUID
-        title: 记录标题
-        summary: 摘要
-        content: 正文内容
-        type_code: 记录类型编码（为空时使用默认类型，非空但无效时报错）
-        tags: 标签名称列表
-        time_mode: 时间模式，"POINT" 或 "RANGE"（为空时按提供的时间字段推断，否则默认今天）
-        time_at: 当 time_mode="POINT" 时的日期 (YYYY-MM-DD)
-        time_from: 当 time_mode="RANGE" 时的起始日期 (YYYY-MM-DD)
-        time_to: 当 time_mode="RANGE" 时的结束日期 (YYYY-MM-DD)
-
-    Returns:
-        更新后的记录信息（JSON格式，字段结构与 create_entry 保持一致）
+    Human users continue to update Entries through the authenticated REST
+    route.  This retained Python symbol exists only to give stale Agent callers
+    one stable, non-writing error instead of an implicit create fallback.
     """
-    db = _get_db()
-    try:
-        target_id = UUID(str(entry_id).strip())
-    except ValueError as exc:
-        raise ValueError(f"无效的记录ID: {entry_id}") from exc
-
-    request = _build_entry_request(
-        db,
-        title=title,
-        summary=summary,
-        content=content,
-        type_code=type_code,
-        tags=tags,
-        time_mode=time_mode,
-        time_at=time_at,
-        time_from=time_from,
-        time_to=time_to,
+    del (
+        entry_id,
+        title,
+        summary,
+        content,
+        type_code,
+        tags,
+        time_mode,
+        time_at,
+        time_from,
+        time_to,
     )
-    entry = EntryService(db).update(target_id, request)
-    return _serialize_entry_tool_result(entry)
+    unsupported_write_boundary("update_entry", "direct_agent_boundary")

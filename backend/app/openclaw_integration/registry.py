@@ -4,10 +4,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Literal
 
-from app.assistant.workflow.system_assets import (
-    CONTEXT_CAPTURE_ASSET_KEY,
-    PERIODIC_REVIEW_CORE_ASSET_KEY,
-)
+from app.assistant.workflow.system_assets import PERIODIC_REVIEW_CORE_ASSET_KEY
 from app.openclaw_integration.schemas import (
     OPENCLAW_SYSTEM_CAPABILITY_INPUT_MODELS,
     OPENCLAW_SYSTEM_CAPABILITY_OUTPUT_MODELS,
@@ -17,16 +14,13 @@ from app.openclaw_integration.schemas import (
 from app.system_settings.service import get_default_system_locale, normalize_system_locale
 
 OpenClawSystemItemSourceType = Literal["tool", "workflow", "agent"]
-OpenClawSystemImplementationType = Literal["entry", "relation", "knowledge_graph", "report", "workflow", "agent"]
+OpenClawSystemImplementationType = Literal["entry", "knowledge_graph", "report", "workflow", "agent"]
 
-OPENCLAW_CONTEXT_CAPTURE_DEFAULT_KEY: OpenClawSystemDefaultKey = "submit_context_capture"
-OPENCLAW_CONTEXT_CAPTURE_WORKFLOW_ASSET_KEY = CONTEXT_CAPTURE_ASSET_KEY
 OPENCLAW_PERIODIC_REVIEW_DEFAULT_KEY: OpenClawSystemDefaultKey = "generate_periodic_review"
 OPENCLAW_PERIODIC_REVIEW_WORKFLOW_ASSET_KEY = PERIODIC_REVIEW_CORE_ASSET_KEY
 OPENCLAW_SYSTEM_DEFAULT_TOOL_SOURCE_NAMES: dict[OpenClawSystemCapabilityKey, str] = {
     "search_entries": "search_entries",
     "get_entry": "get_entry_detail",
-    "create_relation": "create_relation",
     "query_knowledge_graph": "query_knowledge_graph",
 }
 
@@ -121,25 +115,6 @@ _TOOL_SYSTEM_ITEM_TEMPLATES: tuple[_ToolSystemItemTemplate, ...] = (
         ),
     ),
     _ToolSystemItemTemplate(
-        key="create_relation",
-        tool_name="mindatlas_create_relation",
-        enabled_by_default=True,
-        implementation_type="relation",
-        title=_LocalizedText(zh="关联两条记录", en="Create Relation"),
-        description=_LocalizedText(
-            zh="在两条 MindAtlas 记录之间建立关系，适合“关联一下”“连接起来”“说明这两条为什么相关”这类任务。",
-            en="Create a relation between two MindAtlas records for requests like connect these items, link them, or make their relationship explicit.",
-        ),
-        input_summary=_LocalizedText(
-            zh="源记录、目标记录、关系类型编码，以及可选说明。relationType 优先传当前启用的关系 type code；名称仅作兼容输入。",
-            en="Source entry, target entry, relation type code, and an optional description. Prefer current enabled relation type codes for relationType; names remain compatibility-only.",
-        ),
-        output_summary=_LocalizedText(
-            zh="返回新建关系的核心字段，便于后续检查、展示或继续图谱分析。",
-            en="Returns the core fields of the created relation for follow-up inspection, presentation, or graph analysis.",
-        ),
-    ),
-    _ToolSystemItemTemplate(
         key="query_knowledge_graph",
         tool_name="mindatlas_query_knowledge_graph",
         enabled_by_default=True,
@@ -161,25 +136,6 @@ _TOOL_SYSTEM_ITEM_TEMPLATES: tuple[_ToolSystemItemTemplate, ...] = (
 )
 
 _WORKFLOW_SYSTEM_ITEM_TEMPLATES: tuple[_WorkflowSystemItemTemplate, ...] = (
-    _WorkflowSystemItemTemplate(
-        key=OPENCLAW_CONTEXT_CAPTURE_DEFAULT_KEY,
-        tool_name="mindatlas_submit_context_capture",
-        enabled_by_default=True,
-        title=_LocalizedText(zh="智能记住并入库", en="Smart Save To MindAtlas"),
-        description=_LocalizedText(
-            zh="向 MindAtlas 提交一段用于生成新记录或修正已有记录的候选上下文，由系统工作流先提取检索线索与最终字段，再判断应新建还是合并更新已有记录，并结合 OpenClaw 请求元数据完成智能入库。",
-            en="Submit one candidate record or record-update context to MindAtlas so the system workflow can derive retrieval clues and final fields, decide whether to create a new entry or merge into an existing one, and save it intelligently with OpenClaw request metadata.",
-        ),
-        input_summary=_LocalizedText(
-            zh="只需提供 context：一段围绕同一事项的候选记录或记录修正上下文，尽量包含对象或事项、发生了什么、新增事实或进展、当前结果、为什么值得入库、明确时间线索，以及这是否是在补充或修正同一事项。source/channel/session/tool 等上下文由 OpenClaw 请求元数据自动提供。",
-            en="Provide only `context`: one self-contained candidate record or record-update context about the same subject. It should ideally include what this is about, what happened, the new facts or progress, the current result, why it deserves persistence, clear time clues, and whether this is an update to the same ongoing item. Source/channel/session/tool context is provided automatically from OpenClaw request metadata.",
-        ),
-        output_summary=_LocalizedText(
-            zh="返回统一的 created/merged 结果，包含记录 ID、标题、类型、摘要、标签、时间字段，以及创建/更新时间。",
-            en="Returns a unified created-or-merged result with the entry id, title, type, summary, tags, time fields, and created/updated timestamps.",
-        ),
-        workflow_asset_key=OPENCLAW_CONTEXT_CAPTURE_WORKFLOW_ASSET_KEY,
-    ),
     _WorkflowSystemItemTemplate(
         key=OPENCLAW_PERIODIC_REVIEW_DEFAULT_KEY,
         tool_name="mindatlas_generate_periodic_review",

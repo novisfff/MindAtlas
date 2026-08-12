@@ -71,7 +71,7 @@ WORKFLOW_PARALLEL_SAFE_OPT_IN = False
 # Values: (side_effect, parallel_safe). Inspected against code-native implementations.
 # Conservatism notes (Step 2):
 # - search/get/list/stats: pure DB reads → read / parallel_safe=true
-# - create/update/relation/report/openclaw write paths: local mutations → write_local
+# - create_entry: the sole Agent write path → write_local
 # - query_knowledge_graph / kb_search / kb_relation_recommendations: external KB or
 #   multi-step graph state → read / parallel_safe=false
 # - openclaw_query_knowledge_graph: same as query_knowledge_graph
@@ -80,15 +80,9 @@ SYSTEM_TOOL_CLASSIFICATIONS: dict[str, tuple[SideEffectClass, bool]] = {
     "search_similar_entries": ("read", True),
     "get_entry_detail": ("read", True),
     "create_entry": ("write_local", False),
-    "update_entry": ("write_local", False),
-    "create_relation": ("write_local", False),
     "query_knowledge_graph": ("read", False),
-    "generate_weekly_report": ("write_local", False),
-    "generate_monthly_report": ("write_local", False),
-    "openclaw_capture_entry": ("write_local", False),
     "openclaw_search_entries": ("read", True),
     "openclaw_get_entry": ("read", True),
-    "openclaw_create_relation": ("write_local", False),
     "openclaw_query_knowledge_graph": ("read", False),
     "get_statistics": ("read", True),
     "get_entries_by_time_range": ("read", True),
