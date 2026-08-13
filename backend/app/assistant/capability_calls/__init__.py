@@ -58,9 +58,6 @@ from app.assistant.capability_calls.reconciliation import (  # noqa: F401
     ReconciliationEvidenceIssuer,
     ScriptedExternalAdapter,
 )
-from app.assistant.capability_calls.local_settlement import (  # noqa: F401
-    create_entry_local_transactional,
-)
 from app.assistant.capability_calls.uow import (  # noqa: F401
     CapabilityUnitOfWork,
 )
@@ -126,7 +123,6 @@ __all__ = [
     "build_approval_binding",
     "close_non_approved_call",
     "render_safe_approval_card",
-    "create_entry_local_transactional",
     "CapabilityUnitOfWork",
     "CapabilityReconciliationService",
     "HmacReconciliationEvidenceVerifier",

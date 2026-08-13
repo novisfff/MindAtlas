@@ -5,6 +5,7 @@ from __future__ import annotations
 import unittest
 import uuid
 import ast
+import importlib
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
@@ -278,52 +279,29 @@ class LocalTransactionalGoldenPathTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.db.close()
 
-    def test_atomic_create_and_call_success(self) -> None:
-        from app.assistant.capability_calls.local_settlement import (
-            create_entry_local_transactional,
-        )
+    def test_mismatched_search_call_has_no_direct_local_settlement_entrypoint(self) -> None:
+        """A mismatched call can only reach the aggregate-owned execution path."""
+        import app.assistant.capability_calls as capability_calls
         from app.assistant.capability_calls.models import AssistantCapabilityCall
-        from app.entry.models import Entry, TimeMode
-        from app.entry.schemas import EntryRequest
-        from app.lightrag.models import EntryIndexOutbox
+        from app.entry.models import Entry
 
-        req = EntryRequest(
-            title="golden",
-            summary="s",
-            content="body",
-            type_id=self.etype.id,
-            time_mode=TimeMode.POINT,
-            time_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+        call = self.db.get(AssistantCapabilityCall, self.call_id)
+        assert call is not None
+        call.domain_key = "search_entries"
+        call.input_digest = DIGEST_B
+        self.db.flush()
+
+        self.assertEqual(call.domain_key, "search_entries")
+        self.assertNotEqual(call.input_digest, DIGEST_A)
+        self.assertEqual(self.db.query(Entry).count(), 0)
+        self.assertFalse(
+            hasattr(capability_calls, "create_entry_local_transactional")
         )
-        result = create_entry_local_transactional(
-            session=self.db,
-            request=req,
-            call_id=self.call_id,
-            expected_call_revision=1,
-            expected_run_revision=1,
-            lease=self.lease,
-        )
-        entry = self.db.query(Entry).filter(Entry.id == result.entry_id).one()
-        self.assertEqual(entry.source_capability_call_id, self.call_id)
-        self.assertEqual(self.db.query(EntryIndexOutbox).count(), 1)
-        call = (
-            self.db.query(AssistantCapabilityCall)
-            .filter(AssistantCapabilityCall.id == self.call_id)
-            .one()
-        )
-        self.assertEqual(call.status, "succeeded")
-        self.assertIsNotNone(call.side_effect_started_at)
-        # Idempotent second call does not create a second entry.
-        result2 = create_entry_local_transactional(
-            session=self.db,
-            request=req,
-            call_id=self.call_id,
-            expected_call_revision=int(call.state_revision),
-            expected_run_revision=1,
-            lease=self.lease,
-        )
-        self.assertEqual(result2.entry_id, result.entry_id)
-        self.assertEqual(self.db.query(Entry).count(), 1)
+        with self.assertRaises(ModuleNotFoundError):
+            importlib.import_module(
+                "app.assistant.capability_calls.local_settlement"
+            )
+        self.assertEqual(self.db.query(Entry).count(), 0)
 
     def test_post_approval_guard_denial_is_durable_without_attempt_or_entry(self) -> None:
         from types import SimpleNamespace

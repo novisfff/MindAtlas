@@ -468,7 +468,11 @@ class ToolCapabilityAdapter:
 
         # Hard rule: never ToolRegistry.resolve(name) from the adapter.
         if executable.is_system:
-            return self._invoke_system_tool(tool_obj, request.validated_input)
+            return self._invoke_system_tool(
+                tool_obj,
+                request.validated_input,
+                target_identity=executable.target_identity,
+            )
 
         if isinstance(tool_obj, RemoteTool):
             return self._invoke_remote_tool(
@@ -478,9 +482,19 @@ class ToolCapabilityAdapter:
             )
 
         # Fallback: treat as code-native tool object already resolved.
-        return self._invoke_system_tool(tool_obj, request.validated_input)
+        return self._invoke_system_tool(
+            tool_obj,
+            request.validated_input,
+            target_identity=executable.target_identity,
+        )
 
-    def _invoke_system_tool(self, tool_obj: Any, validated_input: dict[str, JsonValue]) -> Any:
+    def _invoke_system_tool(
+        self,
+        tool_obj: Any,
+        validated_input: dict[str, JsonValue],
+        *,
+        target_identity: str,
+    ) -> Any:
         # Fresh DB context via wrap_tool_with_db; closed after success/failure.
         bind = SessionLocal.kw.get("bind") if hasattr(SessionLocal, "kw") else None
         if bind is None:
@@ -492,14 +506,16 @@ class ToolCapabilityAdapter:
             bind = db_engine
         runner = wrap_tool_with_db(tool_obj, bind)
         call_args: dict[str, Any] = dict(validated_input)
-        if getattr(tool_obj, "name", None) == "create_entry":
+        if target_identity == "system-tool:create_entry":
             from app.assistant.capability_calls.create_entry_declaration import (
                 _gateway_invocation_for_capability_adapter,
+                create_entry_declaration,
             )
 
-            call_args["_gateway_invocation"] = (
-                _gateway_invocation_for_capability_adapter()
-            )
+            if tool_obj is create_entry_declaration:
+                call_args["_gateway_invocation"] = (
+                    _gateway_invocation_for_capability_adapter()
+                )
         return runner(**call_args)
 
     def _invoke_remote_tool(

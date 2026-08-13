@@ -369,6 +369,106 @@ def test_system_tool_validated_args_reach_exact_resolved_tool() -> None:
     assert types == ["capability.started", "capability.completed"]
 
 
+def test_create_entry_exact_resolved_identity_returns_nonwriting_proposal() -> None:
+    from app.assistant.capabilities.adapters.tool import ToolCapabilityAdapter
+    from app.assistant.tools import create_entry
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "content": {"type": "string"},
+        },
+        "additionalProperties": False,
+    }
+    output_schema = {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "content": {"type": "string"},
+        },
+        "additionalProperties": False,
+    }
+    desc = _descriptor(
+        capability_key="create_entry",
+        target_identity="system-tool:create_entry",
+        input_schema=input_schema,
+        output_schema=output_schema,
+    )
+    req = _request(
+        create_entry,
+        {"title": "  adapter title  ", "content": "  adapter body  "},
+        target_identity="system-tool:create_entry",
+        descriptor=desc,
+    )
+    ports, _, _ = _ports()
+    closed: list[bool] = []
+
+    class _Session:
+        def close(self) -> None:
+            closed.append(True)
+
+    with patch(
+        "app.assistant.workflow.engine.runtime_helpers.sessionmaker",
+        return_value=lambda **_kwargs: _Session(),
+    ):
+        result = ToolCapabilityAdapter().execute(req, ports=ports)
+
+    assert result.status == "completed"
+    assert result.structured_output == {
+        "title": "adapter title",
+        "content": "adapter body",
+    }
+    assert closed == [True]
+
+
+def test_create_entry_different_resolved_identity_fails_gateway_closed() -> None:
+    from app.assistant.capabilities.adapters.tool import ToolCapabilityAdapter
+    from app.assistant.tools import create_entry
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "content": {"type": "string"},
+        },
+        "additionalProperties": False,
+    }
+    output_schema = {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "content": {"type": "string"},
+        },
+        "additionalProperties": False,
+    }
+    desc = _descriptor(
+        capability_key="create_entry",
+        target_identity="system-tool:search_entries",
+        input_schema=input_schema,
+        output_schema=output_schema,
+    )
+    req = _request(
+        create_entry,
+        {"title": "must not receive marker", "content": "adapter body"},
+        target_identity="system-tool:search_entries",
+        descriptor=desc,
+    )
+    ports, _, _ = _ports()
+
+    class _Session:
+        def close(self) -> None:
+            return None
+
+    with patch(
+        "app.assistant.workflow.engine.runtime_helpers.sessionmaker",
+        return_value=lambda **_kwargs: _Session(),
+    ):
+        result = ToolCapabilityAdapter().execute(req, ports=ports)
+
+    assert result.status == "failed"
+    assert result.error is not None
+    assert result.error.safe_code == "capability_gateway_required"
+
+
 def test_system_tool_wrap_tool_with_db_creates_and_closes_session() -> None:
     from app.assistant.capabilities.adapters.tool import ToolCapabilityAdapter
     from app.assistant.domain.json_schema import binding_schema_digest, normalize_binding_schema
