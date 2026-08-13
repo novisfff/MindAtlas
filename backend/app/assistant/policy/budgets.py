@@ -2598,6 +2598,14 @@ class BudgetLedger:
         with self._lock:
             return serialize_ledger_state(self._state)
 
+    def restore_serialized(self, payload: Mapping[str, Any]) -> None:
+        """Restore a same-process transaction checkpoint without emitting events."""
+        restored = deserialize_ledger_state(payload)
+        with self._lock:
+            if restored.limits != self._state.limits:
+                raise RuntimeError(REASON_PROTOCOL_ERROR)
+            self._state = restored
+
     @classmethod
     def deserialize(
         cls,

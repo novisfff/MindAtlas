@@ -44,6 +44,13 @@ class BudgetLedgerDispatchGuard:
     # Optional frozen Provider arguments digests by call_id for extra mismatch checks.
     expected_arguments_digests: dict[str, str] = field(default_factory=dict)
 
+    def checkpoint(self) -> dict[str, Any]:
+        """Capture a process-local state for database transaction compensation."""
+        return self.ledger.serialize()
+
+    def restore(self, checkpoint: Mapping[str, Any]) -> None:
+        self.ledger.restore_serialized(checkpoint)
+
     def mark_started(
         self,
         *,
@@ -219,6 +226,51 @@ class BudgetLedgerReservationPort:
             reason_code=decision.reason_code,
             reserved_call_ids=(),
             dimension=decision.dimension,
+        )
+
+    def reuse_reserved(
+        self, item: CapabilityCallReservationItem
+    ) -> CapabilityCallReservationDecision:
+        """Validate the one durable reservation approval may re-enter."""
+        reservation = next(
+            (
+                candidate
+                for candidate in self.ledger.snapshot().reservations
+                if candidate.call_id == item.call_id
+            ),
+            None,
+        )
+        if reservation is None:
+            return CapabilityCallReservationDecision(
+                allowed=False,
+                reason_code="reservation_not_found",
+                reserved_call_ids=(),
+                dimension="reservation",
+            )
+        if reservation.state != "reserved":
+            return CapabilityCallReservationDecision(
+                allowed=False,
+                reason_code="reservation_state_invalid",
+                reserved_call_ids=(),
+                dimension="reservation_state",
+            )
+        if (
+            reservation.owner_kind != item.owner_kind
+            or reservation.owner_version_id != item.owner_version_id
+            or reservation.domain_key != item.domain_key
+            or reservation.side_effect != item.side_effect
+            or reservation.arguments_digest != item.arguments_digest
+        ):
+            return CapabilityCallReservationDecision(
+                allowed=False,
+                reason_code="reservation_identity_mismatch",
+                reserved_call_ids=(),
+                dimension="reservation_identity",
+            )
+        return CapabilityCallReservationDecision(
+            allowed=True,
+            reason_code="allowed",
+            reserved_call_ids=(item.call_id,),
         )
 
 

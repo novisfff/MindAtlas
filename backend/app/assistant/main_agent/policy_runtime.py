@@ -1192,6 +1192,7 @@ def compose_main_agent_policy_runtime(
                     rollout_revision_id=run.main_agent_rollout_revision_id,
                     lock=True,
                 ),
+                dispatch_guard=dispatch_guard,
             )
         if capability_ledger is None:
             raise RuntimeError(

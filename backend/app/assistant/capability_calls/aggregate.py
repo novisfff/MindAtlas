@@ -20,7 +20,11 @@ from app.assistant.capability_calls.result_codec import (
     decode_capability_result,
     encode_capability_result,
 )
-from app.assistant.domain.digests import canonical_json_bytes, sha256_bytes
+from app.assistant.domain.digests import (
+    canonical_json_bytes,
+    sha256_bytes,
+    sha256_canonical_json,
+)
 from app.assistant.durable.models import (
     AssistantRunArtifact,
     AssistantRunBudgetRevision,
@@ -81,6 +85,7 @@ class DurableCapabilityLedgerAggregate:
     lease: LeaseToken | None = None
     runtime_snapshot_provider: Callable[[], Mapping[str, Any]] | None = None
     runtime_closure_provider: Callable[[Any], Any] | None = None
+    dispatch_guard: Any | None = None
 
     def __post_init__(self) -> None:
         if self.write_guard is None or not hasattr(self.write_guard, "lock_port"):
@@ -92,6 +97,27 @@ class DurableCapabilityLedgerAggregate:
         self._pending_pause: dict[str, Any] | None = None
         self._pending_result: dict[str, Any] | None = None
         self._local_attempt_id: UUID | None = None
+        self._local_budget_checkpoint: Mapping[str, Any] | None = None
+        self._local_budget_call_id: str | None = None
+
+    def _restore_local_budget(self) -> None:
+        checkpoint = self._local_budget_checkpoint
+        if checkpoint is not None and self.dispatch_guard is not None:
+            restore = getattr(self.dispatch_guard, "restore", None)
+            if callable(restore):
+                restore(checkpoint)
+        self._local_budget_checkpoint = None
+        self._local_budget_call_id = None
+
+    def _finish_local_budget(self, *, status: str) -> None:
+        if self._local_budget_checkpoint is None or self.dispatch_guard is None:
+            return
+        call_id = self._local_budget_call_id
+        if call_id is None:
+            raise CapabilityCallConflict(
+                "budget_lifecycle_invalid", "local budget call identity is unavailable"
+            )
+        self.dispatch_guard.finish(call_id=call_id, status=status)
 
     def _acquire_write_safety_before_run_lock(self) -> None:
         """Enforce the global advisory -> Run -> Call lock order."""
@@ -1455,6 +1481,10 @@ class DurableCapabilityLedgerAggregate:
         )
         if not post_approval.allowed:
             reason = post_approval.reason_code or "write_safety_blocked"
+            if self.dispatch_guard is not None:
+                self.dispatch_guard.release_unstarted(
+                    call_id=str(call.provider_tool_call_id), reason_code=reason
+                )
             call = self.calls.fail_before_side_effect(
                 call,
                 expected_run_revision=int(run.state_revision),
@@ -1480,47 +1510,61 @@ class DurableCapabilityLedgerAggregate:
                 next_manifest=request.current_manifest,
             )
 
-        # This is intentionally the first operation after the post-approval
-        # decision: the advisory lock and launch-state row locks stay held by
-        # this transaction through Entry/result/checkpoint commit.
-        entry_request = _build_entry_request(self.db, **create_args)
-        entry = stage_create_entry_local(
-            session=self.db,
-            request=entry_request,
-            call_id=call.id,
-        )
-        claim_now = utcnow()
-        call, attempt = self.calls.claim_attempt(
-            call_id=call.id,
-            expected_call_revision=int(call.state_revision),
-            expected_run_revision=int(run.state_revision),
-            lease=self.lease,
-            worker_id=self.lease.worker_id,
-            now=claim_now,
-        )
-        attempt = self.calls.transition_attempt(
-            attempt_id=attempt.id,
-            expected_status="claimed",
-            to_status="dispatched",
-            request_digest=str(call.input_digest),
-        )
-        self._local_attempt_id = attempt.id
-        return ProviderDispatchResult(
-            capability_result=completed_result(
-                user_text=f"Created entry {entry.title}",
-                structured_output={
-                    "status": "ok",
-                    "entryId": str(entry.id),
-                    "title": str(entry.title),
-                },
-                metrics=CapabilityMetrics(
-                    duration_ms=0.0,
-                    input_bytes=len(canonical_json_bytes(arguments)),
-                    output_bytes=0,
+        # The budget start is the first mutable local-write operation after the
+        # post-approval decision. _build_entry_request may stage Tags, so it
+        # belongs after this boundary as well.
+        if self.dispatch_guard is not None:
+            checkpoint = getattr(self.dispatch_guard, "checkpoint", None)
+            if callable(checkpoint):
+                self._local_budget_checkpoint = checkpoint()
+            self._local_budget_call_id = str(call.provider_tool_call_id)
+            self.dispatch_guard.mark_started(
+                call_id=str(call.provider_tool_call_id),
+                validated_arguments_digest=sha256_canonical_json(arguments),
+            )
+        try:
+            entry_request = _build_entry_request(self.db, **create_args)
+            entry = stage_create_entry_local(
+                session=self.db,
+                request=entry_request,
+                call_id=call.id,
+            )
+            claim_now = utcnow()
+            call, attempt = self.calls.claim_attempt(
+                call_id=call.id,
+                expected_call_revision=int(call.state_revision),
+                expected_run_revision=int(run.state_revision),
+                lease=self.lease,
+                worker_id=self.lease.worker_id,
+                now=claim_now,
+            )
+            attempt = self.calls.transition_attempt(
+                attempt_id=attempt.id,
+                expected_status="claimed",
+                to_status="dispatched",
+                request_digest=str(call.input_digest),
+            )
+            self._local_attempt_id = attempt.id
+            result = ProviderDispatchResult(
+                capability_result=completed_result(
+                    user_text=f"Created entry {entry.title}",
+                    structured_output={
+                        "status": "ok",
+                        "entryId": str(entry.id),
+                        "title": str(entry.title),
+                    },
+                    metrics=CapabilityMetrics(
+                        duration_ms=0.0,
+                        input_bytes=len(canonical_json_bytes(arguments)),
+                        output_bytes=0,
+                    ),
                 ),
-            ),
-            next_manifest=request.current_manifest,
-        )
+                next_manifest=request.current_manifest,
+            )
+        except Exception:
+            self._restore_local_budget()
+            raise
+        return result
 
     def commit_pause(self, continuation: Any, provider_messages: Any = ()) -> None:
         """Commit call + Interrupt + transcript + waiting Checkpoint in one Run CAS."""
@@ -2110,6 +2154,10 @@ class DurableCapabilityLedgerAggregate:
                     "Tool Result has no preceding Provider Tool Call",
                 )
 
+            # Finish only when the final durable result/checkpoint transaction
+            # is ready to capture the budget snapshot. Any later DB rollback
+            # restores the pre-start reserved checkpoint in this except path.
+            self._finish_local_budget(status=str(pending["result"].capability_result.status))
             (
                 runtime_rows,
                 manifest_revision_id,
@@ -2286,9 +2334,12 @@ class DurableCapabilityLedgerAggregate:
                 children=bundle,
             )
             self._pending_result = None
+            self._local_budget_checkpoint = None
+            self._local_budget_call_id = None
         except Exception:
             self.db.rollback()
             self._pending_result = None
+            self._restore_local_budget()
             raise
 
     def record_failure(self, outcome: LedgerPrepareOutcome, reason_code: str) -> None:
@@ -2297,6 +2348,7 @@ class DurableCapabilityLedgerAggregate:
             # local failure must leave the complete zero set, not a partial
             # failure record that could accidentally retain staged mutations.
             self.db.rollback()
+            self._restore_local_budget()
             return
         call_hint = self.calls.get_call(outcome.call_id)
         if call_hint is None:
