@@ -1152,6 +1152,10 @@ class DurableCapabilityLedgerAggregate:
             )
             approved_existing = False
             if existing is not None:
+                pre_pause_reservation = (
+                    str(existing.status) == "proposed"
+                    and existing.interrupt_id is None
+                )
                 interrupt = (
                     self.db.get(AssistantRunInterrupt, existing.interrupt_id)
                     if existing.interrupt_id is not None
@@ -1166,9 +1170,18 @@ class DurableCapabilityLedgerAggregate:
                     or str(existing.authorization_digest) != str(decision.decision_digest)
                     or str(existing.approval_binding_digest)
                     != str(binding.approval_binding_digest)
-                    or interrupt is None
-                    or interrupt.capability_call_id != existing.id
-                    or str(interrupt.interrupt_origin) != "capability_call"
+                    or (
+                        str(existing.status) == "proposed"
+                        and not pre_pause_reservation
+                    )
+                    or (
+                        not pre_pause_reservation
+                        and (
+                            interrupt is None
+                            or interrupt.capability_call_id != existing.id
+                            or str(interrupt.interrupt_origin) != "capability_call"
+                        )
+                    )
                 ):
                     self.db.rollback()
                     raise CapabilityCallConflict(
@@ -1234,7 +1247,7 @@ class DurableCapabilityLedgerAggregate:
                         "callId": str(call_id),
                         "interruptId": str(
                             existing.interrupt_id
-                            if existing is not None
+                            if existing is not None and existing.interrupt_id is not None
                             else _stable_uuid(f"mindatlas:interrupt:{call_id}")
                         ),
                         "approvalBindingDigest": binding.approval_binding_digest,

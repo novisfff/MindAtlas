@@ -24,7 +24,10 @@ def test_call_owned_pause_commits_one_waiting_aggregate() -> None:
         _waiting_continuation,
     )
 
-    from app.assistant.capability_calls.aggregate import DurableCapabilityLedgerAggregate
+    from app.assistant.capability_calls.aggregate import (
+        DurableCapabilityLedgerAggregate,
+        _stable_uuid,
+    )
     from app.assistant.capability_calls.models import AssistantCapabilityCall
     from app.assistant.durable.models import (
         AssistantRunArtifact,
@@ -51,6 +54,7 @@ def test_call_owned_pause_commits_one_waiting_aggregate() -> None:
         normalize_run_budget_limits,
     )
     from app.assistant.policy.contracts import build_authorization_decision_v2
+    from app.assistant.capability_calls.approval import build_approval_binding
 
     db = make_session()
     try:
@@ -154,12 +158,42 @@ def test_call_owned_pause_commits_one_waiting_aggregate() -> None:
             ),
         )
 
+        surface = _surface(_manifest())
+        tool_call = _tool_call(surface)
+        provider_messages = (
+            ProviderUserMessage(content="q"),
+            ProviderAssistantMessage(content=None, tool_calls=(tool_call,)),
+        )
+        aggregate.reserve_siblings((request,), provider_messages)
+
+        expected_call_id = _stable_uuid(f"mindatlas:{run.id}:provider:call-1")
+        expected_binding = build_approval_binding(
+            call_id=expected_call_id,
+            logical_call_key="provider:call-1",
+            owner_digest=decision.owner_policy_digest,
+            binding_contract_digest="5" * 64,
+            input_digest="d62af887aac632d20a83aad3c86d9fa96c25c68fbbadf026401616cf8eb33532",
+            target_version_id=None,
+            target_digest="6" * 64,
+            descriptor_digest="7" * 64,
+            authorization_digest=decision.decision_digest,
+            principal_digest=decision.principal_digest,
+            request_revision=1,
+        )
+        reserved = db.query(AssistantCapabilityCall).one()
+        assert reserved.id == expected_call_id
+        assert reserved.logical_call_key == "provider:call-1"
+        assert reserved.provider_tool_call_id == "call-1"
+        assert reserved.status == "proposed"
+        assert reserved.approval_binding_digest == expected_binding.approval_binding_digest
+        assert reserved.interrupt_id is None
+
         outcome = aggregate.prepare(request)
         assert outcome.kind == "pause"
-        # Pure prepare must leave no orphan durable layer.
-        assert db.query(AssistantCapabilityCall).count() == 0
+        # Prepare stages the pause but preserves the durable sibling reservation.
+        assert db.query(AssistantCapabilityCall).count() == 1
         assert db.query(AssistantRunInterrupt).count() == 0
-        assert db.query(AssistantRunCheckpoint).count() == 0
+        assert db.query(AssistantRunCheckpoint).count() == 1
 
         continuation = _waiting_continuation()
         root_continuation = ContinuationRef(
@@ -192,40 +226,40 @@ def test_call_owned_pause_commits_one_waiting_aggregate() -> None:
                 "waiting_call": waiting_call,
             }
         )
-        surface = _surface(_manifest())
-        tool_call = _tool_call(surface)
-        provider_messages = (
-            ProviderUserMessage(content="q"),
-            ProviderAssistantMessage(content=None, tool_calls=(tool_call,)),
-        )
         with armed_crash(
             CrashPoint.AFTER_INTERRUPT_INSERT_BEFORE_OUTER_POINTER_CAS
         ):
             with pytest.raises(TransactionRollbackInject):
-                aggregate.commit_pause(continuation, provider_messages)
+                aggregate.commit_pause(continuation)
 
         db.refresh(run)
         assert run.status == "running"
-        assert run.state_revision == 3
-        assert db.query(AssistantCapabilityCall).count() == 0
+        assert run.state_revision == 4
+        assert db.query(AssistantCapabilityCall).count() == 1
+        assert db.query(AssistantCapabilityCall).one().status == "proposed"
         assert db.query(AssistantRunInterrupt).count() == 0
-        assert db.query(AssistantRunCheckpoint).count() == 0
-        assert db.query(AssistantRunArtifact).count() == 0
+        assert db.query(AssistantRunCheckpoint).count() == 1
+        assert db.query(AssistantRunArtifact).count() == 1
 
         # The staged proposal remains retryable after the transaction rollback.
-        aggregate.commit_pause(continuation, provider_messages)
+        aggregate.commit_pause(continuation)
 
         db.refresh(run)
         call = db.query(AssistantCapabilityCall).one()
         interrupt = db.query(AssistantRunInterrupt).one()
         assert run.status == "waiting_approval"
-        assert run.state_revision == 4
+        assert run.state_revision == 5
         assert call.status == "awaiting_approval"
         assert call.interrupt_id == interrupt.id
         assert interrupt.interrupt_origin == "capability_call"
         assert interrupt.capability_call_id == call.id
-        assert db.query(AssistantRunCheckpoint).count() == 1
-        checkpoint = db.query(AssistantRunCheckpoint).one()
+        assert db.query(AssistantRunCheckpoint).count() == 2
+        checkpoint = (
+            db.query(AssistantRunCheckpoint)
+            .order_by(AssistantRunCheckpoint.sequence.desc(), AssistantRunCheckpoint.id.desc())
+            .limit(1)
+            .one()
+        )
         assert checkpoint.schema_version == 3
         from app.assistant.durable.codec import decode_checkpoint
 
