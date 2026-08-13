@@ -376,13 +376,14 @@ class LocalTransactionalGoldenPathTests(unittest.TestCase):
                 agent_depth=1,
             )
         ).allowed
+        budget_guard = BudgetLedgerDispatchGuard(ledger=budget_ledger)
         aggregate = DurableCapabilityLedgerAggregate(
             db=self.db,
             authorization_factory=SimpleNamespace(),
             idempotency_secret="s" * 32,
             write_guard=guard,
             lease=self.lease,
-            dispatch_guard=BudgetLedgerDispatchGuard(ledger=budget_ledger),
+            dispatch_guard=budget_guard,
         )
         seeded_call = self.db.get(AssistantCapabilityCall, self.call_id)
         seeded_call.provider_tool_call_id = "post-approval-denied"
@@ -430,13 +431,39 @@ class LocalTransactionalGoldenPathTests(unittest.TestCase):
                 result=result.capability_result,
             ),
         )
-        aggregate.commit_progress(
-            (
-                ProviderUserMessage(content="create it"),
-                ProviderAssistantMessage(content=None, tool_calls=(tool_call,)),
-                tool_message,
-            )
+        provider_messages = (
+            ProviderUserMessage(content="create it"),
+            ProviderAssistantMessage(content=None, tool_calls=(tool_call,)),
+            tool_message,
         )
+        from app.assistant.durable.crash import (
+            CrashPoint,
+            TransactionRollbackInject,
+            armed_crash,
+        )
+
+        with armed_crash(CrashPoint.AFTER_CHECKPOINT_INSERT_BEFORE_POINTER_ADVANCE):
+            with self.assertRaises(TransactionRollbackInject):
+                aggregate.commit_progress(provider_messages)
+
+        rolled_back = self.db.get(AssistantCapabilityCall, self.call_id)
+        self.assertEqual(rolled_back.status, "authorized")
+        self.assertEqual(
+            [item.state for item in budget_ledger.snapshot().reservations],
+            ["reserved"],
+        )
+
+        aggregate = DurableCapabilityLedgerAggregate(
+            db=self.db,
+            authorization_factory=SimpleNamespace(),
+            idempotency_secret="s" * 32,
+            write_guard=guard,
+            lease=self.lease,
+            dispatch_guard=budget_guard,
+        )
+        result = aggregate.execute_local(outcome, request)
+        aggregate.commit_result(outcome, result)
+        aggregate.commit_progress(provider_messages)
 
         call = self.db.get(AssistantCapabilityCall, self.call_id)
         self.assertIsNotNone(call)
@@ -472,6 +499,166 @@ class LocalTransactionalGoldenPathTests(unittest.TestCase):
         self.assertEqual(checkpoint.state_payload["capabilityCalls"][0]["status"], "failed")
         with self.assertRaisesRegex(Exception, "local write call identity"):
             aggregate.execute_local(outcome, request)
+
+    def test_dispatcher_commit_result_failure_restores_denied_reservation(self) -> None:
+        from types import SimpleNamespace
+
+        from app.assistant.capability_calls.aggregate import (
+            DurableCapabilityLedgerAggregate,
+        )
+        from app.assistant.capability_calls.dispatcher import LedgerDispatcher
+        from app.assistant.capability_calls.models import AssistantCapabilityCall
+        from app.assistant.domain.digests import sha256_canonical_json
+        from app.assistant.policy.budgets import BudgetLedger, DeterministicBudgetClock
+        from app.assistant.policy.contracts import (
+            normalize_owner_budget_limits,
+            normalize_run_budget_limits,
+        )
+        from app.assistant.policy.runtime import (
+            BudgetLedgerDispatchGuard,
+            BudgetLedgerReservationPort,
+        )
+        from app.assistant.provider_loop.contracts import (
+            CapabilityCallReservationItem,
+            LedgerPrepareOutcome,
+        )
+        from app.assistant.provider_loop.messages import (
+            ProviderAssistantMessage,
+            ProviderToolMessage,
+            ProviderUserMessage,
+            project_tool_result_envelope,
+        )
+        from tests._db import allowing_test_write_guard
+        from tests.test_agent_policy_runtime import _base_manifest
+        from tests.test_durable_checkpoint_codec import _manifest, _surface, _tool_call
+
+        provider_call_id = "post-approval-denied-dispatcher"
+        arguments = {
+            "title": "must not exist",
+            "content": "blocked",
+            "type_code": "KNOWLEDGE",
+            "tags": [],
+            "time_mode": "POINT",
+            "time_at": "2026-07-18",
+        }
+        limits = normalize_run_budget_limits(
+            operator_limits={
+                "max_total_capability_calls": 2,
+                "max_parallel_calls": 1,
+                "max_same_read_signature": 2,
+            }
+        )
+        owner_version_id = uuid.uuid4()
+        budget_ledger = BudgetLedger.create(
+            limits=limits,
+            owner_limits=(
+                normalize_owner_budget_limits(
+                    owner_kind="main_agent",
+                    owner_version_id=owner_version_id,
+                    run_limits=limits,
+                ),
+            ),
+            clock=DeterministicBudgetClock(),
+        )
+        assert BudgetLedgerReservationPort(ledger=budget_ledger).reserve_one(
+            CapabilityCallReservationItem(
+                call_id=provider_call_id,
+                owner_kind="main_agent",
+                owner_version_id=owner_version_id,
+                domain_key="create_entry",
+                side_effect="write_local",
+                arguments_digest=sha256_canonical_json(arguments),
+                binding_contract_digest=DIGEST_A,
+                capability_depth=1,
+                agent_depth=1,
+            )
+        ).allowed
+        guard = allowing_test_write_guard(self.db)
+        guard.evaluate_post_approval_locked = lambda **_kwargs: SimpleNamespace(
+            allowed=False,
+            reason_code="pre_ga_launch_unapproved",
+        )
+        budget_guard = BudgetLedgerDispatchGuard(ledger=budget_ledger)
+        seeded_call = self.db.get(AssistantCapabilityCall, self.call_id)
+        seeded_call.provider_tool_call_id = provider_call_id
+        self.db.commit()
+        outcome = LedgerPrepareOutcome(
+            kind="dispatch_local",
+            call_id=self.call_id,
+            call_revision=1,
+        )
+        current_manifest, _resolved_surface = _base_manifest(run_id=self.run.id)
+        request = SimpleNamespace(
+            call=SimpleNamespace(call_id=provider_call_id, arguments=arguments),
+            binding=SimpleNamespace(),
+            current_manifest=current_manifest,
+        )
+        aggregate = DurableCapabilityLedgerAggregate(
+            db=self.db,
+            authorization_factory=SimpleNamespace(),
+            idempotency_secret="s" * 32,
+            write_guard=guard,
+            lease=self.lease,
+            dispatch_guard=budget_guard,
+        )
+        aggregate.prepare = lambda _request: outcome
+        aggregate.commit_result = lambda *_args: (_ for _ in ()).throw(
+            RuntimeError("commit result boundary failed")
+        )
+        dispatcher = LedgerDispatcher(
+            inner=SimpleNamespace(dispatch=lambda *_args, **_kwargs: None),
+            aggregate=aggregate,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "commit result boundary failed"):
+            dispatcher.dispatch(
+                request,
+                cancellation=SimpleNamespace(is_cancelled=lambda: False),
+            )
+
+        rolled_back = self.db.get(AssistantCapabilityCall, self.call_id)
+        self.assertEqual(rolled_back.status, "authorized")
+        self.assertEqual(
+            [item.state for item in budget_ledger.snapshot().reservations],
+            ["reserved"],
+        )
+
+        aggregate = DurableCapabilityLedgerAggregate(
+            db=self.db,
+            authorization_factory=SimpleNamespace(),
+            idempotency_secret="s" * 32,
+            write_guard=guard,
+            lease=self.lease,
+            dispatch_guard=budget_guard,
+        )
+        result = aggregate.execute_local(outcome, request)
+        aggregate.commit_result(outcome, result)
+        tool_call = _tool_call(_surface(_manifest())).model_copy(
+            update={"call_id": provider_call_id}
+        )
+        tool_message = ProviderToolMessage(
+            call_id=provider_call_id,
+            provider_alias=tool_call.provider_alias,
+            content=project_tool_result_envelope(
+                domain_key="create_entry",
+                result=result.capability_result,
+            ),
+        )
+        aggregate.commit_progress(
+            (
+                ProviderUserMessage(content="create it"),
+                ProviderAssistantMessage(content=None, tool_calls=(tool_call,)),
+                tool_message,
+            )
+        )
+
+        call = self.db.get(AssistantCapabilityCall, self.call_id)
+        self.assertEqual(call.status, "failed")
+        self.assertEqual(call.failure_code, "pre_ga_launch_unapproved")
+        self.assertEqual(
+            [item.state for item in budget_ledger.snapshot().reservations],
+            ["released"],
+        )
 
     def test_local_recovery_finishes_restored_call_reservation(self) -> None:
         """A resumed local write owns the preserved scheduler reservation."""
