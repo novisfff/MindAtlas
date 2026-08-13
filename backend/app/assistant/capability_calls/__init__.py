@@ -58,7 +58,7 @@ from app.assistant.capability_calls.reconciliation import (  # noqa: F401
     ReconciliationEvidenceIssuer,
     ScriptedExternalAdapter,
 )
-from app.assistant.capability_calls.local_write import (  # noqa: F401
+from app.assistant.capability_calls.local_settlement import (  # noqa: F401
     create_entry_local_transactional,
 )
 from app.assistant.capability_calls.uow import (  # noqa: F401

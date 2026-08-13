@@ -1,8 +1,8 @@
 {
   "buildCompatibility": {
-    "capabilityFeatureDigest": "713209b8d6bf8b1aa945c5628c0802d6b7c5216b566276cff3fca1e7c54a336b",
+    "capabilityFeatureDigest": "c4050ef9aa836f418bb90ad772beeb4734fbb7815cf533926c0eb011710ad8aa",
     "checkpointCodecVersion": 3,
-    "createEntryContractDigest": "bd26f5f59e3897ba3b3a9fa2a3c0a6b9d3e2644c4defd4355db8f83906e04d1d",
+    "createEntryContractDigest": "3d00bf1191e2fbd210c9e1bb4410f906494bb8ec27c67ac20edbbc9cd0c7d18a",
     "reconciliationContractVersion": 1,
     "runtimeContractVersion": 1,
     "writeCohortDigest": "598c2cebcbe9536936170d80d9de86a0901c1e42ffa02b938eef610880de5c2a",
@@ -11,21 +11,21 @@
   "capabilityBindings": [
     {
       "key": "create_entry",
-      "targetContractDigest": "5c711cc8d634e1421ec1457613e2045626425a216b678544ca7172489befef20",
+      "targetContractDigest": "e0d412f8c3bcc5023dd9219f629c61992ce396d9037a7d08526786c2ff3fbef5",
       "type": "tool"
     },
     {
       "key": "get_entry_detail",
-      "targetContractDigest": "e6f1b403a34351a9f15dc19f527b86d1c8a46fe389bf7af5479dc4f4155e6880",
+      "targetContractDigest": "f097272079da8907fe27c21462b120e8af890174671829fea2e75d66242b5505",
       "type": "tool"
     },
     {
       "key": "search_entries",
-      "targetContractDigest": "397a732793c6a7ed07fceac3da3174298f7d82d25dc26a22a6300cdbf8a44b56",
+      "targetContractDigest": "51c4f1ff67d124dd45f2a5a6f87ab065e06c7ec7f9c7987bed5e4d5be2b3d497",
       "type": "tool"
     }
   ],
-  "manifestDigest": "49167d930900a2f78f96718e2f17b62bab552099d76ea236812a2dcf1b0e4823",
+  "manifestDigest": "41de023671e6fd44ca711d02e3a7c961787e5f28e237b8c2d1df8acb72dc65f4",
   "modelBindingSlots": [
     "assistant"
   ],
@@ -36,7 +36,7 @@
     "sha256": "0d755a8ab001de152508b4a3a8474fc8c037fe80bed2b46a7ac0dadf364aed11"
   },
   "schemaVersion": 1,
-  "seedContractDigest": "de04ae0e555c2edfc4d18cbab1bf5c62061f4ce9b938c2f1cfcc8a3d42d106e9",
+  "seedContractDigest": "a43229f3dc8b186690b0a899c26431537b030cea2fce625b92b6dc387cf7b3d7",
   "skillArtifacts": [
     {
       "byteSize": 655,

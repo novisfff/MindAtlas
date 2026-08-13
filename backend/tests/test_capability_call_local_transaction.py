@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import unittest
 import uuid
+import ast
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.exc import IntegrityError
@@ -34,6 +36,26 @@ class LocalTransactionStoragePlaceholderTests(unittest.TestCase):
         )
 
         assert_no_committing_create_import()
+
+    def test_local_write_ast_uses_only_create_in_uow_for_entry_service(self) -> None:
+        from app.assistant.capability_calls import local_write
+
+        tree = ast.parse(Path(local_write.__file__).read_text(encoding="utf-8"))
+        imported_modules = {
+            node.module
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module
+        }
+        attribute_calls = {
+            node.func.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        }
+
+        self.assertNotIn("app.assistant.tools.entry_tools", imported_modules)
+        self.assertNotIn("create", attribute_calls)
+        self.assertNotIn("commit", attribute_calls)
+        self.assertIn("create_in_uow", attribute_calls)
 
 
 class EntryCreateInUowTests(unittest.TestCase):
@@ -257,7 +279,7 @@ class LocalTransactionalGoldenPathTests(unittest.TestCase):
         self.db.close()
 
     def test_atomic_create_and_call_success(self) -> None:
-        from app.assistant.capability_calls.local_write import (
+        from app.assistant.capability_calls.local_settlement import (
             create_entry_local_transactional,
         )
         from app.assistant.capability_calls.models import AssistantCapabilityCall

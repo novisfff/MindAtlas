@@ -16,6 +16,9 @@ from sqlalchemy.orm import joinedload, selectinload
 
 from app.common.exceptions import ApiException
 from app.assistant.capabilities.supported_writes import unsupported_write_boundary
+from app.assistant.capability_calls.create_entry_declaration import (
+    create_entry_declaration as create_entry,
+)
 from app.common.color_utils import pick_material_600_color
 from app.entry.models import Entry, TimeMode
 from app.entry.schemas import EntryRequest, EntrySearchRequest
@@ -663,51 +666,6 @@ def get_entry_detail(entry_id: str) -> str:
     """
     result = build_entry_detail_payload(entry_id)
     return json.dumps(result, ensure_ascii=False, indent=2)
-
-
-@tool
-def create_entry(
-    title: Optional[str] = None,
-    summary: Optional[str] = None,
-    content: Optional[str] = None,
-    type_code: Optional[str] = None,
-    tags: Optional[list[str]] = None,
-    time_mode: Optional[str] = None,
-    time_at: Optional[str] = None,
-    time_from: Optional[str] = None,
-    time_to: Optional[str] = None,
-) -> str:
-    """创建新的记录（写入数据库）。
-
-    Args:
-        title: 记录标题（可选；为空时会从内容中推断）
-        summary: 摘要（可选；为空时会从内容中截取）
-        content: 正文内容（必填）
-        type_code: 记录类型编码（可选；为空时使用默认类型，非空但无效时报错）
-        tags: 标签名称列表（可选；大小写不敏感复用，最多新建 5 个）
-        time_mode: 时间模式，"POINT" 或 "RANGE"（可选；为空时按提供的时间字段推断，否则默认今天）
-        time_at: 当 time_mode="POINT" 时的日期 (YYYY-MM-DD)
-        time_from: 当 time_mode="RANGE" 时的起始日期 (YYYY-MM-DD)
-        time_to: 当 time_mode="RANGE" 时的结束日期 (YYYY-MM-DD)
-
-    Returns:
-        创建成功的记录信息（JSON格式，包含id、标题、类型等）
-    """
-    db = _get_db()
-    request = _build_entry_request(
-        db,
-        title=title,
-        summary=summary,
-        content=content,
-        type_code=type_code,
-        tags=tags,
-        time_mode=time_mode,
-        time_at=time_at,
-        time_from=time_from,
-        time_to=time_to,
-    )
-    entry = EntryService(db).create(request)
-    return _serialize_entry_tool_result(entry)
 
 
 def update_entry(

@@ -491,7 +491,16 @@ class ToolCapabilityAdapter:
 
             bind = db_engine
         runner = wrap_tool_with_db(tool_obj, bind)
-        return runner(**dict(validated_input))
+        call_args: dict[str, Any] = dict(validated_input)
+        if getattr(tool_obj, "name", None) == "create_entry":
+            from app.assistant.capability_calls.create_entry_declaration import (
+                _gateway_invocation_for_capability_adapter,
+            )
+
+            call_args["_gateway_invocation"] = (
+                _gateway_invocation_for_capability_adapter()
+            )
+        return runner(**call_args)
 
     def _invoke_remote_tool(
         self,
