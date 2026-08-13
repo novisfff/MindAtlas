@@ -38,6 +38,35 @@ def _as_utc(dt: datetime) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
+def _assert_no_call_side_effects(db, *, run, call) -> None:
+    """Assert the complete pre-effect ledger boundary for a denied decision."""
+    from app.assistant.capability_calls.models import AssistantCapabilityCallAttempt
+    from app.assistant.durable.models import AssistantRunArtifact
+    from app.entry.models import Entry
+
+    assert int(call.attempt_count or 0) == 0
+    assert call.side_effect_started_at is None
+    assert call.output_artifact_id is None
+    assert (
+        db.query(AssistantCapabilityCallAttempt)
+        .filter_by(call_id=call.id)
+        .count()
+        == 0
+    )
+    assert (
+        db.query(Entry)
+        .filter(Entry.source_capability_call_id == call.id)
+        .count()
+        == 0
+    )
+    assert not any(
+        str(artifact.metadata_json.get("callId") or "") == str(call.id)
+        for artifact in db.query(AssistantRunArtifact)
+        .filter_by(run_id=run.id, kind="capability_call_result")
+        .all()
+    )
+
+
 def _parent_ledger(*, remaining_ms: int = 120_000):
     from app.assistant.policy import create_initial_ledger_state, normalize_run_budget_limits
     from app.assistant.policy.contracts import RunBudgetLimits
@@ -1470,6 +1499,22 @@ class DurableInterruptApiTests(unittest.TestCase):
             self.db.query(AssistantRunCheckpoint).filter_by(run_id=run.id).count(),
             before_checkpoints + 1,
         )
+        with self.assertRaises(DurableInterruptApiError) as actor_drift:
+            decide_call_owned(
+                self.db,
+                conversation_id=conv.id,
+                run_id=run.id,
+                interrupt_id=interrupt.id,
+                resolution_request_id=request_id,
+                expected_request_revision=int(interrupt.request_revision),
+                expected_run_revision=int(interrupt.request_run_revision),
+                outcome="approved",
+                actor=make_service_principal("call-owned-different-actor"),
+            )
+        self.assertEqual(actor_drift.exception.status_code, 409)
+        self.db.refresh(call)
+        self.db.refresh(run)
+        _assert_no_call_side_effects(self.db, run=run, call=call)
         current_checkpoint = self.db.get(
             AssistantRunCheckpoint,
             run.current_checkpoint_id,
@@ -1770,7 +1815,12 @@ class DurableInterruptApiTests(unittest.TestCase):
                 actor=make_service_principal("workflow-boundary"),
             )
         self.db.refresh(call)
+        self.db.refresh(interrupt)
+        self.db.refresh(run)
+        _assert_no_call_side_effects(self.db, run=run, call=call)
         self.assertEqual(call.status, "awaiting_approval")
+        self.assertEqual(interrupt.status, "pending")
+        self.assertEqual(run.status, "waiting_approval")
 
         # A second Call's exact Interrupt cannot authorize the first Call.
         conv2, _msg2, run2 = _make_waiting_run(self.db)
@@ -1791,6 +1841,16 @@ class DurableInterruptApiTests(unittest.TestCase):
                 actor=make_service_principal("other-call-boundary"),
             )
         self.db.refresh(other_call)
+        self.db.refresh(call)
+        self.db.refresh(other_interrupt)
+        self.db.refresh(run2)
+        _assert_no_call_side_effects(self.db, run=run, call=call)
+        _assert_no_call_side_effects(self.db, run=run2, call=other_call)
+        self.assertEqual(interrupt.status, "pending")
+        self.assertEqual(other_interrupt.status, "pending")
+        self.assertEqual(run.status, "waiting_approval")
+        self.assertEqual(run2.status, "waiting_approval")
+        self.assertEqual(call.status, "awaiting_approval")
         self.assertEqual(other_call.status, "awaiting_approval")
 
     def test_stop_closes_call_owned_interrupt_and_call_in_one_transaction(self) -> None:
@@ -1895,12 +1955,36 @@ class CallOwnedDecisionHttpTests(unittest.TestCase):
             "outcome": "approved",
         }
 
+        generic_resolve = client.post(
+            f"/api/assistant/conversations/{conv.id}/runs/{run.id}/interrupts/{interrupt.id}/resolve",
+            json={
+                "token": "not-a-call-owned-token",
+                "resolutionRequestId": str(uuid.uuid4()),
+                "expectedTokenRevision": 0,
+                "expectedRequestRevision": int(interrupt.request_revision),
+                "expectedRunRevision": int(interrupt.request_run_revision),
+                "outcome": "approved",
+                "values": {},
+            },
+            headers=headers,
+        )
+        self.assertEqual(generic_resolve.status_code, 409, generic_resolve.text)
+        self.db.refresh(call)
+        self.db.refresh(interrupt)
+        self.db.refresh(run)
+        _assert_no_call_side_effects(self.db, run=run, call=call)
+        self.assertEqual(call.status, "awaiting_approval")
+        self.assertEqual(interrupt.status, "pending")
+        self.assertEqual(run.status, "waiting_approval")
+
         missing_csrf = dict(headers)
         missing_csrf.pop("X-MindAtlas-CSRF", None)
         rejected = client.post(path, json=body, headers=missing_csrf)
         self.assertEqual(rejected.status_code, 403, rejected.text)
         self.db.refresh(call)
         self.db.refresh(interrupt)
+        self.db.refresh(run)
+        _assert_no_call_side_effects(self.db, run=run, call=call)
         self.assertEqual(call.status, "awaiting_approval")
         self.assertEqual(interrupt.status, "pending")
 
@@ -1908,6 +1992,8 @@ class CallOwnedDecisionHttpTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.db.refresh(call)
         self.db.refresh(interrupt)
+        self.db.refresh(run)
+        _assert_no_call_side_effects(self.db, run=run, call=call)
         self.assertEqual(call.status, "authorized")
         self.assertEqual(interrupt.status, "approved")
 
@@ -1937,8 +2023,8 @@ class CallOwnedDecisionHttpTests(unittest.TestCase):
 
     def test_http_negative_session_csrf_role_and_stale_paths_do_not_mutate(self) -> None:
         from app.assistant.router import router as assistant_router
-        from app.operator_auth.constants import SESSION_COOKIE_NAME
-        from app.operator_auth.models import OperatorAccount
+        from app.operator_auth.constants import CSRF_COOKIE_NAME, SESSION_COOKIE_NAME
+        from app.operator_auth.models import OperatorAccount, OperatorSession
         from tests.operator_session_helpers import (
             build_authenticated_skill_client,
             operator_test_settings,
@@ -1966,27 +2052,62 @@ class CallOwnedDecisionHttpTests(unittest.TestCase):
         wrong_csrf = dict(headers)
         wrong_csrf["X-MindAtlas-CSRF"] = "wrong-csrf"
         self.assertEqual(client.post(path, json=body, headers=wrong_csrf).status_code, 403)
+        self.db.refresh(call)
+        self.db.refresh(run)
+        _assert_no_call_side_effects(self.db, run=run, call=call)
 
         stale = dict(body)
         stale["expectedRunRevision"] = int(run.state_revision) + 1
         stale_response = client.post(path, json=stale, headers=headers)
         self.assertEqual(stale_response.status_code, 409, stale_response.text)
+        self.db.refresh(call)
+        self.db.refresh(run)
+        _assert_no_call_side_effects(self.db, run=run, call=call)
 
         account = self.db.query(OperatorAccount).one()
         account.role = "viewer"
         self.db.commit()
         viewer_response = client.post(path, json=body, headers=headers)
         self.assertEqual(viewer_response.status_code, 403, viewer_response.text)
+        self.db.refresh(call)
+        self.db.refresh(run)
+        _assert_no_call_side_effects(self.db, run=run, call=call)
         account.role = "operator"
         self.db.commit()
 
+        session_cookie = client.cookies.get(SESSION_COOKIE_NAME)
+        csrf_cookie = client.cookies.get(CSRF_COOKIE_NAME)
         client.cookies.set(SESSION_COOKIE_NAME, "invalid-session")
         invalid_session = client.post(path, json=body, headers=headers)
         self.assertEqual(invalid_session.status_code, 401, invalid_session.text)
+        self.db.refresh(call)
+        self.db.refresh(run)
+        _assert_no_call_side_effects(self.db, run=run, call=call)
+
+        assert session_cookie is not None
+        assert csrf_cookie is not None
+        client.cookies.set(SESSION_COOKIE_NAME, session_cookie)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf_cookie)
+        session = (
+            self.db.query(OperatorSession)
+            .filter(OperatorSession.token_digest.is_not(None))
+            .order_by(OperatorSession.created_at.desc())
+            .first()
+        )
+        assert session is not None
+        expired_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        # SQLite mirrors the production invariant idle_expires_at > created_at;
+        # move the synthetic session's creation boundary back with its expiry.
+        session.created_at = expired_at - timedelta(days=1)
+        session.idle_expires_at = expired_at
+        self.db.commit()
+        expired_session = client.post(path, json=body, headers=headers)
+        self.assertEqual(expired_session.status_code, 401, expired_session.text)
 
         self.db.refresh(call)
         self.db.refresh(interrupt)
         self.db.refresh(run)
+        _assert_no_call_side_effects(self.db, run=run, call=call)
         self.assertEqual(call.status, "awaiting_approval")
         self.assertEqual(interrupt.status, "pending")
         self.assertEqual(run.status, "waiting_approval")
