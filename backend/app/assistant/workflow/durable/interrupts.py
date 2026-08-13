@@ -63,6 +63,7 @@ CODE_INTERRUPT_PENDING_EXISTS = "interrupt_pending_exists"
 CODE_INTERRUPT_KEY_CONFLICT = "interrupt_key_conflict"
 CODE_INTERRUPT_IMMUTABLE = "interrupt_immutable"
 CODE_INTERRUPT_PEPPER_REQUIRED = "interrupt_pepper_required"
+CODE_CALL_OWNED_APPROVAL_REQUIRED = "capability_call_approval_required"
 
 INTERRUPT_STATUSES_TERMINAL = frozenset(
     {"approved", "rejected", "submitted", "cancelled", "expired"}
@@ -1346,6 +1347,12 @@ class DurableInterruptRepository:
                 "interrupt does not belong to run",
                 run=run,
             )
+        if str(row.interrupt_origin) == "capability_call":
+            raise InterruptConflict(
+                CODE_CALL_OWNED_APPROVAL_REQUIRED,
+                "call-owned approvals require the operator decision boundary",
+                run=run,
+            )
         if row.status != "pending":
             raise InterruptConflict(
                 CODE_INTERRUPT_NOT_PENDING,
@@ -1799,6 +1806,7 @@ def assert_no_sensitive_token_leak(payload: Any, *, corpus: Sequence[str]) -> No
 
 __all__ = [
     "APPROVAL_OUTCOMES",
+    "CODE_CALL_OWNED_APPROVAL_REQUIRED",
     "CODE_INTERRUPT_ALREADY_RESOLVED",
     "CODE_INTERRUPT_COMMENT_TOO_LONG",
     "CODE_INTERRUPT_EXPIRED",

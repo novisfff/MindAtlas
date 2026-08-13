@@ -192,50 +192,61 @@ def authorize_call_after_approval(
         )
 
         raise CapabilityCallConflict(CODE_CALL_NOT_FOUND, f"call {call_id} not found")
+    def _identity_mismatch(message: str) -> Any:
+        from app.assistant.capability_calls.repository import (
+            CODE_IDENTITY_MISMATCH,
+            CapabilityCallConflict,
+        )
+
+        raise CapabilityCallConflict(
+            CODE_IDENTITY_MISMATCH,
+            message,
+            call=call,
+        )
+
+    if str(call.status) != "awaiting_approval":
+        from app.assistant.capability_calls.repository import (
+            CODE_INVALID_TRANSITION,
+            CapabilityCallConflict,
+        )
+
+        raise CapabilityCallConflict(
+            CODE_INVALID_TRANSITION,
+            "call is not awaiting approval",
+            call=call,
+        )
+    if call.id != approval_binding.call_id:
+        _identity_mismatch("call_id drift invalidates approval")
     if str(call.authorization_digest) != expected_authorization_digest:
-        from app.assistant.capability_calls.repository import (
-            CODE_IDENTITY_MISMATCH,
-            CapabilityCallConflict,
-        )
-
-        raise CapabilityCallConflict(
-            CODE_IDENTITY_MISMATCH,
-            "authorization_digest changed; approval is not rebound",
-            call=call,
-        )
+        _identity_mismatch("authorization_digest changed; approval is not rebound")
+    if call.approval_binding_digest is not None and str(
+        call.approval_binding_digest
+    ) != str(approval_binding.approval_binding_digest):
+        _identity_mismatch("approval_binding_digest changed; approval is not rebound")
     if str(call.logical_call_key) != approval_binding.logical_call_key:
-        from app.assistant.capability_calls.repository import (
-            CODE_IDENTITY_MISMATCH,
-            CapabilityCallConflict,
-        )
-
-        raise CapabilityCallConflict(
-            CODE_IDENTITY_MISMATCH,
-            "logical_call_key drift invalidates approval",
-            call=call,
-        )
+        _identity_mismatch("logical_call_key drift invalidates approval")
     if str(call.input_digest) != approval_binding.input_digest:
-        from app.assistant.capability_calls.repository import (
-            CODE_IDENTITY_MISMATCH,
-            CapabilityCallConflict,
-        )
-
-        raise CapabilityCallConflict(
-            CODE_IDENTITY_MISMATCH,
-            "input_digest drift invalidates approval",
-            call=call,
-        )
+        _identity_mismatch("input_digest drift invalidates approval")
     if str(call.descriptor_digest) != approval_binding.descriptor_digest:
-        from app.assistant.capability_calls.repository import (
-            CODE_IDENTITY_MISMATCH,
-            CapabilityCallConflict,
-        )
-
-        raise CapabilityCallConflict(
-            CODE_IDENTITY_MISMATCH,
-            "descriptor_digest drift invalidates approval",
-            call=call,
-        )
+        _identity_mismatch("descriptor_digest drift invalidates approval")
+    stored_target_version = getattr(call, "target_version_id", None)
+    if stored_target_version != approval_binding.target_version_id:
+        _identity_mismatch("target_version_id drift invalidates approval")
+    expected_binding_digest = compute_approval_binding_digest(
+        call_id=approval_binding.call_id,
+        logical_call_key=approval_binding.logical_call_key,
+        owner_digest=approval_binding.owner_digest,
+        binding_contract_digest=approval_binding.binding_contract_digest,
+        input_digest=approval_binding.input_digest,
+        target_version_id=approval_binding.target_version_id,
+        target_digest=approval_binding.target_digest,
+        descriptor_digest=approval_binding.descriptor_digest,
+        authorization_digest=approval_binding.authorization_digest,
+        principal_digest=approval_binding.principal_digest,
+        request_revision=approval_binding.request_revision,
+    )
+    if expected_binding_digest != approval_binding.approval_binding_digest:
+        _identity_mismatch("approval binding digest is not canonical")
     return repo.transition_call(
         call_id=call_id,
         expected_call_revision=expected_call_revision,

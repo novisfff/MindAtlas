@@ -26,6 +26,8 @@ from app.assistant.durable.models import (
     AssistantRunBudgetRevision,
     AssistantRunCheckpoint,
     AssistantRunInterrupt,
+    AssistantRunManifestRevision,
+    AssistantRunPolicyRevision,
 )
 from app.assistant.durable.repository import (
     CODE_STALE_REVISION as CODE_RUN_STALE_REVISION,
@@ -42,15 +44,18 @@ from app.assistant.models import AssistantChatRun
 from app.assistant.policy.budgets import BudgetLedgerState
 from app.assistant.run_service import AssistantChatRunService
 from app.assistant.workflow.durable.interrupts import (
+    CODE_CALL_OWNED_APPROVAL_REQUIRED as _CODE_CALL_OWNED_APPROVAL_REQUIRED,
     CODE_INTERRUPT_ALREADY_RESOLVED,
     CODE_INTERRUPT_COMMENT_TOO_LONG,
     CODE_INTERRUPT_EXPIRED,
     CODE_INTERRUPT_IDEMPOTENCY_CONFLICT,
     CODE_INTERRUPT_NOT_FOUND,
+    CODE_INTERRUPT_NOT_EXPIRED,
     CODE_INTERRUPT_NOT_PENDING,
     CODE_INTERRUPT_OUTCOME_INVALID,
     CODE_INTERRUPT_PEPPER_REQUIRED,
     CODE_INTERRUPT_SCHEMA_INVALID,
+    CODE_STALE_REVISION as CODE_INTERRUPT_STALE_REVISION,
     CODE_INTERRUPT_TOKEN_INVALID,
     CODE_INTERRUPT_TOKEN_STALE,
     CODE_INTERRUPT_VALUES_INVALID,
@@ -79,6 +84,7 @@ CODE_INTERRUPT_RUN_REVISION_MISMATCH = "interrupt_run_revision_mismatch"
 CODE_INTERRUPT_RUN_CANCELLED = "interrupt_run_cancelled"
 CODE_DURABLE_INTERRUPT_AUTH_MODE_UNAVAILABLE = "durable_interrupt_auth_mode_unavailable"
 CODE_INTERRUPT_ALREADY_RESOLVED = "interrupt_already_resolved"
+CODE_CALL_OWNED_APPROVAL_REQUIRED = _CODE_CALL_OWNED_APPROVAL_REQUIRED
 
 # Outcomes that continue the frozen graph (queue resume).
 _QUEUEING_OUTCOMES = frozenset({"approved", "submitted"})
@@ -158,6 +164,7 @@ def _map_conflict_code(code: str) -> tuple[str, int]:
         CODE_INTERRUPT_COMMENT_TOO_LONG: (CODE_INTERRUPT_VALUES_INVALID, 422),
         CODE_INTERRUPT_OUTCOME_INVALID: (CODE_INTERRUPT_VALUES_INVALID, 422),
         CODE_INTERRUPT_PEPPER_REQUIRED: (CODE_DURABLE_INTERRUPT_AUTH_MODE_UNAVAILABLE, 503),
+        CODE_CALL_OWNED_APPROVAL_REQUIRED: (CODE_CALL_OWNED_APPROVAL_REQUIRED, 409),
         CODE_RUN_STALE_REVISION: (CODE_INTERRUPT_RUN_REVISION_MISMATCH, 409),
         CODE_TERMINAL_IMMUTABLE: (CODE_INTERRUPT_RUN_CANCELLED, 409),
     }
@@ -213,9 +220,15 @@ def _iso(value: datetime | None) -> str | None:
     return _as_utc(value).isoformat().replace("+00:00", "Z")
 
 
-def _allowed_actions(*, kind: str, status: str) -> list[str]:
+def _allowed_actions(
+    *, kind: str, status: str, interrupt_origin: str = "workflow_node"
+) -> list[str]:
     if status != "pending":
         return []
+    if interrupt_origin == "capability_call":
+        # Call-owned approval has a separate authenticated decision route;
+        # resume tokens are deliberately not exposed as an alternate path.
+        return ["approve", "reject"] if kind == "approval" else []
     if kind == "approval":
         return ["approve", "reject", "token", "resolve"]
     if kind == "input":
@@ -232,6 +245,16 @@ def serialize_interrupt_safe(
     """Public safe render state. Never exposes digests/tokens/values/comments."""
     status = str(interrupt.status)
     kind = str(interrupt.kind)
+    origin = str(getattr(interrupt, "interrupt_origin", "workflow_node"))
+    stored_payload = dict(interrupt.request_payload or {})
+    if origin == "capability_call":
+        # Binding digests and identity fields are server-side evidence, not a
+        # client-facing pending card. The aggregate persists a bounded safe
+        # proposal separately for display.
+        safe_payload = stored_payload.get("safeRequestPayload")
+        request_payload = dict(safe_payload) if isinstance(safe_payload, Mapping) else {}
+    else:
+        request_payload = stored_payload
     payload: dict[str, Any] = {
         "interruptId": str(interrupt.id),
         "runId": str(run.id),
@@ -247,12 +270,18 @@ def serialize_interrupt_safe(
         "runRevision": int(interrupt.request_run_revision),
         "tokenRevision": int(interrupt.token_revision),
         "expiresAt": _iso(interrupt.expires_at),
-        "allowedActions": _allowed_actions(kind=kind, status=status),
+        "allowedActions": _allowed_actions(
+            kind=kind, status=status, interrupt_origin=origin
+        ),
         "fields": render_interrupt_fields(interrupt.field_schema),
-        "requestPayload": dict(interrupt.request_payload or {}),
+        "requestPayload": request_payload,
         "initialValues": dict(interrupt.initial_values or {}),
-        "nodeId": str(interrupt.node_id),
-        "nodeVisitId": str(interrupt.node_visit_id),
+        "nodeId": str(interrupt.node_id) if interrupt.node_id is not None else None,
+        "nodeVisitId": (
+            str(interrupt.node_visit_id)
+            if interrupt.node_visit_id is not None
+            else None
+        ),
         "resolvedAt": _iso(interrupt.resolved_at),
     }
     if (
@@ -369,9 +398,17 @@ def rotate_interrupt_token(
     expected_request_revision: int,
     expected_run_revision: int,
 ) -> dict[str, Any]:
-    pepper = _require_pepper_for_token_ops()
     run = _authorize_run(db, conversation_id=conversation_id, run_id=run_id)
-    _get_interrupt_for_run(db, run_id=run_id, interrupt_id=interrupt_id)
+    interrupt_row = _get_interrupt_for_run(
+        db, run_id=run_id, interrupt_id=interrupt_id
+    )
+    if str(interrupt_row.interrupt_origin) == "capability_call":
+        raise DurableInterruptApiError(
+            CODE_CALL_OWNED_APPROVAL_REQUIRED,
+            "call-owned approvals require the operator decision boundary",
+            status_code=409,
+        )
+    pepper = _require_pepper_for_token_ops()
     if str(run.status) in {STATUS_CANCELLED, STATUS_CANCELLING, "failed", "completed"}:
         raise DurableInterruptApiError(
             CODE_INTERRUPT_RUN_CANCELLED,
@@ -550,6 +587,473 @@ def _build_resume_children(
     return [budget_row, ck_row], budget_id, checkpoint_id, deadline
 
 
+def _call_owned_binding_error(message: str) -> DurableInterruptApiError:
+    return DurableInterruptApiError(
+        "approval_binding_mismatch",
+        message,
+        status_code=409,
+    )
+
+
+def _call_owned_resolution_digest(
+    *,
+    interrupt_id: UUID,
+    call_id: UUID | None,
+    resolution_request_id: UUID,
+    expected_request_revision: int,
+    expected_run_revision: int,
+    outcome: str,
+    comment: str | None,
+    actor: Any,
+) -> str:
+    """Bind call-owned idempotency to the authenticated operator session."""
+    from app.assistant.domain.digests import sha256_canonical_json
+
+    return sha256_canonical_json(
+        {
+            "actorOperatorId": str(actor.operator_id),
+            "actorSessionId": str(actor.session_id),
+            "callId": str(call_id) if call_id is not None else None,
+            "comment": comment,
+            "expectedRequestRevision": int(expected_request_revision),
+            "expectedRunRevision": int(expected_run_revision),
+            "interruptId": str(interrupt_id),
+            "outcome": str(outcome),
+            "resolutionRequestId": str(resolution_request_id),
+        }
+    )
+
+
+def _load_and_verify_call_owned_binding(
+    db: Session,
+    *,
+    run: AssistantChatRun,
+    interrupt: AssistantRunInterrupt,
+    expected_call_id: UUID | None = None,
+    allow_resolved: bool = False,
+) -> tuple[Any, Any]:
+    """Load the exact frozen call/Interrupt binding under the Run lock.
+
+    Every input used to rebuild the digest comes from persisted rows. The
+    request body is deliberately absent from this function.
+    """
+    from app.assistant.capability_calls.approval import build_approval_binding
+    from app.assistant.capability_calls.repository import CapabilityCallRepository
+
+    if str(interrupt.interrupt_origin) != "capability_call":
+        raise _call_owned_binding_error("interrupt is not call-owned")
+    if interrupt.capability_call_id is None:
+        raise _call_owned_binding_error("call-owned interrupt has no capability call")
+    if interrupt.run_id != run.id:
+        raise _call_owned_binding_error("interrupt run ownership does not match")
+    if str(interrupt.status) != "pending" and not (
+        allow_resolved and str(interrupt.status) == "expired"
+    ):
+        raise DurableInterruptApiError(
+            CODE_INTERRUPT_ALREADY_RESOLVED,
+            f"interrupt already terminal with status {interrupt.status}",
+            status_code=409,
+        )
+
+    call_repo = CapabilityCallRepository(db)
+    call = call_repo.get_call(interrupt.capability_call_id, for_update=True)
+    if call is None:
+        raise _call_owned_binding_error("capability call is missing")
+    if expected_call_id is not None and call.id != expected_call_id:
+        raise _call_owned_binding_error("target capability call does not own the Interrupt")
+    if call.id != interrupt.capability_call_id or call.run_id != run.id:
+        raise _call_owned_binding_error("capability call ownership does not match")
+    if call.interrupt_id != interrupt.id:
+        raise _call_owned_binding_error("call/interrupt linkage does not match")
+    if call.manifest_revision_id != interrupt.manifest_revision_id:
+        raise _call_owned_binding_error("call/interrupt manifest revision drifted")
+    if str(call.status) != "awaiting_approval":
+        raise _call_owned_binding_error("capability call is not awaiting approval")
+
+    payload = interrupt.request_payload
+    if not isinstance(payload, Mapping):
+        raise _call_owned_binding_error("approval binding payload is missing")
+
+    def _required_text(name: str) -> str:
+        value = payload.get(name)
+        if not isinstance(value, str) or not value.strip():
+            raise _call_owned_binding_error(f"approval binding field {name} is missing")
+        return value
+
+    def _optional_uuid(name: str) -> UUID | None:
+        value = payload.get(name)
+        if value in (None, ""):
+            return None
+        try:
+            return UUID(str(value))
+        except (TypeError, ValueError) as exc:
+            raise _call_owned_binding_error(
+                f"approval binding field {name} is invalid"
+            ) from exc
+
+    payload_call_id = _required_text("callId")
+    if payload_call_id != str(call.id):
+        raise _call_owned_binding_error("call ID drift invalidates approval")
+    if payload.get("runId") not in (None, str(run.id)):
+        raise _call_owned_binding_error("run ID drift invalidates approval")
+
+    logical_call_key = _required_text("logicalCallKey")
+    owner_digest = _required_text("ownerDigest")
+    binding_contract_digest = _required_text("bindingContractDigest")
+    input_digest = _required_text("inputDigest")
+    target_digest = _required_text("targetDigest")
+    descriptor_digest = _required_text("descriptorDigest")
+    authorization_digest = _required_text("authorizationDigest")
+    principal_digest = _required_text("principalDigest")
+    approval_binding_digest = _required_text("approvalBindingDigest")
+    target_version_id = _optional_uuid("targetVersionId")
+
+    if logical_call_key != str(call.logical_call_key):
+        raise _call_owned_binding_error("logical_call_key drift invalidates approval")
+    if input_digest != str(call.input_digest):
+        raise _call_owned_binding_error("input_digest drift invalidates approval")
+    if descriptor_digest != str(call.descriptor_digest):
+        raise _call_owned_binding_error("descriptor_digest drift invalidates approval")
+    if authorization_digest != str(call.authorization_digest):
+        raise _call_owned_binding_error(
+            "authorization_digest drift invalidates approval"
+        )
+    if target_version_id != call.target_version_id:
+        raise _call_owned_binding_error("target_version_id drift invalidates approval")
+    try:
+        request_revision = int(payload.get("requestRevision"))
+    except (TypeError, ValueError) as exc:
+        raise _call_owned_binding_error(
+            "approval binding request revision is invalid"
+        ) from exc
+    if request_revision != int(interrupt.request_revision):
+        raise _call_owned_binding_error("request revision drift invalidates approval")
+
+    try:
+        binding = build_approval_binding(
+            call_id=call.id,
+            logical_call_key=logical_call_key,
+            owner_digest=owner_digest,
+            binding_contract_digest=binding_contract_digest,
+            input_digest=input_digest,
+            target_version_id=target_version_id,
+            target_digest=target_digest,
+            descriptor_digest=descriptor_digest,
+            authorization_digest=authorization_digest,
+            principal_digest=principal_digest,
+            request_revision=request_revision,
+        )
+    except (TypeError, ValueError) as exc:
+        raise _call_owned_binding_error("approval binding fields are invalid") from exc
+    if binding.approval_binding_digest != approval_binding_digest:
+        raise _call_owned_binding_error("approval binding digest is not canonical")
+    if str(call.approval_binding_digest or "") != approval_binding_digest:
+        raise _call_owned_binding_error(
+            "stored call approval binding does not match the Interrupt"
+        )
+
+    # Where the full frozen snapshots are present, cross-check the target and
+    # principal evidence as an additional independent persisted boundary. Older
+    # synthetic rows may omit these shapes; their canonical payload digest still
+    # provides the immutable binding check above.
+    manifest = db.get(AssistantRunManifestRevision, call.manifest_revision_id)
+    manifest_payload = getattr(manifest, "payload", None)
+    if not isinstance(manifest_payload, Mapping):
+        raise _call_owned_binding_error("persisted manifest evidence is missing")
+    capabilities = manifest_payload.get("capabilities")
+    if not isinstance(capabilities, list):
+        raise _call_owned_binding_error("persisted manifest capability evidence is missing")
+    matching = [
+        item
+        for item in capabilities
+        if isinstance(item, Mapping)
+        and str(item.get("capabilityKey") or item.get("capability_key") or "")
+        == str(call.domain_key)
+    ]
+    if len(matching) != 1:
+        raise _call_owned_binding_error("persisted manifest target is missing or ambiguous")
+    item = matching[0]
+    if str(
+        item.get("bindingContractDigest") or item.get("binding_contract_digest") or ""
+    ) != binding_contract_digest:
+        raise _call_owned_binding_error("manifest binding contract drifted")
+    target_version_value = item.get("targetVersionId") or item.get("target_version_id")
+    if target_version_value not in (
+        None,
+        str(target_version_id) if target_version_id else None,
+    ):
+        raise _call_owned_binding_error("manifest target version drifted")
+    if str(item.get("resolutionDigest") or item.get("resolution_digest") or "") != target_digest:
+        raise _call_owned_binding_error("manifest target digest drifted")
+
+    checkpoint = db.get(AssistantRunCheckpoint, interrupt.checkpoint_id)
+    policy = (
+        db.get(AssistantRunPolicyRevision, checkpoint.policy_revision_id)
+        if checkpoint is not None and checkpoint.policy_revision_id is not None
+        else None
+    )
+    policy_payload = getattr(policy, "payload", None)
+    if not isinstance(policy_payload, Mapping):
+        raise _call_owned_binding_error("persisted policy evidence is missing")
+    principal_payload = policy_payload.get("principal")
+    if not isinstance(principal_payload, Mapping):
+        raise _call_owned_binding_error("persisted principal evidence is missing")
+    try:
+        from app.assistant.capabilities.contracts import CapabilityPrincipal
+        from app.assistant.policy.contracts import compute_principal_digest
+
+        frozen_principal = CapabilityPrincipal.model_validate(principal_payload)
+        if compute_principal_digest(frozen_principal) != principal_digest:
+            raise _call_owned_binding_error("persisted principal digest drifted")
+    except DurableInterruptApiError:
+        raise
+    except (TypeError, ValueError) as exc:
+        raise _call_owned_binding_error("persisted principal evidence is invalid") from exc
+    owner_refs = policy_payload.get("ownerPolicyRefs") or policy_payload.get(
+        "owner_policy_refs"
+    )
+    if not isinstance(owner_refs, list):
+        raise _call_owned_binding_error("persisted owner policy evidence is missing")
+    matching_owner = [
+        owner_item
+        for owner_item in owner_refs
+        if isinstance(owner_item, Mapping)
+        and str(owner_item.get("ownerKind") or owner_item.get("owner_kind") or "")
+        == str(call.owner_kind)
+        and (
+            call.owner_version_id is None
+            or str(owner_item.get("ownerVersionId") or owner_item.get("owner_version_id") or "")
+            == str(call.owner_version_id)
+        )
+    ]
+    if len(matching_owner) != 1:
+        raise _call_owned_binding_error("persisted owner policy is missing or ambiguous")
+    owner_policy = matching_owner[0].get("policyDigest") or matching_owner[0].get(
+        "policy_digest"
+    )
+    if str(owner_policy or "") != owner_digest:
+        raise _call_owned_binding_error("persisted owner digest drifted")
+
+    return call, binding
+
+
+def decide_call_owned(
+    db: Session,
+    *,
+    conversation_id: UUID,
+    run_id: UUID,
+    interrupt_id: UUID,
+    call_id: UUID | None = None,
+    resolution_request_id: UUID,
+    expected_request_revision: int,
+    expected_run_revision: int,
+    outcome: str,
+    comment: str | None = None,
+    actor: Any,
+) -> dict[str, Any]:
+    """Resolve a capability-call approval with authenticated operator authority."""
+    if actor is None or getattr(actor, "role", None) != "operator":
+        raise DurableInterruptApiError(
+            "operator_role_required", "operator role is required", status_code=403
+        )
+    if outcome not in {"approved", "rejected", "expired", "cancelled"}:
+        raise DurableInterruptApiError(
+            CODE_INTERRUPT_OUTCOME_INVALID,
+            "unsupported call-owned approval outcome",
+            status_code=422,
+        )
+
+    run = _authorize_run(db, conversation_id=conversation_id, run_id=run_id)
+    repo = DurableInterruptRepository(db, **_settings_repo_kwargs())
+    try:
+        locked_run = repo._lock_run(run_id)  # noqa: SLF001 - shared CAS boundary
+        existing = repo.get_by_resolution_request_id(
+            run_id=run_id,
+            resolution_request_id=resolution_request_id,
+            for_update=True,
+        )
+        expected_digest = _call_owned_resolution_digest(
+            interrupt_id=interrupt_id,
+            call_id=call_id,
+            resolution_request_id=resolution_request_id,
+            expected_request_revision=expected_request_revision,
+            expected_run_revision=expected_run_revision,
+            outcome=outcome,
+            comment=comment,
+            actor=actor,
+        )
+        if existing is not None:
+            if existing.id != interrupt_id or existing.resolution_digest != expected_digest:
+                raise InterruptConflict(
+                    CODE_INTERRUPT_IDEMPOTENCY_CONFLICT,
+                    "resolution_request_id reused with different decision or actor",
+                    run=locked_run,
+                )
+            db.commit()
+            db.refresh(existing)
+            return serialize_interrupt_safe(existing, run=locked_run)
+
+        if int(locked_run.state_revision) != int(expected_run_revision):
+            raise InterruptConflict(
+                CODE_RUN_STALE_REVISION,
+                "run state_revision mismatch",
+                run=locked_run,
+            )
+
+        interrupt = repo._lock_interrupt(interrupt_id)  # noqa: SLF001
+        if interrupt.run_id != run_id:
+            raise InterruptConflict(
+                CODE_INTERRUPT_NOT_FOUND, "interrupt does not belong to run", run=locked_run
+            )
+        if int(interrupt.request_revision) != int(expected_request_revision):
+            raise InterruptConflict(
+                CODE_INTERRUPT_STALE_REVISION, "request_revision mismatch", run=locked_run
+            )
+        if int(interrupt.request_run_revision) != int(expected_run_revision):
+            raise InterruptConflict(
+                CODE_INTERRUPT_STALE_REVISION, "request_run_revision mismatch", run=locked_run
+            )
+        call, binding = _load_and_verify_call_owned_binding(
+            db,
+            run=locked_run,
+            interrupt=interrupt,
+            expected_call_id=call_id,
+        )
+        now = repo._db_now()  # noqa: SLF001
+        if outcome == "expired" and _as_utc(interrupt.expires_at) > now:
+            raise InterruptConflict(
+                CODE_INTERRUPT_NOT_EXPIRED,
+                "interrupt has not reached expires_at",
+                run=locked_run,
+            )
+        if outcome != "expired" and _as_utc(interrupt.expires_at) <= now:
+            raise InterruptConflict(
+                CODE_INTERRUPT_EXPIRED,
+                "interrupt has expired",
+                run=locked_run,
+            )
+        clean_comment = comment
+        if clean_comment is not None and len(clean_comment) > int(
+            get_settings().assistant_interrupt_comment_max_chars
+        ):
+            raise InterruptSchemaError(CODE_INTERRUPT_COMMENT_TOO_LONG)
+        if str(locked_run.status) not in WAITING_STATUSES:
+            raise InterruptConflict(
+                CODE_INTERRUPT_NOT_PENDING,
+                f"run is not waiting (status={locked_run.status})",
+                run=locked_run,
+            )
+
+        child_rows, budget_id, checkpoint_id, deadline = _build_resume_children(
+            db,
+            run=locked_run,
+            interrupt=interrupt,
+            expected_revision=int(locked_run.state_revision),
+        )
+        for row in child_rows:
+            db.add(row)
+        db.flush()
+
+        status = {
+            "approved": "approved",
+            "rejected": "rejected",
+            "expired": "expired",
+            "cancelled": "cancelled",
+        }[outcome]
+        interrupt.status = status
+        interrupt.decision = outcome
+        interrupt.comment = clean_comment
+        interrupt.resolution_request_id = resolution_request_id
+        interrupt.resolution_digest = expected_digest
+        interrupt.resolution_checkpoint_id = checkpoint_id
+        interrupt.resolution_budget_revision_id = budget_id
+        interrupt.resolution_run_revision = int(locked_run.state_revision) + 1
+        interrupt.resume_token_digest = None
+        interrupt.resolved_at = now
+        interrupt.updated_at = now
+        db.flush()
+
+        from app.assistant.capability_calls.repository import (
+            CapabilityCallConflict,
+            CapabilityCallRepository,
+        )
+
+        call_repo = CapabilityCallRepository(db)
+        target = {
+            "approved": "authorized",
+            "rejected": "rejected",
+            "expired": "expired",
+            "cancelled": "cancelled",
+        }[outcome]
+        try:
+            call = call_repo.transition_call(
+                call_id=call.id,
+                expected_call_revision=int(call.state_revision),
+                expected_run_revision=int(locked_run.state_revision),
+                to_status=target,
+                lease=None,
+                approval_binding_digest=(
+                    binding.approval_binding_digest if target == "authorized" else None
+                ),
+                failure_code=None if target == "authorized" else f"approval_{target}",
+            )
+        except CapabilityCallConflict as exc:
+            raise DurableInterruptApiError(
+                getattr(exc, "code", "approval_binding_mismatch"),
+                str(exc),
+                status_code=409,
+            ) from exc
+
+        run_repo = DurableRunRepository(db)
+        events = (
+            EventSpec(
+                event_key=f"human_interrupt_resolved:{interrupt_id}:{resolution_request_id}",
+                event_name="human_interrupt_resolved",
+                payload={
+                    "interruptId": str(interrupt_id),
+                    "status": status,
+                    "kind": str(interrupt.kind),
+                    "resolutionRequestId": str(resolution_request_id),
+                    "requestRevision": int(interrupt.request_revision),
+                    "runRevision": int(locked_run.state_revision),
+                },
+                visibility="public",
+            ),
+            EventSpec(
+                event_key=f"run_status:queued:{interrupt_id}:{resolution_request_id}",
+                event_name="run_status",
+                payload={
+                    "status": "queued",
+                    "interruptId": str(interrupt_id),
+                    "fromStatus": str(locked_run.status),
+                },
+                visibility="public",
+            ),
+        )
+        commit = run_repo.commit_resume_queued(
+            run_id=run_id,
+            expected_revision=int(locked_run.state_revision),
+            events=events,
+            children=DurableChildBundle(
+                rows=[],
+                current_checkpoint_id=checkpoint_id,
+                current_budget_revision_id=budget_id,
+            ),
+            set_deadline_at=deadline,
+        )
+        db.refresh(interrupt)
+        return serialize_interrupt_safe(interrupt, run=commit.run)
+    except DurableInterruptApiError:
+        db.rollback()
+        raise
+    except (InterruptConflict, DurableRunConflict, InterruptSchemaError) as exc:
+        db.rollback()
+        raise _conflict_to_api(exc) from exc
+    except Exception:
+        db.rollback()
+        raise
+
+
 def resolve_interrupt_http(
     db: Session,
     *,
@@ -572,14 +1076,22 @@ def resolve_interrupt_http(
     derive child budget + resume Checkpoint under lock → CAS → commit.
     Children are never built/flushed before first-resolution validation succeeds.
     """
-    pepper = _require_pepper_for_token_ops()
     run = _authorize_run(db, conversation_id=conversation_id, run_id=run_id)
     interrupt_row = _get_interrupt_for_run(
         db, run_id=run_id, interrupt_id=interrupt_id
     )
 
+    if str(interrupt_row.interrupt_origin) == "capability_call":
+        raise DurableInterruptApiError(
+            CODE_CALL_OWNED_APPROVAL_REQUIRED,
+            "call-owned approvals require the operator decision boundary",
+            status_code=409,
+        )
+
+    pepper = _require_pepper_for_token_ops()
+
     outcome = str(outcome)
-    call_owned = str(interrupt_row.interrupt_origin) == "capability_call"
+    call_owned = False
     # A call-owned terminal decision is a Tool result, not a terminal Run
     # cancellation. Queue the Run for Provider resume for approved and denied
     # outcomes alike; only workflow-node cancellation terminates the Run.
@@ -664,71 +1176,11 @@ def resolve_interrupt_http(
         """
         nonlocal run
         if str(result.interrupt.interrupt_origin) == "capability_call":
-            from app.assistant.capability_calls.repository import (
-                CapabilityCallConflict,
-                CapabilityCallRepository,
+            raise DurableInterruptApiError(
+                CODE_CALL_OWNED_APPROVAL_REQUIRED,
+                "call-owned approvals require the operator decision boundary",
+                status_code=409,
             )
-
-            call_id = result.interrupt.capability_call_id
-            if call_id is None:
-                raise DurableInterruptApiError(
-                    "protocol_error",
-                    "call-owned interrupt is missing capability_call_id",
-                    status_code=409,
-                )
-            call_repo = CapabilityCallRepository(db)
-            call = call_repo.get_call(call_id, for_update=True)
-            if (
-                call is None
-                or call.run_id != run_id
-                or call.interrupt_id != result.interrupt.id
-            ):
-                raise DurableInterruptApiError(
-                    "approval_binding_mismatch",
-                    "call-owned interrupt linkage does not match",
-                    status_code=409,
-                )
-            binding = (result.interrupt.request_payload or {}).get(
-                "approvalBindingDigest"
-            )
-            if not binding or str(call.approval_binding_digest) != str(binding):
-                raise DurableInterruptApiError(
-                    "approval_binding_mismatch",
-                    "stored approval binding does not match the call",
-                    status_code=409,
-                )
-            target = {
-                "approved": "authorized",
-                "rejected": "rejected",
-                "expired": "expired",
-                "cancelled": "cancelled",
-            }.get(str(result.interrupt.status))
-            if target is None:
-                raise DurableInterruptApiError(
-                    "protocol_error",
-                    f"unsupported call-owned resolution {result.interrupt.status!r}",
-                    status_code=409,
-                )
-            try:
-                call_repo.transition_call(
-                    call_id=call.id,
-                    expected_call_revision=int(call.state_revision),
-                    expected_run_revision=int(run.state_revision),
-                    to_status=target,
-                    lease=None,
-                    approval_binding_digest=(
-                        str(binding) if target == "authorized" else None
-                    ),
-                    failure_code=(
-                        None if target == "authorized" else f"approval_{target}"
-                    ),
-                )
-            except CapabilityCallConflict as exc:
-                raise DurableInterruptApiError(
-                    getattr(exc, "code", "approval_binding_mismatch"),
-                    str(exc),
-                    status_code=409,
-                ) from exc
         run_repo = DurableRunRepository(db)
         if queues:
             from_status = str(prepared["from_status"])
@@ -1017,6 +1469,81 @@ def expire_one_interrupt(
             db.commit()
             return True
 
+        if str(result.interrupt.interrupt_origin) == "capability_call":
+            # Expiry is a call-owned decision as well: validate the frozen
+            # binding before closing the call, then resume the waiting Run so
+            # the Provider observes the terminal call result.
+            call, binding = _load_and_verify_call_owned_binding(
+                db,
+                run=run,
+                interrupt=result.interrupt,
+                allow_resolved=True,
+            )
+            if str(run.status) not in WAITING_STATUSES:
+                db.commit()
+                return True
+            expected_revision = int(run.state_revision)
+            child_rows, budget_id, checkpoint_id, deadline = _build_resume_children(
+                db,
+                run=run,
+                interrupt=result.interrupt,
+                expected_revision=expected_revision,
+            )
+            for row in child_rows:
+                db.add(row)
+            db.flush()
+            result.interrupt.resolution_checkpoint_id = checkpoint_id
+            result.interrupt.resolution_budget_revision_id = budget_id
+            result.interrupt.resolution_run_revision = expected_revision + 1
+            db.flush()
+            from app.assistant.capability_calls.repository import CapabilityCallRepository
+
+            CapabilityCallRepository(db).transition_call(
+                call_id=call.id,
+                expected_call_revision=int(call.state_revision),
+                expected_run_revision=expected_revision,
+                to_status="expired",
+                lease=None,
+                failure_code="approval_expired",
+            )
+            events = (
+                EventSpec(
+                    event_key=(
+                        f"human_interrupt_expired:{interrupt_id}:"
+                        f"{result.interrupt.resolution_request_id}"
+                    ),
+                    event_name="human_interrupt_expired",
+                    payload={
+                        "interruptId": str(interrupt_id),
+                        "status": "expired",
+                        "resolutionRequestId": str(result.interrupt.resolution_request_id),
+                    },
+                    visibility="public",
+                ),
+                EventSpec(
+                    event_key=f"run_status:queued:expired:{interrupt_id}",
+                    event_name="run_status",
+                    payload={
+                        "status": "queued",
+                        "interruptId": str(interrupt_id),
+                        "reason": "capability_call_expired",
+                    },
+                    visibility="public",
+                ),
+            )
+            run_repo.commit_resume_queued(
+                run_id=run_id,
+                expected_revision=expected_revision,
+                events=events,
+                children=DurableChildBundle(
+                    rows=[],
+                    current_checkpoint_id=checkpoint_id,
+                    current_budget_revision_id=budget_id,
+                ),
+                set_deadline_at=deadline,
+            )
+            return True
+
         if str(run.status) in WAITING_STATUSES and _interrupt_has_typed_expiry(
             db,
             interrupt=result.interrupt,
@@ -1118,6 +1645,9 @@ def expire_one_interrupt(
             CODE_TERMINAL_IMMUTABLE,
         }:
             return False
+        raise
+    except Exception:
+        db.rollback()
         raise
 
 
@@ -1262,8 +1792,42 @@ def service_resolve(
         raise  # pragma: no cover
 
 
+def service_decide_call_owned(
+    db: Session,
+    *,
+    conversation_id: UUID,
+    run_id: UUID,
+    interrupt_id: UUID,
+    call_id: UUID | None = None,
+    resolution_request_id: UUID,
+    expected_request_revision: int,
+    expected_run_revision: int,
+    outcome: str,
+    comment: str | None = None,
+    actor: Any,
+) -> dict[str, Any]:
+    try:
+        return decide_call_owned(
+            db,
+            conversation_id=conversation_id,
+            run_id=run_id,
+            interrupt_id=interrupt_id,
+            call_id=call_id,
+            resolution_request_id=resolution_request_id,
+            expected_request_revision=expected_request_revision,
+            expected_run_revision=expected_run_revision,
+            outcome=outcome,
+            comment=comment,
+            actor=actor,
+        )
+    except DurableInterruptApiError as exc:
+        _raise_api(exc)
+        raise  # pragma: no cover
+
+
 __all__ = [
     "CODE_DURABLE_INTERRUPT_AUTH_MODE_UNAVAILABLE",
+    "CODE_CALL_OWNED_APPROVAL_REQUIRED",
     "CODE_DURABLE_INTERRUPT_CONVERSATION_MISMATCH",
     "CODE_DURABLE_INTERRUPT_NOT_FOUND",
     "CODE_INTERRUPT_ALREADY_RESOLVED",
@@ -1277,11 +1841,13 @@ __all__ = [
     "list_expired_pending_interrupt_ids",
     "list_pending_interrupts",
     "resolve_interrupt_http",
+    "decide_call_owned",
     "rotate_interrupt_token",
     "scan_expired_interrupts",
     "serialize_interrupt_safe",
     "service_get_detail",
     "service_list_pending",
     "service_resolve",
+    "service_decide_call_owned",
     "service_rotate_token",
 ]

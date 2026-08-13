@@ -1288,11 +1288,22 @@ class DurableCapabilityLedgerAggregate:
                             if existing is not None and existing.interrupt_id is not None
                             else _stable_uuid(f"mindatlas:interrupt:{call_id}")
                         ),
-                        "approvalBindingDigest": binding.approval_binding_digest,
+                        "ownerDigest": decision.owner_policy_digest,
                         "bindingContractDigest": (
                             request.binding.ref.binding_contract_digest
                         ),
+                        "inputDigest": input_digest,
+                        "targetVersionId": (
+                            str(request.descriptor.target_version_id)
+                            if request.descriptor.target_version_id is not None
+                            else None
+                        ),
                         "targetDigest": request.binding.ref.resolution_digest,
+                        "descriptorDigest": request.descriptor.descriptor_digest,
+                        "authorizationDigest": decision.decision_digest,
+                        "principalDigest": decision.principal_digest,
+                        "requestRevision": 1,
+                        "approvalBindingDigest": binding.approval_binding_digest,
                         "logicalCallKey": logical_key,
                         "safeRequestPayload": redact_mapping(
                             {

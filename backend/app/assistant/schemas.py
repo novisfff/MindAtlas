@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any, Literal, Optional
 from uuid import UUID
 
-from pydantic import Field
+from pydantic import ConfigDict, Field
 
 from app.common.schemas import CamelModel, OrmModel
 
@@ -85,4 +85,21 @@ class DurableInterruptResolveRequest(CamelModel):
     outcome: Literal["approved", "rejected", "submitted", "cancelled"]
     values: dict[str, Any] = Field(default_factory=dict)
     # Hard ceiling 4000; settings may lower server-side validation further.
+    comment: str | None = Field(default=None, max_length=4000)
+
+
+class DurableCallOwnedDecisionRequest(CamelModel):
+    """Server-owned decision/CAS data for a capability-call approval.
+
+    Binding digests, call identity, and actor identity are intentionally absent:
+    those values are loaded from the frozen durable rows and the authenticated
+    ``OperatorPrincipal`` at the HTTP boundary.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    resolution_request_id: UUID
+    expected_request_revision: int = Field(..., ge=1)
+    expected_run_revision: int = Field(..., ge=0)
+    outcome: Literal["approved", "rejected", "expired", "cancelled"]
     comment: str | None = Field(default=None, max_length=4000)
