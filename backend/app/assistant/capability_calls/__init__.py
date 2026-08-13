@@ -23,6 +23,7 @@ from app.assistant.capability_calls.contracts import (  # noqa: F401
 )
 from app.assistant.capability_calls.idempotency import (  # noqa: F401
     digest_input_payload,
+    derive_capability_call_identity,
     idempotency_key_fingerprint,
     make_nested_agent_logical_call_key,
     make_provider_logical_call_key,
@@ -36,6 +37,7 @@ from app.assistant.capability_calls.models import (  # noqa: F401
     AssistantCapabilityReconciliation,
 )
 from app.assistant.capability_calls.repository import (  # noqa: F401
+    CODE_IDEMPOTENCY_CONFLICT,
     CapabilityCallConflict,
     CapabilityCallRepository,
     ProposeCallSpec,
@@ -60,6 +62,15 @@ from app.assistant.capability_calls.reconciliation import (  # noqa: F401
 )
 from app.assistant.capability_calls.uow import (  # noqa: F401
     CapabilityUnitOfWork,
+)
+from app.assistant.capability_calls.local_write import (  # noqa: F401
+    LocalCreateEntrySettlement,
+    LocalCommitRecovery,
+)
+from app.assistant.capability_calls.faults import (  # noqa: F401
+    CapabilityFaultPort,
+    CapabilityInjectedFault,
+    CREATE_ENTRY_FAULT_POINTS,
 )
 from app.assistant.capability_calls.approval import (  # noqa: F401
     build_approval_binding,
@@ -97,6 +108,7 @@ __all__ = [
     "CAPABILITY_LEDGER_MODES",
     "CALL_ATTEMPT_STATUSES",
     "CapabilityCallConflict",
+    "CODE_IDEMPOTENCY_CONFLICT",
     "CapabilityCallRepository",
     "CapabilityCallSettlementRepository",
     "CapabilityCallStatus",
@@ -120,6 +132,11 @@ __all__ = [
     "build_approval_binding",
     "render_safe_approval_card",
     "CapabilityUnitOfWork",
+    "LocalCreateEntrySettlement",
+    "LocalCommitRecovery",
+    "CapabilityFaultPort",
+    "CapabilityInjectedFault",
+    "CREATE_ENTRY_FAULT_POINTS",
     "CapabilityReconciliationService",
     "HmacReconciliationEvidenceVerifier",
     "ReconciliationEvidenceIssuer",
@@ -132,6 +149,7 @@ __all__ = [
     "gateway_allows_write",
     "CapabilityCallApprovalBindingV1",
     "digest_input_payload",
+    "derive_capability_call_identity",
     "idempotency_key_fingerprint",
     "make_nested_agent_logical_call_key",
     "make_provider_logical_call_key",

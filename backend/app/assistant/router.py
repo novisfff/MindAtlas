@@ -5,6 +5,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
+from starlette.requests import Request
 
 from app.assistant.schemas import (
     AssistantRunResponse,
@@ -23,7 +24,13 @@ from app.assistant.workflow.durable import interrupt_api as durable_interrupt_ap
 from app.common.responses import ApiResponse
 from app.database import get_db
 from app.operator_auth.contracts import OperatorPrincipal
-from app.operator_auth.dependencies import require_csrf, require_operator_principal
+from app.operator_auth.audit import OperatorAuditRepository
+from app.operator_auth.dependencies import (
+    request_security_context,
+    require_csrf,
+    require_operator_principal,
+)
+from app.config import Settings, get_settings
 
 
 router = APIRouter(prefix="/api/assistant", tags=["assistant"])
@@ -263,9 +270,11 @@ def decide_call_owned_interrupt(
     run_id: UUID,
     interrupt_id: UUID,
     request: DurableCallOwnedDecisionRequest,
+    http_request: Request,
     db: Session = Depends(get_db),
     principal: OperatorPrincipal = Depends(require_operator_principal),
     _csrf: None = Depends(require_csrf),
+    settings: Settings = Depends(get_settings),
     call_id: UUID | None = None,
 ) -> ApiResponse:
     """Authenticated operator boundary for capability-call approval decisions."""
@@ -283,5 +292,21 @@ def decide_call_owned_interrupt(
         outcome=request.outcome,
         comment=request.comment,
         actor=principal,
+        commit=False,
     )
+    OperatorAuditRepository(db).append(
+        event_type="control_plane_mutation_committed",
+        outcome="succeeded",
+        context=request_security_context(http_request, settings),
+        operator_id=principal.operator_id,
+        session_id=principal.session_id,
+        metadata={
+            "mutation": "capability_call_approval",
+            "callId": str(call_id) if call_id is not None else None,
+            "interruptId": str(interrupt_id),
+            "outcome": request.outcome,
+            "resolutionRequestId": str(request.resolution_request_id),
+        },
+    )
+    db.commit()
     return ApiResponse.ok(payload)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hmac
 import json
 from typing import Any, Callable, Mapping
 from uuid import UUID, NAMESPACE_URL, uuid4, uuid5
@@ -10,6 +11,7 @@ from uuid import UUID, NAMESPACE_URL, uuid4, uuid5
 from sqlalchemy.orm import Session
 
 from app.assistant.capability_calls.approval import build_approval_binding, redact_mapping
+from app.assistant.capability_calls.faults import CapabilityFaultPort
 from app.assistant.capability_calls.idempotency import make_server_idempotency_key
 from app.assistant.capability_calls.repository import (
     CapabilityCallConflict,
@@ -86,6 +88,7 @@ class DurableCapabilityLedgerAggregate:
     runtime_snapshot_provider: Callable[[], Mapping[str, Any]] | None = None
     runtime_closure_provider: Callable[[Any], Any] | None = None
     dispatch_guard: Any | None = None
+    fault_port: CapabilityFaultPort | None = None
 
     def __post_init__(self) -> None:
         if self.write_guard is None or not hasattr(self.write_guard, "lock_port"):
@@ -97,6 +100,10 @@ class DurableCapabilityLedgerAggregate:
         self._pending_pause: dict[str, Any] | None = None
         self._pending_result: dict[str, Any] | None = None
         self._local_attempt_id: UUID | None = None
+        self._local_entry_id: UUID | None = None
+        self._last_local_settlement: Any | None = None
+        self._last_local_recovery: Any | None = None
+        self._local_commit_boundary_entered = False
         self._local_budget_checkpoint: Mapping[str, Any] | None = None
         self._local_budget_call_id: str | None = None
         self._local_budget_state: str | None = None
@@ -109,6 +116,17 @@ class DurableCapabilityLedgerAggregate:
             self._local_budget_checkpoint = checkpoint()
         self._local_budget_call_id = call_id
         self._local_budget_state = state
+
+    def _fault(self, point: str) -> None:
+        if self.fault_port is not None:
+            self.fault_port.hit(point)  # type: ignore[arg-type]
+
+    def _decision_for_call(self, *, call_id: str) -> Any:
+        # Policy classification is not the authenticated call-owned approval
+        # mutation.  The approval fault points are owned exclusively by
+        # ``decide_call_owned`` so each named boundary has one meaning.
+        decision = self.authorization_factory.decision_for_call(call_id=call_id)
+        return decision
 
     def _restore_local_budget(self) -> None:
         checkpoint = self._local_budget_checkpoint
@@ -130,6 +148,329 @@ class DurableCapabilityLedgerAggregate:
             )
         self.dispatch_guard.finish(call_id=call_id, status=status)
         self._local_budget_state = "finished"
+
+    @property
+    def last_local_settlement(self) -> Any | None:
+        """Most recently committed local create_entry settlement references."""
+        return self._last_local_settlement
+
+    @property
+    def last_local_recovery(self) -> Any | None:
+        return self._last_local_recovery
+
+    def recover_local_commit(
+        self,
+        call_id: UUID,
+        *,
+        proven_rollback: bool = False,
+    ) -> Any:
+        """Classify a local commit boundary using a genuinely fresh Session.
+
+        The current worker Session may be poisoned by a disconnect and must not
+        be used as evidence.  A source Entry is only one part of the proof: the
+        durable Call/Attempt/Artifact/Provider-message/Checkpoint/obligation
+        bundle must agree before the outcome is classified as committed.  Only
+        an explicit transaction-rollback observation proves rollback. Every
+        other result is quarantined as ``unknown`` by the caller.
+        """
+        from sqlalchemy.orm import sessionmaker
+        from sqlalchemy.orm.exc import MultipleResultsFound
+
+        from app.assistant.capability_calls.local_write import LocalCommitRecovery
+        from app.assistant.capability_calls.models import AssistantCapabilityCall
+        from app.assistant.capability_calls.models import AssistantCapabilityCallAttempt
+        from app.assistant.domain.digests import sha256_bytes
+        from app.assistant.durable.codec import (
+            checkpoint_state_digest,
+            decode_checkpoint,
+            decode_provider_message,
+        )
+        from app.assistant.durable.models import AssistantRunArtifact
+        from app.assistant.durable.models import AssistantRunCheckpoint
+        from app.assistant.durable.models import AssistantRunObligationRevision
+        from app.assistant.durable.models import AssistantRunProviderMessage
+        from app.assistant.models import AssistantChatRun
+        from app.assistant.policy.obligations import (
+            ObligationLedgerState,
+            compute_obligation_ledger_digest,
+        )
+        from app.assistant.provider_loop.messages import (
+            digest_provider_message,
+            digest_provider_transcript,
+        )
+        from app.entry.models import Entry
+
+        fresh = sessionmaker(bind=self.db.get_bind(), future=True, autoflush=False)()
+        try:
+            call = fresh.get(AssistantCapabilityCall, call_id)
+            if call is None:
+                return LocalCommitRecovery(
+                    call_id=call_id,
+                    kind="unknown",
+                    failure_code="local_commit_outcome_unknown",
+                )
+            try:
+                entry = (
+                    fresh.query(Entry)
+                    .filter(Entry.source_capability_call_id == call_id)
+                    .one_or_none()
+                )
+            except MultipleResultsFound:
+                return LocalCommitRecovery(
+                    call_id=call_id,
+                    kind="unknown",
+                    failure_code="local_commit_outcome_unknown",
+                )
+            if entry is not None:
+                attempts = (
+                    fresh.query(AssistantCapabilityCallAttempt)
+                    .filter(AssistantCapabilityCallAttempt.call_id == call_id)
+                    .order_by(AssistantCapabilityCallAttempt.attempt_number.desc())
+                    .all()
+                )
+                attempt = attempts[0] if attempts else None
+                run = fresh.get(AssistantChatRun, call.run_id)
+                checkpoint = (
+                    fresh.get(AssistantRunCheckpoint, run.current_checkpoint_id)
+                    if run is not None and run.current_checkpoint_id is not None
+                    else None
+                )
+                output_artifact = (
+                    fresh.get(AssistantRunArtifact, call.output_artifact_id)
+                    if call.output_artifact_id is not None
+                    else None
+                )
+                decoded_checkpoint = None
+                checkpoint_payload_matches_row = False
+                if checkpoint is not None:
+                    try:
+                        decoded_checkpoint = decode_checkpoint(checkpoint.state_payload)
+                        checkpoint_payload_matches_row = all(
+                            (
+                                decoded_checkpoint.run_id == checkpoint.run_id,
+                                int(decoded_checkpoint.schema_version)
+                                == int(checkpoint.schema_version),
+                                decoded_checkpoint.manifest_revision_id
+                                == checkpoint.manifest_revision_id,
+                                decoded_checkpoint.policy_revision_id
+                                == checkpoint.policy_revision_id,
+                                decoded_checkpoint.budget_revision_id
+                                == checkpoint.budget_revision_id,
+                                decoded_checkpoint.obligation_revision_id
+                                == checkpoint.obligation_revision_id,
+                                int(decoded_checkpoint.provider_message_ordinal)
+                                == int(checkpoint.provider_message_ordinal),
+                                hmac.compare_digest(
+                                    str(decoded_checkpoint.provider_transcript_digest),
+                                    str(checkpoint.provider_transcript_digest),
+                                ),
+                                str(decoded_checkpoint.phase) == str(checkpoint.phase),
+                            )
+                        )
+                    except (KeyError, TypeError, ValueError):
+                        decoded_checkpoint = None
+                        checkpoint_payload_matches_row = False
+                obligation_row = (
+                    fresh.get(AssistantRunObligationRevision, checkpoint.obligation_revision_id)
+                    if checkpoint is not None and checkpoint.obligation_revision_id is not None
+                    else None
+                )
+                obligation_complete = False
+                if (
+                    run is not None
+                    and checkpoint is not None
+                    and obligation_row is not None
+                    and obligation_row.run_id == run.id
+                    and run.current_obligation_revision_id == checkpoint.obligation_revision_id
+                    and str(obligation_row.obligation_digest)
+                ):
+                    try:
+                        ledger = ObligationLedgerState.model_validate(obligation_row.payload)
+                        exact_reconciliation = [
+                            item
+                            for item in ledger.obligations
+                            if item.obligation_type == "reconciliation"
+                            and item.owner_kind == "capability_call"
+                            and item.owner_id == str(call.id)
+                            and item.source_call_id == str(call.id)
+                        ]
+                        computed_ledger_digest = compute_obligation_ledger_digest(
+                            revision=int(ledger.revision),
+                            obligations=ledger.obligations,
+                            evidence_edges=ledger.evidence_edges,
+                            followup_rounds_started=int(
+                                ledger.followup_rounds_started
+                            ),
+                        )
+                        obligation_complete = (
+                            hmac.compare_digest(
+                                computed_ledger_digest,
+                                str(obligation_row.obligation_digest),
+                            )
+                            and hmac.compare_digest(
+                                str(ledger.ledger_digest),
+                                str(obligation_row.obligation_digest),
+                            )
+                            and len(exact_reconciliation) <= 1
+                            and all(
+                                item.status == "satisfied"
+                                for item in exact_reconciliation
+                            )
+                        )
+                    except (TypeError, ValueError, KeyError):
+                        obligation_complete = False
+                provider_complete = False
+                provider_rows = (
+                    fresh.query(AssistantRunProviderMessage)
+                    .filter(
+                        AssistantRunProviderMessage.run_id == call.run_id,
+                    )
+                    .order_by(AssistantRunProviderMessage.ordinal.asc())
+                    .all()
+                )
+                try:
+                    if checkpoint is None or decoded_checkpoint is None:
+                        raise ValueError("checkpoint payload is unavailable")
+                    if not checkpoint_payload_matches_row:
+                        raise ValueError("checkpoint row/payload mirror drift")
+                    provider_messages = []
+                    matching_tool_rows = []
+                    for row in provider_rows:
+                        body = dict(row.payload_body or {})
+                        if "role" not in body and row.role:
+                            body["role"] = row.role
+                        message = decode_provider_message(body)
+                        provider_messages.append(message)
+                        if (
+                            str(row.role) == "tool"
+                            and str(row.tool_call_id or "")
+                            == str(call.provider_tool_call_id)
+                        ):
+                            matching_tool_rows.append((row, message))
+                    if len(matching_tool_rows) == 1:
+                        tool_row, tool_message = matching_tool_rows[0]
+                        tool_digest = digest_provider_message(tool_message)
+                        provider_complete = (
+                            hmac.compare_digest(
+                                str(tool_row.content_digest), tool_digest
+                            )
+                            and str(checkpoint.provider_transcript_digest)
+                            == digest_provider_transcript(tuple(provider_messages))
+                            and int(checkpoint.provider_message_ordinal)
+                            == int(provider_rows[-1].ordinal)
+                            and int(tool_row.ordinal)
+                            == int(checkpoint.provider_message_ordinal)
+                            and tool_digest
+                            == str(
+                                next(
+                                    item.result_message_digest
+                                    for item in decoded_checkpoint.capability_calls
+                                    if str(item.call_id) == str(call.id)
+                                )
+                            )
+                        )
+                except (AttributeError, IndexError, KeyError, StopIteration, TypeError, ValueError):
+                    provider_complete = False
+                complete = False
+                if (
+                    run is not None
+                    and checkpoint is not None
+                    and checkpoint.run_id == run.id
+                    and checkpoint_payload_matches_row
+                    and int(checkpoint.schema_version) == 3
+                    and int(checkpoint.committed_state_revision)
+                    == int(run.state_revision)
+                    and output_artifact is not None
+                    and output_artifact.run_id == run.id
+                    and str(output_artifact.kind) == "capability_call_result"
+                    and output_artifact.inline_bytes is not None
+                    and hmac.compare_digest(
+                        str(output_artifact.content_sha256),
+                        sha256_bytes(bytes(output_artifact.inline_bytes)),
+                    )
+                    and str(call.status) == "succeeded"
+                    and int(call.attempt_count or 0) == 1
+                    and len(attempts) == 1
+                    and call.side_effect_started_at is not None
+                    and attempt is not None
+                    and str(attempt.status) == "committed"
+                    and bool(attempt.side_effect_started)
+                    and attempt.side_effect_started_at is not None
+                    and attempt.response_digest is not None
+                    and hmac.compare_digest(
+                        str(attempt.response_digest),
+                        str(output_artifact.content_sha256),
+                    )
+                    and call.side_effect_started_at == attempt.side_effect_started_at
+                    and provider_complete
+                    and obligation_complete
+                ):
+                    try:
+                        decoded = decode_checkpoint(checkpoint.state_payload)
+                        state = next(
+                            item
+                            for item in decoded.capability_calls
+                            if str(item.call_id) == str(call.id)
+                        )
+                        complete = (
+                            str(state.status) == "succeeded"
+                            and state.attempt_id == attempt.id
+                            and state.output_artifact_id == call.output_artifact_id
+                            and state.result_message_digest is not None
+                            and call.output_artifact_id in decoded.artifact_ids
+                            and hmac.compare_digest(
+                                str(checkpoint.state_digest),
+                                checkpoint_state_digest(decoded),
+                            )
+                        )
+                    except (KeyError, StopIteration, TypeError, ValueError):
+                        complete = False
+                if not complete:
+                    # A source Entry is necessary but not sufficient evidence:
+                    # a connection can expose the business row before the
+                    # ledger's Call/Attempt/Artifact/Checkpoint bundle is
+                    # durably acknowledged.  Keep the outcome quarantined.
+                    return LocalCommitRecovery(
+                        call_id=call_id,
+                        kind="unknown",
+                        entry_id=entry.id,
+                        attempt_id=attempt.id if attempt is not None else None,
+                        output_artifact_id=(
+                            call.output_artifact_id
+                            if output_artifact is not None
+                            else None
+                        ),
+                        checkpoint_id=(
+                            checkpoint.id if checkpoint is not None else None
+                        ),
+                        resulting_call_revision=int(call.state_revision),
+                        resulting_run_revision=(
+                            int(run.state_revision) if run is not None else None
+                        ),
+                        failure_code="local_commit_outcome_unknown",
+                    )
+                checkpoint_id = checkpoint.id if checkpoint is not None else None
+                return LocalCommitRecovery(
+                    call_id=call_id,
+                    kind="committed",
+                    entry_id=entry.id,
+                    attempt_id=attempt.id if attempt is not None else None,
+                    output_artifact_id=call.output_artifact_id,
+                    checkpoint_id=checkpoint_id,
+                    resulting_call_revision=int(call.state_revision),
+                    resulting_run_revision=(
+                        int(run.state_revision) if run is not None else None
+                    ),
+                )
+            if proven_rollback:
+                return LocalCommitRecovery(call_id=call_id, kind="rolled_back")
+            return LocalCommitRecovery(
+                call_id=call_id,
+                kind="unknown",
+                failure_code="local_commit_outcome_unknown",
+            )
+        finally:
+            fresh.close()
 
     def _acquire_write_safety_before_run_lock(self) -> None:
         """Enforce the global advisory -> Run -> Call lock order."""
@@ -161,15 +502,81 @@ class DurableCapabilityLedgerAggregate:
         call_id: UUID,
         input_digest: str,
         descriptor_digest: str,
+        logical_call_key: str | None = None,
+        capability_key: str | None = None,
+        provider_tool_call_id: str | None = None,
+        target_version_id: UUID | None = None,
+        side_effect_class: str | None = None,
+        execution_mode: str | None = None,
+        idempotency_key: str | None = None,
     ) -> None:
+        if str(existing.input_digest) != input_digest:
+            raise CapabilityCallConflict(
+                "idempotency_conflict",
+                "replayed Provider identity carries a different canonical input",
+                call=existing,
+            )
         if (
             existing.id != call_id
-            or str(existing.input_digest) != input_digest
             or str(existing.descriptor_digest) != str(descriptor_digest)
         ):
             raise CapabilityCallConflict(
                 "call_identity_mismatch",
                 "replayed Provider identity does not match the exact write request",
+                call=existing,
+            )
+        if logical_call_key is not None and str(existing.logical_call_key) != str(
+            logical_call_key
+        ):
+            raise CapabilityCallConflict(
+                "call_identity_mismatch",
+                "replayed Provider identity does not match the logical call key",
+                call=existing,
+            )
+        if capability_key is not None and str(existing.domain_key) != str(
+            capability_key
+        ):
+            raise CapabilityCallConflict(
+                "call_identity_mismatch",
+                "replayed Provider identity does not match the capability key",
+                call=existing,
+            )
+        if provider_tool_call_id is not None and str(
+            existing.provider_tool_call_id or ""
+        ) != str(provider_tool_call_id):
+            raise CapabilityCallConflict(
+                "call_identity_mismatch",
+                "replayed Provider identity does not match the Provider Tool Call",
+                call=existing,
+            )
+        if str(existing.target_version_id or "") != str(target_version_id or ""):
+            raise CapabilityCallConflict(
+                "call_identity_mismatch",
+                "replayed Provider identity does not match the target version",
+                call=existing,
+            )
+        if side_effect_class is not None and str(existing.side_effect_class) != str(
+            side_effect_class
+        ):
+            raise CapabilityCallConflict(
+                "call_identity_mismatch",
+                "replayed Provider identity does not match the side-effect class",
+                call=existing,
+            )
+        if execution_mode is not None and str(existing.execution_mode) != str(
+            execution_mode
+        ):
+            raise CapabilityCallConflict(
+                "call_identity_mismatch",
+                "replayed Provider identity does not match the execution mode",
+                call=existing,
+            )
+        if idempotency_key is not None and not hmac.compare_digest(
+            str(existing.idempotency_key), str(idempotency_key)
+        ):
+            raise CapabilityCallConflict(
+                "call_identity_mismatch",
+                "replayed Provider identity does not match the server identity",
                 call=existing,
             )
 
@@ -186,8 +593,48 @@ class DurableCapabilityLedgerAggregate:
         """
         status = str(existing.status)
         if status in {"proposed", "authorized"}:
+            # A reserved-but-not-started Call has no local commit boundary to
+            # classify.  Let the normal locked progression claim it exactly
+            # once; recovery is only consulted for post-dispatch states.
+            self.db.rollback()
             return None
+        local_entry = None
+        local_recovery_kind = None
+        should_recover_local = (
+            str(existing.execution_mode) == "local_transactional"
+            and status
+            in {"executing", "unknown", "needs_reconciliation", "succeeded"}
+        )
+        if should_recover_local:
+            # Recovery must consult the complete durable settlement bundle
+            # before deciding whether a replay is safe.  A source Entry is
+            # necessary evidence, but it is not sufficient to acknowledge the
+            # Call/Attempt/Artifact/Provider-message/Checkpoint/obligation
+            # commit boundary.
+            recovery = self.recover_local_commit(existing.id, proven_rollback=False)
+            local_entry = recovery.entry_id
+            local_recovery_kind = recovery.kind
+        if (
+            should_recover_local
+            and local_recovery_kind != "committed"
+        ):
+            self.db.rollback()
+            raise CapabilityCallConflict(
+                "reconciliation_required",
+                "local settlement bundle is not durably complete",
+                call=existing,
+            )
         if status == "succeeded":
+            if (
+                str(existing.execution_mode) == "local_transactional"
+                and local_recovery_kind != "committed"
+            ):
+                self.db.rollback()
+                raise CapabilityCallConflict(
+                    "reconciliation_required",
+                    "succeeded local call has no source Entry settlement",
+                    call=existing,
+                )
             result = self._replay(request, existing)
             revision = int(existing.state_revision)
             self.db.rollback()
@@ -386,6 +833,31 @@ class DurableCapabilityLedgerAggregate:
                 "manifest_revision_missing", "frozen manifest revision is not durable"
             )
         return row
+
+    def _server_idempotency_key(
+        self,
+        request: Any,
+        *,
+        run_id: UUID,
+        input_digest: str,
+    ) -> str:
+        """Recompute the frozen server identity for an exact replay probe.
+
+        Replay probes run before new-write authorization.  They must therefore
+        bind to the same durable manifest row, target resolution, capability
+        key, Provider identity, and canonical input as the original Call.
+        """
+        manifest = self._manifest_row(request)
+        return make_server_idempotency_key(
+            secret=self.idempotency_secret,
+            run_id=run_id,
+            logical_call_key=f"provider:{request.call.call_id}",
+            frozen_target_digest=request.binding.ref.resolution_digest,
+            canonical_input_digest=input_digest,
+            manifest_revision_id=manifest.id,
+            capability_key=str(request.call.domain_key),
+            provider_tool_call_id=str(request.call.call_id),
+        )
 
     def _commit_attempt_started(self, *, run: Any, call: Any, attempt: Any) -> None:
         """Persist the live reservation snapshot with the external-I/O fence."""
@@ -618,6 +1090,17 @@ class DurableCapabilityLedgerAggregate:
                 input_digest = sha256_bytes(
                     canonical_json_bytes(dict(request.call.arguments))
                 )
+                manifest = self._manifest_row(request)
+                expected_idempotency_key = make_server_idempotency_key(
+                    secret=self.idempotency_secret,
+                    run_id=run_id,
+                    logical_call_key=logical_key,
+                    frozen_target_digest=request.binding.ref.resolution_digest,
+                    canonical_input_digest=input_digest,
+                    manifest_revision_id=manifest.id,
+                    capability_key=str(request.call.domain_key),
+                    provider_tool_call_id=str(request.call.call_id),
+                )
                 existing = self.calls.find_by_logical_identity(
                     run_id=run_id,
                     logical_call_key=logical_key,
@@ -630,6 +1113,15 @@ class DurableCapabilityLedgerAggregate:
                         call_id=call_id,
                         input_digest=input_digest,
                         descriptor_digest=request.descriptor.descriptor_digest,
+                        logical_call_key=logical_key,
+                        capability_key=str(request.call.domain_key),
+                        provider_tool_call_id=str(request.call.call_id),
+                        target_version_id=request.descriptor.target_version_id,
+                        side_effect_class=str(request.descriptor.behavior.side_effect),
+                        execution_mode=_execution_mode(
+                            str(request.descriptor.behavior.side_effect)
+                        ),
+                        idempotency_key=expected_idempotency_key,
                     )
                     existing_by_provider_id[str(request.call.call_id)] = existing
                 elif str(request.descriptor.behavior.side_effect) == "write_local":
@@ -650,6 +1142,17 @@ class DurableCapabilityLedgerAggregate:
                 input_payload = canonical_json_bytes(dict(request.call.arguments))
                 input_digest = sha256_bytes(input_payload)
                 side_effect = str(request.descriptor.behavior.side_effect)
+                manifest = self._manifest_row(request)
+                expected_idempotency_key = make_server_idempotency_key(
+                    secret=self.idempotency_secret,
+                    run_id=run.id,
+                    logical_call_key=logical_key,
+                    frozen_target_digest=request.binding.ref.resolution_digest,
+                    canonical_input_digest=input_digest,
+                    manifest_revision_id=manifest.id,
+                    capability_key=str(request.call.domain_key),
+                    provider_tool_call_id=str(request.call.call_id),
+                )
                 existing = existing_by_provider_id.get(str(request.call.call_id))
                 if existing is not None:
                     # Lock order remains Run -> Call for the already-admitted
@@ -664,12 +1167,19 @@ class DurableCapabilityLedgerAggregate:
                         call_id=call_id,
                         input_digest=input_digest,
                         descriptor_digest=request.descriptor.descriptor_digest,
+                        logical_call_key=logical_key,
+                        capability_key=str(request.call.domain_key),
+                        provider_tool_call_id=str(request.call.call_id),
+                        target_version_id=request.descriptor.target_version_id,
+                        side_effect_class=str(request.descriptor.behavior.side_effect),
+                        execution_mode=_execution_mode(
+                            str(request.descriptor.behavior.side_effect)
+                        ),
+                        idempotency_key=expected_idempotency_key,
                     )
                     continue
 
-                decision = self.authorization_factory.decision_for_call(
-                    call_id=request.call.call_id
-                )
+                decision = self._decision_for_call(call_id=request.call.call_id)
                 disposition = getattr(decision, "dispatch_disposition", None)
                 if disposition not in {
                     "deny",
@@ -769,6 +1279,12 @@ class DurableCapabilityLedgerAggregate:
                             logical_call_key=logical_key,
                             frozen_target_digest=request.binding.ref.resolution_digest,
                             canonical_input_digest=input_digest,
+                            manifest_revision_id=(
+                                getattr(request.current_manifest, "id", None)
+                                or run.current_manifest_revision_id
+                            ),
+                            capability_key=str(request.call.domain_key),
+                            provider_tool_call_id=str(request.call.call_id),
                         ),
                         provider_tool_call_id=request.call.call_id,
                         approval_binding_digest=approval_binding_digest,
@@ -1004,20 +1520,18 @@ class DurableCapabilityLedgerAggregate:
             raise
 
     def prepare(self, request: Any) -> LedgerPrepareOutcome:
-        decision = self.authorization_factory.decision_for_call(
-            call_id=request.call.call_id
-        )
-        disposition = getattr(decision, "dispatch_disposition", None)
-        if disposition not in {"deny", "dispatch", "awaiting_call_approval"}:
-            raise CapabilityCallConflict(
-                "ledger_decision_required", "tagged v2 ledger decision is required"
-            )
+        self._fault("before_proposal")
         logical_key = f"provider:{request.call.call_id}"
         run_id = request.execution_scope.run_id
         call_id = _stable_uuid(f"mindatlas:{run_id}:{logical_key}")
         input_payload = canonical_json_bytes(dict(request.call.arguments))  # type: ignore[arg-type]
         input_digest = sha256_bytes(input_payload)
         side_effect = str(request.descriptor.behavior.side_effect)
+        expected_idempotency_key = self._server_idempotency_key(
+            request,
+            run_id=run_id,
+            input_digest=input_digest,
+        )
         existing_probe = self.calls.find_by_logical_identity(
             run_id=run_id,
             logical_call_key=logical_key,
@@ -1030,10 +1544,26 @@ class DurableCapabilityLedgerAggregate:
                 call_id=call_id,
                 input_digest=input_digest,
                 descriptor_digest=request.descriptor.descriptor_digest,
+                logical_call_key=logical_key,
+                capability_key=str(request.call.domain_key),
+                provider_tool_call_id=str(request.call.call_id),
+                target_version_id=request.descriptor.target_version_id,
+                side_effect_class=side_effect,
+                execution_mode=_execution_mode(side_effect),
+                idempotency_key=expected_idempotency_key,
             )
             replay = self._replay_existing_prepare(request, existing_probe)
             if replay is not None:
                 return replay
+        # Only an existing call that still needs the normal progression path
+        # reaches authorization. Exact replay must not consult current policy,
+        # launch state, or a potentially unavailable authorization provider.
+        decision = self._decision_for_call(call_id=request.call.call_id)
+        disposition = getattr(decision, "dispatch_disposition", None)
+        if disposition not in {"deny", "dispatch", "awaiting_call_approval"}:
+            raise CapabilityCallConflict(
+                "ledger_decision_required", "tagged v2 ledger decision is required"
+            )
         if side_effect == "write_local":
             try:
                 self._acquire_write_safety_before_run_lock()
@@ -1067,6 +1597,13 @@ class DurableCapabilityLedgerAggregate:
                 call_id=call_id,
                 input_digest=input_digest,
                 descriptor_digest=request.descriptor.descriptor_digest,
+                logical_call_key=logical_key,
+                capability_key=str(request.call.domain_key),
+                provider_tool_call_id=str(request.call.call_id),
+                target_version_id=request.descriptor.target_version_id,
+                side_effect_class=side_effect,
+                execution_mode=_execution_mode(side_effect),
+                idempotency_key=expected_idempotency_key,
             )
             replay = self._replay_existing_prepare(request, existing_identity)
             if replay is not None:
@@ -1146,6 +1683,12 @@ class DurableCapabilityLedgerAggregate:
                     logical_call_key=logical_key,
                     frozen_target_digest=request.binding.ref.resolution_digest,
                     canonical_input_digest=input_digest,
+                    manifest_revision_id=(
+                        getattr(request.current_manifest, "id", None)
+                        or run.current_manifest_revision_id
+                    ),
+                    capability_key=str(request.call.domain_key),
+                    provider_tool_call_id=str(request.call.call_id),
                 ),
                 provider_tool_call_id=request.call.call_id,
             )
@@ -1342,6 +1885,9 @@ class DurableCapabilityLedgerAggregate:
             logical_call_key=logical_key,
             frozen_target_digest=request.binding.ref.resolution_digest,
             canonical_input_digest=input_digest,
+            manifest_revision_id=manifest.id,
+            capability_key=str(request.call.domain_key),
+            provider_tool_call_id=str(request.call.call_id),
         )
         owner = request.authorization.owner
         spec = ProposeCallSpec(
@@ -1367,7 +1913,9 @@ class DurableCapabilityLedgerAggregate:
             idempotency_key=idem,
             provider_tool_call_id=request.call.call_id,
         )
-        call, _ = self.calls.create_or_verify_proposed(spec)
+        call, created = self.calls.create_or_verify_proposed(spec)
+        if created:
+            self._fault("after_proposal")
         if str(call.status) == "succeeded":
             result = self._replay(request, call)
             revision = int(call.state_revision)
@@ -1559,6 +2107,8 @@ class DurableCapabilityLedgerAggregate:
                 request=entry_request,
                 call_id=call.id,
             )
+            self._local_entry_id = entry.id
+            self._fault("after_entry_stage_before_commit")
             claim_now = utcnow()
             call, attempt = self.calls.claim_attempt(
                 call_id=call.id,
@@ -1577,11 +2127,10 @@ class DurableCapabilityLedgerAggregate:
             self._local_attempt_id = attempt.id
             result = ProviderDispatchResult(
                 capability_result=completed_result(
-                    user_text=f"Created entry {entry.title}",
+                    user_text="Created entry.",
                     structured_output={
                         "status": "ok",
                         "entryId": str(entry.id),
-                        "title": str(entry.title),
                     },
                     metrics=CapabilityMetrics(
                         duration_ms=0.0,
@@ -1592,6 +2141,7 @@ class DurableCapabilityLedgerAggregate:
                 next_manifest=request.current_manifest,
             )
         except Exception:
+            self._local_entry_id = None
             self._restore_local_budget()
             raise
         return result
@@ -1669,6 +2219,9 @@ class DurableCapabilityLedgerAggregate:
                 logical_call_key=staged["logicalKey"],
                 frozen_target_digest=request.binding.ref.resolution_digest,
                 canonical_input_digest=staged["inputDigest"],
+                manifest_revision_id=manifest.id,
+                capability_key=str(request.call.domain_key),
+                provider_tool_call_id=str(request.call.call_id),
             )
             owner = request.authorization.owner
             spec = ProposeCallSpec(
@@ -1695,7 +2248,12 @@ class DurableCapabilityLedgerAggregate:
                 provider_tool_call_id=request.call.call_id,
                 approval_binding_digest=binding.approval_binding_digest,
             )
-            call, _ = self.calls.create_or_verify_proposed(spec)
+            call, created = self.calls.create_or_verify_proposed(spec)
+            # The proposal is now materialized inside the real pause
+            # transaction.  This is the production boundary represented by
+            # the after_proposal fault point (not merely the preflight probe).
+            if created:
+                self._fault("after_proposal")
             if str(call.status) != "proposed":
                 raise CapabilityCallConflict(
                     "call_not_awaiting_pause",
@@ -2017,19 +2575,29 @@ class DurableCapabilityLedgerAggregate:
         self.db.add(artifact)
         self.db.flush()
         attempt_id = outcome.attempt_id or self._local_attempt_id
+        target = "succeeded" if result.capability_result.status == "completed" else "failed"
+        local_effect_started_at = (
+            utcnow()
+            if target == "succeeded"
+            and str(call.execution_mode) == "local_transactional"
+            else None
+        )
         if attempt_id is not None:
             self.calls.transition_attempt(
                 attempt_id=attempt_id,
                 expected_status="dispatched",
                 to_status="response_received",
                 response_digest=encoded.digest,
+                side_effect_started=(
+                    True if local_effect_started_at is not None else None
+                ),
+                side_effect_started_at=local_effect_started_at,
             )
             self.calls.transition_attempt(
                 attempt_id=attempt_id,
                 expected_status="response_received",
                 to_status="committed",
             )
-        target = "succeeded" if result.capability_result.status == "completed" else "failed"
         if str(call.status) == "failed":
             if target != "failed" or attempt_id is not None:
                 self.db.rollback()
@@ -2049,12 +2617,7 @@ class DurableCapabilityLedgerAggregate:
                 lease=self.lease,
                 output_artifact_id=artifact.id,
                 failure_code=(None if target == "succeeded" else "capability_failed"),
-                side_effect_started_at=(
-                    utcnow()
-                    if target == "succeeded"
-                    and str(call.execution_mode) == "local_transactional"
-                    else None
-                ),
+                side_effect_started_at=local_effect_started_at,
             )
         if self._pending_result is not None:
             self.db.rollback()
@@ -2067,6 +2630,8 @@ class DurableCapabilityLedgerAggregate:
             "result": result,
             "artifact": artifact,
             "callId": call.id,
+            "attempt_id": attempt_id,
+            "entry_id": self._local_entry_id,
         }
         self._local_attempt_id = None
         return result
@@ -2345,6 +2910,9 @@ class DurableCapabilityLedgerAggregate:
                 current_budget_revision_id=budget_revision_id,
                 current_obligation_revision_id=obligation_revision_id,
             )
+            self._local_commit_boundary_entered = (
+                str(call.execution_mode) == "local_transactional"
+            )
             run_repo.commit_semantic(
                 run_id=run.id,
                 expected_revision=expected_revision,
@@ -2363,14 +2931,121 @@ class DurableCapabilityLedgerAggregate:
                 ),
                 children=bundle,
             )
+            self._fault("after_commit_before_ack")
+            if (
+                str(call.execution_mode) == "local_transactional"
+                and pending.get("entry_id") is not None
+                and pending.get("attempt_id") is not None
+                and call.output_artifact_id is not None
+            ):
+                from app.assistant.capability_calls.local_write import (
+                    LocalCreateEntrySettlement,
+                )
+
+                self._last_local_settlement = LocalCreateEntrySettlement(
+                    call_id=call.id,
+                    entry_id=pending["entry_id"],
+                    attempt_id=pending["attempt_id"],
+                    output_artifact_id=call.output_artifact_id,
+                    checkpoint_id=checkpoint_id,
+                    resulting_call_revision=int(call.state_revision),
+                    resulting_run_revision=int(expected_revision) + 1,
+                )
+            # The committed settlement/checkpoint references are now
+            # observable to the worker.  Keep this distinct from the caller
+            # acknowledgement boundary above.
+            self._fault("after_commit_before_checkpoint_observation")
             self._pending_result = None
             self._local_budget_checkpoint = None
             self._local_budget_call_id = None
             self._local_budget_state = None
-        except Exception:
+            self._local_entry_id = None
+            self._local_commit_boundary_entered = False
+        except Exception as exc:
             self.db.rollback()
+            # Non-local failures are ordinary rollback failures and must
+            # release the in-process reservation.  A local boundary updates
+            # this classification from a fresh Session below.
+            recovery_kind = "rolled_back"
+            if self._local_commit_boundary_entered:
+                from app.assistant.durable.crash import TransactionRollbackInject
+                from app.assistant.durable.repository import DurableRunConflict
+
+                budget_snapshot = None
+                if self.dispatch_guard is not None:
+                    ledger = getattr(self.dispatch_guard, "ledger", None)
+                    snapshot = getattr(ledger, "snapshot", None)
+                    if callable(snapshot):
+                        budget_snapshot = snapshot()
+
+                self._last_local_recovery = self.recover_local_commit(
+                    pending["callId"],
+                    proven_rollback=isinstance(
+                        exc, (TransactionRollbackInject, DurableRunConflict)
+                    ),
+                )
+                recovery_kind = getattr(self._last_local_recovery, "kind", None)
+                if recovery_kind == "committed":
+                    # The durable transaction already finished.  Never restore
+                    # the pre-dispatch in-memory reservation over a persisted
+                    # finished budget revision after an acknowledgement fault.
+                    from app.assistant.capability_calls.local_write import (
+                        LocalCreateEntrySettlement,
+                    )
+
+                    recovery = self._last_local_recovery
+                    if all(
+                        getattr(recovery, field, None) is not None
+                        for field in (
+                            "entry_id",
+                            "attempt_id",
+                            "output_artifact_id",
+                            "checkpoint_id",
+                            "resulting_call_revision",
+                            "resulting_run_revision",
+                        )
+                    ):
+                        self._last_local_settlement = LocalCreateEntrySettlement(
+                            call_id=recovery.call_id,
+                            entry_id=recovery.entry_id,
+                            attempt_id=recovery.attempt_id,
+                            output_artifact_id=recovery.output_artifact_id,
+                            checkpoint_id=recovery.checkpoint_id,
+                            resulting_call_revision=recovery.resulting_call_revision,
+                            resulting_run_revision=recovery.resulting_run_revision,
+                        )
+                elif recovery_kind == "unknown":
+                    from app.assistant.capability_calls.settlement import (
+                        CapabilityCallSettlementRepository,
+                    )
+
+                    CapabilityCallSettlementRepository(
+                        self.db,
+                        write_safety_lock=self.write_guard.lock_port,
+                    ).mark_local_commit_outcome_unknown(
+                        call_id=pending["callId"],
+                        failure_code=(
+                            getattr(
+                                self._last_local_recovery,
+                                "failure_code",
+                                None,
+                            )
+                            or "local_commit_outcome_unknown"
+                        ),
+                        budget_snapshot=budget_snapshot,
+                    )
             self._pending_result = None
-            self._restore_local_budget()
+            self._local_entry_id = None
+            self._local_commit_boundary_entered = False
+            if recovery_kind == "rolled_back":
+                self._restore_local_budget()
+            else:
+                # Unknown is deliberately fail-closed; retaining the finished
+                # reservation prevents an in-process retry before an operator
+                # resolves the durable quarantine.
+                self._local_budget_checkpoint = None
+                self._local_budget_call_id = None
+                self._local_budget_state = None
             raise
 
     def record_failure(self, outcome: LedgerPrepareOutcome, reason_code: str) -> None:

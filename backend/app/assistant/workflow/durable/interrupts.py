@@ -1681,6 +1681,7 @@ class DurableInterruptRepository:
         interrupt_id: UUID,
         resolution_request_id: UUID | None = None,
         comment: str | None = None,
+        resolution_run_revision: int | None = None,
     ) -> InterruptResolveResult:
         """Terminal cancellation; no active child budget revision."""
         run = self._lock_run(run_id)
@@ -1719,7 +1720,11 @@ class DurableInterruptRepository:
         row.resolution_digest = res_digest
         row.resolution_checkpoint_id = None
         row.resolution_budget_revision_id = None
-        row.resolution_run_revision = int(run.state_revision)
+        row.resolution_run_revision = int(
+            run.state_revision
+            if resolution_run_revision is None
+            else resolution_run_revision
+        )
         row.resume_token_digest = None
         row.resolved_at = now
         row.updated_at = now

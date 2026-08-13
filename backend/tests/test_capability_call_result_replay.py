@@ -422,6 +422,28 @@ def test_durable_aggregate_replays_success_without_redispatch(side_effect: str) 
         replay = aggregate.prepare(request)
         assert replay.kind == "replay"
         assert replay.provider_result == result
+
+        # A terminal replay is still bound to the frozen server identity.  A
+        # changed manifest revision or target resolution must not be allowed to
+        # bypass the replay guard and return the old result.
+        from app.assistant.capability_calls.repository import CapabilityCallConflict
+
+        drifted_manifest_request = SimpleNamespace(**vars(request))
+        drifted_manifest_request.current_manifest = SimpleNamespace(
+            manifest_digest="9" * 64
+        )
+        with pytest.raises(CapabilityCallConflict, match="server identity"):
+            aggregate.prepare(drifted_manifest_request)
+
+        drifted_target_request = SimpleNamespace(**vars(request))
+        drifted_target_request.binding = SimpleNamespace(
+            ref=SimpleNamespace(
+                binding_contract_digest="c" * 64,
+                resolution_digest="e" * 64,
+            )
+        )
+        with pytest.raises(CapabilityCallConflict, match="server identity"):
+            aggregate.prepare(drifted_target_request)
         aggregate.commit_recovery_drift(
             (
                 *base_messages,

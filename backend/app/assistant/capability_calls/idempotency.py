@@ -115,6 +115,9 @@ def make_server_idempotency_key(
     frozen_target_digest: str,
     canonical_input_digest: str,
     runtime_contract_version: int = RUNTIME_CONTRACT_VERSION_FOR_KEY,
+    manifest_revision_id: UUID | str | None = None,
+    capability_key: str | None = None,
+    provider_tool_call_id: str | None = None,
 ) -> str:
     """HMAC server key: never accepted from model input.
 
@@ -129,6 +132,21 @@ def make_server_idempotency_key(
     ):
         if not digest or not isinstance(digest, str):
             raise ValueError(f"{name} is required")
+    if (
+        manifest_revision_id is not None
+        and capability_key is not None
+        and provider_tool_call_id is not None
+    ):
+        return derive_capability_call_identity(
+            secret=key,
+            run_id=run_id,
+            manifest_revision_id=manifest_revision_id,
+            capability_key=capability_key or logical_call_key,
+            provider_tool_call_id=provider_tool_call_id or logical_call_key,
+            frozen_target_digest=frozen_target_digest,
+            input_digest=canonical_input_digest,
+            runtime_contract_version=runtime_contract_version,
+        )
     msg = "|".join(
         (
             str(int(runtime_contract_version)),
@@ -136,6 +154,50 @@ def make_server_idempotency_key(
             logical_call_key,
             frozen_target_digest,
             canonical_input_digest,
+        )
+    ).encode("utf-8")
+    return hmac.new(key, msg, hashlib.sha256).hexdigest()
+
+
+def derive_capability_call_identity(
+    *,
+    secret: str | bytes,
+    run_id: UUID | str,
+    manifest_revision_id: UUID | str | None,
+    capability_key: str,
+    provider_tool_call_id: str,
+    frozen_target_digest: str,
+    input_digest: str,
+    runtime_contract_version: int = RUNTIME_CONTRACT_VERSION_FOR_KEY,
+) -> str:
+    """Derive the server-owned identity for one Provider capability call.
+
+    The identity deliberately includes the durable Run and frozen manifest,
+    capability key, Provider tool-call identity, target resolution and the
+    canonical input digest.  Provider/browser idempotency values are never
+    accepted as input to this function.
+    """
+    key = require_idempotency_secret(secret)
+    values = {
+        "manifest_revision_id": "" if manifest_revision_id is None else str(manifest_revision_id),
+        "capability_key": str(capability_key or "").strip(),
+        "provider_tool_call_id": str(provider_tool_call_id or "").strip(),
+        "frozen_target_digest": str(frozen_target_digest or "").strip(),
+        "input_digest": str(input_digest or "").strip(),
+    }
+    for name, value in values.items():
+        if not value:
+            raise ValueError(f"{name} is required")
+    msg = _length_prefixed_parts(
+        (
+            "mindatlas:capability-call-identity:v1",
+            str(int(runtime_contract_version)),
+            str(run_id),
+            values["manifest_revision_id"],
+            values["capability_key"],
+            values["provider_tool_call_id"],
+            values["frozen_target_digest"],
+            values["input_digest"],
         )
     ).encode("utf-8")
     return hmac.new(key, msg, hashlib.sha256).hexdigest()
@@ -158,6 +220,7 @@ __all__ = [
     "MIN_IDEM_SECRET_BYTES",
     "RUNTIME_CONTRACT_VERSION_FOR_KEY",
     "digest_input_payload",
+    "derive_capability_call_identity",
     "idempotency_key_fingerprint",
     "make_nested_agent_logical_call_key",
     "make_provider_logical_call_key",

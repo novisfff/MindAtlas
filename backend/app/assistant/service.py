@@ -263,37 +263,93 @@ class AssistantService:
             # partial cleanup while remaining idempotent when nothing is
             # pending.
             from app.assistant.workflow.durable.interrupt_api import (
+                DurableInterruptApiError,
                 _load_and_verify_call_owned_binding,
             )
-            # Query only the call-owned origin here.  The generic cleanup
-            # below still handles workflow-node Interrupts, and this avoids a
-            # second repository lookup for the ordinary path while retaining
-            # a row lock for the coupled Call + Interrupt mutation.
             from sqlalchemy import select
 
             from app.assistant.durable.models import AssistantRunInterrupt
+            from app.assistant.capability_calls.models import AssistantCapabilityCall
 
-            pending = self.db.execute(
+            pending_rows = list(self.db.execute(
                 select(AssistantRunInterrupt)
                 .where(
                     AssistantRunInterrupt.run_id == locked_run.id,
                     AssistantRunInterrupt.status == "pending",
-                    AssistantRunInterrupt.interrupt_origin == "capability_call",
                 )
                 .with_for_update()
-            ).scalar_one_or_none()
-            if pending is None:
+            ).scalars())
+            if not pending_rows:
+                return
+
+            # Select by both directions of the durable relationship.  Looking
+            # only at interrupt_origin would let a drifted workflow-owned row
+            # hide a Call.interrupt_id pointer and fall through to generic
+            # cancellation, orphaning the awaiting Call.
+            pending_ids = [row.id for row in pending_rows]
+            linked_calls = list(self.db.execute(
+                select(AssistantCapabilityCall)
+                .where(
+                    AssistantCapabilityCall.interrupt_id.in_(pending_ids),
+                )
+                .with_for_update()
+            ).scalars())
+            call_owned_rows = [
+                row
+                for row in pending_rows
+                if str(row.interrupt_origin) == "capability_call"
+            ]
+            if linked_calls:
+                linked_interrupt_ids = {call.interrupt_id for call in linked_calls}
+                if len(linked_calls) != 1 or len(linked_interrupt_ids) != 1:
+                    raise ApiException(
+                        status_code=409,
+                        code=42273,
+                        message="durable_interrupt_linkage_invalid",
+                        details={"reasonCode": "durable_interrupt_linkage_invalid"},
+                    )
+                pending = next(
+                    (row for row in pending_rows if row.id in linked_interrupt_ids),
+                    None,
+                )
+                if pending is None:
+                    raise ApiException(
+                        status_code=409,
+                        code=42273,
+                        message="durable_interrupt_linkage_invalid",
+                        details={"reasonCode": "durable_interrupt_linkage_invalid"},
+                    )
+            elif len(call_owned_rows) == 1:
+                pending = call_owned_rows[0]
+            elif len(call_owned_rows) > 1:
+                raise ApiException(
+                    status_code=409,
+                    code=42273,
+                    message="durable_interrupt_linkage_invalid",
+                    details={"reasonCode": "durable_interrupt_linkage_invalid"},
+                )
+            else:
+                # A genuinely workflow-owned Interrupt has no CapabilityCall
+                # pointer and may use the legacy generic cleanup below.
                 return
             from app.assistant.workflow.durable.interrupts import (
                 DurableInterruptRepository,
             )
 
             interrupt_repo = DurableInterruptRepository(self.db)
-            call, _binding = _load_and_verify_call_owned_binding(
-                self.db,
-                run=locked_run,
-                interrupt=pending,
-            )
+            try:
+                call, _binding = _load_and_verify_call_owned_binding(
+                    self.db,
+                    run=locked_run,
+                    interrupt=pending,
+                )
+            except DurableInterruptApiError as exc:
+                raise ApiException(
+                    status_code=409,
+                    code=42273,
+                    message="durable_interrupt_linkage_invalid",
+                    details={"reasonCode": "durable_interrupt_linkage_invalid"},
+                ) from exc
             from app.assistant.capability_calls.repository import CapabilityCallRepository
 
             CapabilityCallRepository(self.db).transition_call(
@@ -309,6 +365,12 @@ class AssistantService:
                 run_id=locked_run.id,
                 interrupt_id=pending.id,
                 comment="run stopped",
+                resolution_run_revision=(
+                    int(locked_run.state_revision)
+                    if str(locked_run.status) == "cancelling"
+                    or str(locked_run.status) in TERMINAL_STATUSES
+                    else int(locked_run.state_revision) + 1
+                ),
             )
             nonlocal call_owned_interrupt_handled
             call_owned_interrupt_handled = True
@@ -356,7 +418,19 @@ class AssistantService:
             if status in TERMINAL_STATUSES:
                 # Retry cleanup even after the Run transition committed; a prior
                 # response may have been lost between stop CAS and interrupt close.
-                _cancel_pending_durable_interrupt()
+                # Re-enter the call-owned path first so a pending approval cannot
+                # be generically cancelled while its CapabilityCall remains
+                # awaiting_approval.  There is no Run CAS in this branch, so the
+                # repair itself owns the commit.
+                try:
+                    _cancel_call_owned_before_stop(run)
+                    if call_owned_interrupt_handled:
+                        self.db.commit()
+                    else:
+                        _cancel_pending_durable_interrupt()
+                except Exception:
+                    self.db.rollback()
+                    raise
                 self.db.refresh(run)
                 return self._serialize_run(run)
 

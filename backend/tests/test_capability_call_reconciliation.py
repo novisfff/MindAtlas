@@ -109,7 +109,9 @@ def _seed_external_call(
         authorization_digest=DIGEST_A,
         input_artifact_id=art.id,
         input_digest=DIGEST_A,
-        side_effect_class="write_external",
+        side_effect_class=(
+            "write_local" if mode == "local_transactional" else "write_external"
+        ),
         execution_mode=mode,
         idempotency_key="idem-" + uuid.uuid4().hex,
         provider_tool_call_id=(
@@ -118,7 +120,9 @@ def _seed_external_call(
         status=status,
         state_revision=3,
         attempt_count=1,
-        side_effect_started_at=datetime.now(timezone.utc),
+        side_effect_started_at=(
+            None if mode == "local_transactional" else datetime.now(timezone.utc)
+        ),
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
     )
@@ -310,6 +314,20 @@ def _evidence_artifact(
             "issuedAt": now.isoformat(),
             **(metadata or {}),
         }
+        if str(call.execution_mode) == "local_transactional":
+            from app.entry.models import Entry
+
+            observed_entry = (
+                db.query(Entry)
+                .filter(Entry.source_capability_call_id == call.id)
+                .one_or_none()
+            )
+            claims["entryObservation"] = {
+                "kind": "present" if observed_entry is not None else "proven_absent",
+                "entryId": (
+                    str(observed_entry.id) if observed_entry is not None else None
+                ),
+            }
         if evidence_type == "capability_call_failure":
             claims.setdefault(
                 "failureDisposition", "explicit_product_acceptance_unresolved"
@@ -542,6 +560,7 @@ class ReconciliationServiceTests(unittest.TestCase):
             CapabilityReconciliationService,
             ReconciliationDecisionRequest,
         )
+        from app.assistant.capability_calls.repository import CapabilityCallConflict
 
         run, call, _art = _seed_external_call(self.db)
         art = _evidence_artifact(
@@ -629,6 +648,12 @@ class ReconciliationServiceTests(unittest.TestCase):
         self.assertFalse(r2.created)
         self.assertEqual(r2.reconciliation_id, r1.reconciliation_id)
         self.assertEqual(r2.resulting_call_status, "failed")
+        with self.assertRaises(CapabilityCallConflict):
+            CapabilityReconciliationService(
+                self.db,
+                operator_authorizer=_trusted_authorizer(uuid.uuid4()),
+                evidence_verifier=_evidence_verifier(),
+            ).apply(req)
 
     def test_retry_same_key_forbidden_for_local_transactional(self) -> None:
         from app.assistant.capability_calls.reconciliation import (
@@ -777,12 +802,11 @@ class ReconciliationServiceTests(unittest.TestCase):
         with self.assertRaises(CapabilityCallConflict):
             service.apply(request)
 
-    def test_other_pending_obligation_prevents_reconciliation_wake(self) -> None:
+    def test_other_pending_obligation_keeps_run_reconcilable(self) -> None:
         from app.assistant.capability_calls.reconciliation import (
             CapabilityReconciliationService,
             ReconciliationDecisionRequest,
         )
-        from app.assistant.capability_calls.repository import CapabilityCallConflict
         from app.assistant.durable.models import AssistantRunObligationRevision
         from app.assistant.policy.obligations import (
             ObligationLedgerState,
@@ -816,9 +840,133 @@ class ReconciliationServiceTests(unittest.TestCase):
             evidence_type="capability_call_failure",
         )
         self.db.commit()
-        with self.assertRaisesRegex(
-            CapabilityCallConflict, "another pending obligation"
-        ):
+        result = CapabilityReconciliationService(
+            self.db,
+            operator_authorizer=_trusted_authorizer(),
+            evidence_verifier=_evidence_verifier(),
+        ).apply(
+            ReconciliationDecisionRequest(
+                call_id=call.id,
+                expected_call_revision=3,
+                expected_run_revision=2,
+                decision="mark_failed",
+                reason="resolve this Call without dropping unrelated work",
+                evidence_artifact_ids=(evidence.id,),
+                resolution_request_id=uuid.uuid4(),
+            )
+        )
+        self.assertTrue(result.created)
+        self.db.refresh(call)
+        self.db.refresh(run)
+        self.assertEqual(call.status, "failed")
+        self.assertEqual(run.status, "needs_reconciliation")
+        resolved = self.db.get(
+            AssistantRunObligationRevision, run.current_obligation_revision_id
+        )
+        statuses = [item["status"] for item in resolved.payload["obligations"]]
+        self.assertIn("pending", statuses)
+        self.assertIn("satisfied", statuses)
+
+    def test_local_commit_ambiguity_is_persisted_and_not_auto_retried(self) -> None:
+        from app.assistant.capability_calls.settlement import (
+            CapabilityCallSettlementRepository,
+        )
+        from app.assistant.capability_calls.models import AssistantCapabilityCall
+        from app.assistant.durable.models import (
+            AssistantRunCheckpoint,
+            AssistantRunObligationRevision,
+        )
+        from app.assistant.durable.codec import decode_checkpoint
+        from app.assistant.policy.obligations import ObligationLedgerState
+
+        run, call, _ = _seed_external_call(
+            self.db,
+            mode="local_transactional",
+            status="needs_reconciliation",
+        )
+        # Recreate the pre-boundary Run snapshot: the helper builds a valid v3
+        # checkpoint/obligation bundle for a reconcilable local Call, while
+        # this test exercises the durable unknown quarantine transition.
+        run.status = "running"
+        run.state_revision = int(run.state_revision) + 1
+        self.db.commit()
+        settlement = CapabilityCallSettlementRepository(self.db)
+        result = settlement.mark_local_commit_outcome_unknown(
+            call_id=call.id,
+            failure_code="local_commit_outcome_unknown",
+        )
+        self.assertEqual(result.status, "needs_reconciliation")
+        self.db.refresh(call)
+        self.db.refresh(run)
+        self.assertEqual(call.status, "needs_reconciliation")
+        self.assertEqual(run.status, "needs_reconciliation")
+        self.assertEqual(call.attempt_count, 1)
+        self.assertIsNone(call.output_artifact_id)
+        self.assertEqual(
+            self.db.query(AssistantRunCheckpoint)
+            .filter_by(id=run.current_checkpoint_id, schema_version=3)
+            .count(),
+            1,
+        )
+        checkpoint = self.db.get(AssistantRunCheckpoint, run.current_checkpoint_id)
+        state = decode_checkpoint(checkpoint.state_payload)
+        self.assertEqual(state.capability_calls[0].status, "needs_reconciliation")
+        obligations = self.db.get(
+            AssistantRunObligationRevision, run.current_obligation_revision_id
+        )
+        # The quarantine obligation itself remains pending until a signed
+        # Operator evidence decision; no Entry/result Artifact was fabricated.
+        ledger = ObligationLedgerState.model_validate(obligations.payload)
+        self.assertEqual(
+            [
+                item.status
+                for item in ledger.obligations
+                if item.obligation_type == "reconciliation"
+                and item.source_call_id == str(call.id)
+            ],
+            ["pending"],
+        )
+        self.assertEqual(
+            self.db.query(AssistantCapabilityCall).filter_by(
+                id=call.id, output_artifact_id=None
+            ).count(),
+            1,
+        )
+
+    def test_reconciliation_requires_exact_owner_and_source_binding(self) -> None:
+        from app.assistant.capability_calls.reconciliation import (
+            CapabilityReconciliationService,
+            ReconciliationDecisionRequest,
+        )
+        from app.assistant.capability_calls.repository import CapabilityCallConflict
+        from app.assistant.durable.models import AssistantRunObligationRevision
+        from app.assistant.policy.obligations import ObligationLedgerState
+
+        run, call, _ = _seed_external_call(self.db)
+        obligation = self.db.get(
+            AssistantRunObligationRevision, run.current_obligation_revision_id
+        )
+        ledger = ObligationLedgerState.model_validate(obligation.payload)
+        target = next(item for item in ledger.obligations if item.status == "pending")
+        replaced = target.model_copy(update={"source_call_id": str(uuid.uuid4())})
+        ledger = ledger.model_copy(
+            update={
+                "obligations": tuple(
+                    replaced if item is target else item for item in ledger.obligations
+                )
+            }
+        )
+        obligation.payload = ledger.model_dump(mode="json", by_alias=True)
+        obligation.obligation_digest = ledger.ledger_digest
+        evidence = _evidence_artifact(
+            self.db,
+            run_id=run.id,
+            call_id=call.id,
+            evidence_type="capability_call_failure",
+        )
+        self.db.commit()
+
+        with self.assertRaises(CapabilityCallConflict):
             CapabilityReconciliationService(
                 self.db,
                 operator_authorizer=_trusted_authorizer(),
@@ -829,11 +977,12 @@ class ReconciliationServiceTests(unittest.TestCase):
                     expected_call_revision=3,
                     expected_run_revision=2,
                     decision="mark_failed",
-                    reason="must not wake past unrelated pending work",
+                    reason="reject mismatched obligation source",
                     evidence_artifact_ids=(evidence.id,),
                     resolution_request_id=uuid.uuid4(),
                 )
             )
+        self.db.rollback()
     def test_retry_same_key_is_forbidden_from_terminal_checkpoint(self) -> None:
         from app.assistant.capability_calls.reconciliation import (
             CapabilityReconciliationService,
@@ -1045,6 +1194,87 @@ class ReconciliationServiceTests(unittest.TestCase):
             states[sibling.id].result_message_digest,
             digest_provider_message(tool_messages[-1]),
         )
+
+    def test_terminal_reconciliation_with_unrelated_pending_obligation_clears_continuation(
+        self,
+    ) -> None:
+        """A sealed Provider suffix cannot leave a continuation for the failed Call."""
+        from app.assistant.capability_calls.reconciliation import (
+            CapabilityReconciliationService,
+            ReconciliationDecisionRequest,
+        )
+        from app.assistant.durable.checkpoints import _current_transcript_digest
+        from app.assistant.durable.codec import decode_checkpoint
+        from app.assistant.durable.models import (
+            AssistantRunCheckpoint,
+            AssistantRunObligationRevision,
+        )
+        from app.assistant.policy.obligations import (
+            ObligationLedgerState,
+            build_reserved_obligation,
+            pure_create_obligation,
+        )
+
+        run, call, _ = _seed_external_call(self.db)
+        sibling = _add_pending_sibling_continuation(
+            self.db, run=run, call=call
+        )
+        current_obligation = self.db.get(
+            AssistantRunObligationRevision, run.current_obligation_revision_id
+        )
+        ledger = ObligationLedgerState.model_validate(current_obligation.payload)
+        ledger, created = pure_create_obligation(
+            ledger,
+            build_reserved_obligation(
+                run_id=run.id,
+                obligation_type="user_input",
+                owner_kind="main_agent",
+                owner_id=str(run.id),
+                source_call_id=None,
+                revision=int(current_obligation.revision) + 1,
+            ),
+        )
+        self.assertTrue(created.allowed)
+        current_obligation.payload = ledger.model_dump(mode="json", by_alias=True)
+        current_obligation.obligation_digest = ledger.ledger_digest
+        evidence = _evidence_artifact(
+            self.db,
+            run_id=run.id,
+            call_id=call.id,
+            evidence_type="capability_call_failure",
+        )
+        self.db.commit()
+
+        CapabilityReconciliationService(
+            self.db,
+            operator_authorizer=_trusted_authorizer(),
+            evidence_verifier=_evidence_verifier(),
+        ).apply(
+            ReconciliationDecisionRequest(
+                call_id=call.id,
+                expected_call_revision=3,
+                expected_run_revision=2,
+                decision="mark_failed",
+                reason="seal the Provider suffix while unrelated work remains",
+                evidence_artifact_ids=(evidence.id,),
+                resolution_request_id=uuid.uuid4(),
+            )
+        )
+        self.db.commit()
+
+        self.db.refresh(run)
+        self.db.refresh(sibling)
+        self.assertEqual(run.status, "needs_reconciliation")
+        self.assertEqual(sibling.status, "cancelled")
+        final_row = self.db.get(AssistantRunCheckpoint, run.current_checkpoint_id)
+        final = decode_checkpoint(final_row.state_payload)
+        self.assertEqual(final.phase, "terminal")
+        self.assertEqual(final.next_action.kind, "reconcile")
+        self.assertIsNone(final.provider_loop_continuation)
+        _ordinal, transcript_digest, _transcript = _current_transcript_digest(
+            self.db, run.id
+        )
+        self.assertEqual(final.provider_transcript_digest, transcript_digest)
 
     def test_terminal_reconciliation_closes_reserved_sibling_without_continuation(
         self,

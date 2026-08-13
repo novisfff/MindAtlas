@@ -33,6 +33,7 @@ OPERATOR_AUDIT_EVENT_TYPES: Final[frozenset[str]] = frozenset(
         "csrf_rejected",
         "rbac_rejected",
         "control_plane_mutation_committed",
+        "capability_reconciliation_committed",
     }
 )
 
@@ -52,6 +53,7 @@ OperatorAuditEventType = Literal[
     "csrf_rejected",
     "rbac_rejected",
     "control_plane_mutation_committed",
+    "capability_reconciliation_committed",
 ]
 
 OperatorAuditOutcome = Literal["succeeded", "rejected", "failed"]

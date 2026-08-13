@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from datetime import timezone
 from typing import List
 from uuid import UUID
@@ -35,6 +36,17 @@ class EntryService:
         if not entry:
             raise ApiException(status_code=404, code=40400, message=f"Entry not found: {id}")
         return entry
+
+    def find_by_source_capability_call_id(
+        self, source_capability_call_id: UUID, *, for_update: bool = False
+    ) -> Entry | None:
+        """Return the one trusted Entry settlement for a CapabilityCall."""
+        query = self.db.query(Entry).filter(
+            Entry.source_capability_call_id == source_capability_call_id
+        )
+        if for_update:
+            query = query.with_for_update()
+        return query.one_or_none()
 
     def search(self, request: EntrySearchRequest) -> dict:
         query = self.db.query(Entry)
@@ -108,11 +120,7 @@ class EntryService:
         tripwire_production_writer("EntryService.create_in_uow")
         # Idempotent reload for trusted golden path.
         if source_capability_call_id is not None:
-            existing = (
-                self.db.query(Entry)
-                .filter(Entry.source_capability_call_id == source_capability_call_id)
-                .one_or_none()
-            )
+            existing = self.find_by_source_capability_call_id(source_capability_call_id)
             if existing is not None:
                 return existing
 
@@ -126,32 +134,52 @@ class EntryService:
             if len(tags) != len(request.tag_ids):
                 raise ApiException(status_code=400, code=40001, message="Some tag IDs are invalid")
 
-        entry = Entry(
-            title=request.title,
-            summary=request.summary,
-            content=request.content,
-            type_id=request.type_id,
-            time_mode=request.time_mode,
-            time_at=request.time_at,
-            time_from=request.time_from,
-            time_to=request.time_to,
-            source_capability_call_id=source_capability_call_id,
-        )
-        entry.tags = tags
-
-        self.db.add(entry)
-        self.db.flush()  # Ensure entry.id / timestamps are available in the same transaction.
-
-        self.db.add(
-            EntryIndexOutbox(
-                entry_id=entry.id,
-                op="upsert",
-                entry_updated_at=entry.updated_at,
-                status="pending",
+        try:
+            # PostgreSQL savepoints keep a concurrent unique-key loser
+            # recoverable while preserving the caller's single outer ledger
+            # transaction. SQLite starts its first write inside SAVEPOINT and
+            # would make a later outer rollback ineffective, so its isolated
+            # test path stays on the plain outer transaction.
+            savepoint = (
+                self.db.begin_nested()
+                if source_capability_call_id is not None
+                and self.db.get_bind().dialect.name == "postgresql"
+                else nullcontext()
             )
-        )
-        self.db.flush()
-        return entry
+            with savepoint:
+                entry = Entry(
+                    title=request.title,
+                    summary=request.summary,
+                    content=request.content,
+                    type_id=request.type_id,
+                    time_mode=request.time_mode,
+                    time_at=request.time_at,
+                    time_from=request.time_from,
+                    time_to=request.time_to,
+                    source_capability_call_id=source_capability_call_id,
+                )
+                entry.tags = tags
+
+                self.db.add(entry)
+                self.db.flush()  # Ensure entry.id / timestamps are available in the same transaction.
+
+                self.db.add(
+                    EntryIndexOutbox(
+                        entry_id=entry.id,
+                        op="upsert",
+                        entry_updated_at=entry.updated_at,
+                        status="pending",
+                    )
+                )
+                self.db.flush()
+            return entry
+        except IntegrityError:
+            if source_capability_call_id is None:
+                raise
+            existing = self.find_by_source_capability_call_id(source_capability_call_id)
+            if existing is None:
+                raise
+            return existing
 
     def create(self, request: EntryRequest) -> Entry:
         """HTTP/Legacy compatibility wrapper: create_in_uow + commit + refresh."""

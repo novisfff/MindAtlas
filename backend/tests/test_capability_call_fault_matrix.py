@@ -23,8 +23,56 @@ STRONG_SECRET = "s" * 32
 _POSTGRES_URL = os.environ.get("MINDATLAS_TEST_POSTGRES_URL", "").strip()
 
 
+def _isolated_postgres_engine():
+    """Create a fresh model schema so the PG race is independent of migrations."""
+    from sqlalchemy import create_engine, text
+
+    from app.database import Base
+    from app.model_registry import load_all_live_models
+
+    url = _POSTGRES_URL
+    if url.startswith("postgresql://") and "+psycopg2" not in url:
+        url = url.replace("postgresql://", "postgresql+psycopg2://", 1)
+    admin = create_engine(url, future=True, pool_pre_ping=True)
+    schema = f"task3_fault_{uuid.uuid4().hex}"
+    try:
+        with admin.begin() as conn:
+            conn.execute(text(f'CREATE SCHEMA "{schema}"'))
+        load_all_live_models()
+        engine = create_engine(
+            url,
+            future=True,
+            pool_pre_ping=True,
+            connect_args={"options": f"-csearch_path={schema}"},
+        )
+        Base.metadata.create_all(engine)
+        return engine, admin, schema
+    except Exception:
+        with admin.begin() as conn:
+            conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        admin.dispose()
+        raise
+
+
 class FaultMatrixUnitTests(unittest.TestCase):
     """Automated coverage for Task 0 fault labels (unit / SQLite)."""
+
+    def test_create_entry_fault_port_is_explicit_one_shot_and_allowlisted(self) -> None:
+        from app.assistant.capability_calls.faults import (
+            CapabilityFaultPort,
+            CapabilityInjectedFault,
+            CREATE_ENTRY_FAULT_POINTS,
+        )
+
+        self.assertIn("after_entry_stage_before_commit", CREATE_ENTRY_FAULT_POINTS)
+        port = CapabilityFaultPort.once("after_entry_stage_before_commit")
+        with self.assertRaises(CapabilityInjectedFault) as ctx:
+            port.hit("after_entry_stage_before_commit")
+        self.assertEqual(ctx.exception.point, "after_entry_stage_before_commit")
+        # A one-shot fault cannot be re-triggered by a duplicate/recovery pass.
+        port.hit("after_entry_stage_before_commit")
+        with self.assertRaises(ValueError):
+            port.hit("not-a-production-boundary")  # type: ignore[arg-type]
 
     def test_F01_propose_before_authz_no_attempt(self) -> None:
         """Crash after propose leaves call proposed with zero attempts."""
@@ -262,6 +310,40 @@ class FaultMatrixUnitTests(unittest.TestCase):
             checkpoint_row.phase = "dispatching_calls"
             checkpoint_row.state_payload = encode_checkpoint_v3(checkpoint)
             checkpoint_row.state_digest = checkpoint_state_digest(checkpoint)
+            from app.assistant.durable.models import AssistantRunObligationRevision
+            from app.assistant.policy.obligations import (
+                ObligationLedgerState,
+                build_reserved_obligation,
+                pure_create_obligation,
+            )
+
+            obligation = db.get(
+                AssistantRunObligationRevision, run.current_obligation_revision_id
+            )
+            ledger = ObligationLedgerState.model_validate(obligation.payload)
+            ledger, created = pure_create_obligation(
+                ledger,
+                build_reserved_obligation(
+                    run_id=run.id,
+                    obligation_type="user_input",
+                    owner_kind="main_agent",
+                    owner_id=str(run.id),
+                    source_call_id=None,
+                    revision=int(obligation.revision) + 1,
+                ),
+            )
+            assert created.allowed
+            sibling_obligation = AssistantRunObligationRevision(
+                run_id=run.id,
+                revision=int(obligation.revision) + 1,
+                parent_revision_id=obligation.id,
+                parent_digest=obligation.obligation_digest,
+                obligation_digest=ledger.ledger_digest,
+                payload=ledger.model_dump(mode="json", by_alias=True),
+            )
+            db.add(sibling_obligation)
+            db.flush()
+            run.current_obligation_revision_id = sibling_obligation.id
             db.commit()
             evidence_digest = compute_settlement_evidence_digest(
                 attempt=attempt,
@@ -287,6 +369,13 @@ class FaultMatrixUnitTests(unittest.TestCase):
             self.assertEqual(call.status, "needs_reconciliation")
             self.assertEqual(attempt.status, "uncertain")
             self.assertEqual(attempt.error_code, "settlement_outcome_unknown")
+            current_obligation = db.get(
+                AssistantRunObligationRevision, run2.current_obligation_revision_id
+            )
+            statuses = [
+                item["status"] for item in current_obligation.payload["obligations"]
+            ]
+            self.assertIn("pending", statuses)
         finally:
             db.close()
 
@@ -490,10 +579,7 @@ class FaultMatrixPostgresRaceTests(unittest.TestCase):
         from app.entry.service import EntryService
         from app.entry_type.models import EntryType
 
-        url = _POSTGRES_URL
-        if url.startswith("postgresql://") and "+psycopg2" not in url:
-            url = url.replace("postgresql://", "postgresql+psycopg2://", 1)
-        engine = create_engine(url, future=True, pool_pre_ping=True)
+        engine, admin, schema = _isolated_postgres_engine()
         factory = sessionmaker(bind=engine, expire_on_commit=False, future=True)
         seed = factory()
         try:
@@ -694,55 +780,10 @@ class FaultMatrixPostgresRaceTests(unittest.TestCase):
         finally:
             seed.rollback()
             seed.close()
-            with engine.begin() as conn:
-                conn.execute(
-                    text(
-                        "DELETE FROM entry WHERE source_capability_call_id = :call_id"
-                    ),
-                    {"call_id": locals().get("call_id")},
-                )
-                conn.execute(
-                    text(
-                        "ALTER TABLE assistant_capability_call_attempt DISABLE TRIGGER USER"
-                    )
-                )
-                conn.execute(
-                    text("ALTER TABLE assistant_capability_call DISABLE TRIGGER USER")
-                )
-                conn.execute(
-                    text(
-                        "DELETE FROM assistant_capability_call_attempt WHERE call_id = :call_id"
-                    ),
-                    {"call_id": locals().get("call_id")},
-                )
-                conn.execute(
-                    text("DELETE FROM assistant_capability_call WHERE id = :call_id"),
-                    {"call_id": locals().get("call_id")},
-                )
-                conn.execute(
-                    text("ALTER TABLE assistant_capability_call ENABLE TRIGGER USER")
-                )
-                conn.execute(
-                    text(
-                        "ALTER TABLE assistant_capability_call_attempt ENABLE TRIGGER USER"
-                    )
-                )
-                conn.execute(text("SET LOCAL mindatlas.allow_durable_run_purge = 'on'"))
-                conn.execute(
-                    text("DELETE FROM assistant_chat_run WHERE id = :run_id"),
-                    {"run_id": locals().get("run_id")},
-                )
-                conn.execute(
-                    text(
-                        "DELETE FROM assistant_conversation WHERE id = :conversation_id"
-                    ),
-                    {"conversation_id": locals().get("conversation_id")},
-                )
-                conn.execute(
-                    text("DELETE FROM entry_type WHERE id = :type_id"),
-                    {"type_id": locals().get("type_id")},
-                )
             engine.dispose()
+            with admin.begin() as conn:
+                conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+            admin.dispose()
 
 
 # ---------------------------------------------------------------------------

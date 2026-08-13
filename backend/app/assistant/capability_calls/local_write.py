@@ -6,7 +6,8 @@ It must never call EntryService.create() or the decorated create_entry tool.
 
 from __future__ import annotations
 
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal
 from uuid import UUID
 
 from sqlalchemy.orm import Session
@@ -14,6 +15,34 @@ from sqlalchemy.orm import Session
 from app.assistant.capability_calls.uow import UnitOfWorkBoundaryError
 from app.entry.schemas import EntryRequest
 from app.entry.service import EntryService
+
+
+@dataclass(frozen=True, slots=True)
+class LocalCreateEntrySettlement:
+    """Durable references produced by one committed local write settlement."""
+
+    call_id: UUID
+    entry_id: UUID
+    attempt_id: UUID
+    output_artifact_id: UUID
+    checkpoint_id: UUID
+    resulting_call_revision: int
+    resulting_run_revision: int
+
+
+@dataclass(frozen=True, slots=True)
+class LocalCommitRecovery:
+    """Fresh-session classification after a local commit boundary fault."""
+
+    call_id: UUID
+    kind: Literal["committed", "rolled_back", "unknown"]
+    entry_id: UUID | None = None
+    attempt_id: UUID | None = None
+    output_artifact_id: UUID | None = None
+    checkpoint_id: UUID | None = None
+    resulting_call_revision: int | None = None
+    resulting_run_revision: int | None = None
+    failure_code: str | None = None
 
 
 def stage_create_entry_local(
@@ -54,6 +83,7 @@ def assert_no_committing_create_import() -> None:
 
 
 __all__ = [
+    "LocalCreateEntrySettlement",
     "assert_no_committing_create_import",
     "stage_create_entry_local",
 ]

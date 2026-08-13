@@ -1442,6 +1442,7 @@ class DurableInterruptApiTests(unittest.TestCase):
         from tests.operator_session_helpers import make_service_principal
 
         conv, _msg, run = _make_waiting_run(self.db)
+        _other_conv, _other_msg, other_run = _make_waiting_run(self.db)
         interrupt, call = _create_call_owned_pending_interrupt(self.db, run=run)
         token = {"token": "not-a-call-owned-token", "tokenRevision": 0}
         request_id = uuid.uuid4()
@@ -1548,6 +1549,42 @@ class DurableInterruptApiTests(unittest.TestCase):
             self.db.query(AssistantRunCheckpoint).filter_by(run_id=run.id).count(),
             before_checkpoints + 1,
         )
+
+    def test_call_owned_approval_faults_roll_back_the_exact_mutation(self) -> None:
+        from app.assistant.capability_calls.faults import (
+            CapabilityFaultPort,
+            CapabilityInjectedFault,
+        )
+        from app.assistant.workflow.durable.interrupt_api import decide_call_owned
+        from tests.operator_session_helpers import make_service_principal
+
+        for point in ("before_approval_decision", "after_approval_decision"):
+            with self.subTest(point=point):
+                conv, _msg, run = _make_waiting_run(self.db)
+                interrupt, call = _create_call_owned_pending_interrupt(
+                    self.db, run=run
+                )
+                with self.assertRaises(CapabilityInjectedFault):
+                    decide_call_owned(
+                        self.db,
+                        conversation_id=conv.id,
+                        run_id=run.id,
+                        interrupt_id=interrupt.id,
+                        resolution_request_id=uuid.uuid4(),
+                        expected_request_revision=int(interrupt.request_revision),
+                        expected_run_revision=int(interrupt.request_run_revision),
+                        outcome="approved",
+                        actor=make_service_principal(f"fault-{point}"),
+                        fault_port=CapabilityFaultPort.once(point),
+                    )
+                self.db.refresh(run)
+                self.db.refresh(call)
+                self.db.refresh(interrupt)
+                self.assertEqual(run.status, "waiting_approval")
+                self.assertEqual(call.status, "awaiting_approval")
+                self.assertEqual(interrupt.status, "pending")
+                self.assertEqual(call.attempt_count, 0)
+                self.assertIsNone(call.side_effect_started_at)
 
     def test_call_owned_token_rotation_is_not_an_alternate_decision_path(self) -> None:
         from app.assistant.workflow.durable.interrupt_api import (
@@ -1750,6 +1787,7 @@ class DurableInterruptApiTests(unittest.TestCase):
         from tests.operator_session_helpers import make_service_principal
 
         conv, _msg, run = _make_waiting_run(self.db)
+        _other_conv, _other_msg, other_run = _make_waiting_run(self.db)
         interrupt, call = _create_call_owned_pending_interrupt(self.db, run=run)
         with self.assertRaises(DurableInterruptApiError) as viewer_error:
             decide_call_owned(
@@ -1871,6 +1909,10 @@ class DurableInterruptApiTests(unittest.TestCase):
         self.assertEqual(interrupt.status, "cancelled")
         self.assertEqual(call.attempt_count, 0)
         self.assertIsNone(call.side_effect_started_at)
+        self.assertEqual(
+            int(interrupt.resolution_run_revision),
+            int(run.state_revision),
+        )
 
     def test_repeated_stop_repairs_call_owned_cleanup_while_cancelling(self) -> None:
         from app.assistant.service import AssistantService
@@ -1890,6 +1932,67 @@ class DurableInterruptApiTests(unittest.TestCase):
         self.db.refresh(interrupt)
         self.assertEqual(call.status, "cancelled")
         self.assertEqual(interrupt.status, "cancelled")
+
+    def test_stop_fails_closed_on_drifted_call_owned_linkage(self) -> None:
+        from app.assistant.service import AssistantService
+        from app.common.exceptions import ApiException
+
+        conv, _msg, run = _make_waiting_run(self.db)
+        _other_conv, _other_msg, other_run = _make_waiting_run(self.db)
+        interrupt, call = _create_call_owned_pending_interrupt(self.db, run=run)
+        # Simulate a durable linkage drift that still satisfies the origin XOR:
+        # the Call points at this Interrupt, but the Interrupt is now a legal
+        # workflow-owned row.  Stop must not downgrade this to generic cleanup.
+        interrupt.interrupt_origin = "workflow_node"
+        interrupt.capability_call_id = None
+        interrupt.workflow_frame_id = uuid.uuid4()
+        interrupt.node_id = "drifted-node"
+        interrupt.node_visit_id = "drifted-visit"
+        call.run_id = other_run.id
+        self.db.commit()
+        before_revision = int(run.state_revision)
+
+        with self.assertRaises(ApiException):
+            AssistantService(self.db).stop_run(
+                conversation_id=conv.id,
+                run_id=run.id,
+            )
+
+        self.db.refresh(run)
+        self.db.refresh(call)
+        self.db.refresh(interrupt)
+        self.assertEqual(run.status, "waiting_approval")
+        self.assertEqual(int(run.state_revision), before_revision)
+        self.assertEqual(call.status, "awaiting_approval")
+        self.assertEqual(interrupt.status, "pending")
+
+    def test_terminal_stop_repairs_call_owned_cleanup_without_generic_orphaning(self) -> None:
+        from app.assistant.service import AssistantService
+
+        conv, _msg, run = _make_waiting_run(self.db)
+        interrupt, call = _create_call_owned_pending_interrupt(self.db, run=run)
+        # Model a lost response after the Run became terminal while the
+        # call-owned approval cleanup was still pending.  Retrying stop must
+        # use the bidirectional call-owned path even though no Run CAS can
+        # occur anymore.
+        run.status = "cancelled"
+        self.db.commit()
+
+        payload = AssistantService(self.db).stop_run(
+            conversation_id=conv.id,
+            run_id=run.id,
+        )
+
+        self.assertEqual(payload["status"], "cancelled")
+        self.db.refresh(run)
+        self.db.refresh(call)
+        self.db.refresh(interrupt)
+        self.assertEqual(call.status, "cancelled")
+        self.assertEqual(interrupt.status, "cancelled")
+        self.assertEqual(
+            int(interrupt.resolution_run_revision),
+            int(run.state_revision),
+        )
 
     def test_expiry_closes_call_owned_call_even_if_run_is_not_waiting(self) -> None:
         from app.assistant.workflow.durable.interrupt_api import expire_one_interrupt
@@ -1912,6 +2015,92 @@ class DurableInterruptApiTests(unittest.TestCase):
         self.db.refresh(interrupt)
         self.assertEqual(call.status, "expired")
         self.assertEqual(interrupt.status, "expired")
+
+    def test_expiry_fails_closed_on_drifted_call_owned_linkage(self) -> None:
+        from app.assistant.workflow.durable.interrupt_api import (
+            DurableInterruptApiError,
+            expire_one_interrupt,
+        )
+
+        conv, _msg, run = _make_waiting_run(self.db)
+        _other_conv, _other_msg, other_run = _make_waiting_run(self.db)
+        interrupt, call = _create_call_owned_pending_interrupt(self.db, run=run)
+        interrupt.expires_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+        interrupt.interrupt_origin = "workflow_node"
+        interrupt.capability_call_id = None
+        interrupt.workflow_frame_id = uuid.uuid4()
+        interrupt.node_id = "drifted-node"
+        interrupt.node_visit_id = "drifted-visit"
+        call.run_id = other_run.id
+        self.db.commit()
+
+        with self.assertRaises(DurableInterruptApiError):
+            expire_one_interrupt(
+                self.db,
+                run_id=run.id,
+                interrupt_id=interrupt.id,
+            )
+
+        self.db.refresh(run)
+        self.db.refresh(call)
+        self.db.refresh(interrupt)
+        self.assertEqual(run.status, "waiting_approval")
+        self.assertEqual(call.status, "awaiting_approval")
+        self.assertEqual(interrupt.status, "pending")
+
+    def test_expiry_fails_closed_on_duplicate_reverse_call_pointer(self) -> None:
+        from app.assistant.capability_calls.models import AssistantCapabilityCall
+        from app.assistant.workflow.durable.interrupt_api import (
+            DurableInterruptApiError,
+            expire_one_interrupt,
+        )
+
+        _conv, _msg, run = _make_waiting_run(self.db)
+        interrupt, call = _create_call_owned_pending_interrupt(self.db, run=run)
+        duplicate = AssistantCapabilityCall(
+            id=uuid.uuid4(),
+            run_id=run.id,
+            manifest_revision_id=call.manifest_revision_id,
+            provider_tool_call_id=f"duplicate-{uuid.uuid4().hex}",
+            logical_call_key=f"{call.logical_call_key}-duplicate",
+            owner_kind=call.owner_kind,
+            owner_id=call.owner_id,
+            owner_version_id=call.owner_version_id,
+            capability_type=call.capability_type,
+            domain_key=call.domain_key,
+            target_id=call.target_id,
+            target_version_id=call.target_version_id,
+            descriptor_digest=call.descriptor_digest,
+            authorization_digest=call.authorization_digest,
+            approval_binding_digest=call.approval_binding_digest,
+            input_artifact_id=call.input_artifact_id,
+            input_digest=call.input_digest,
+            side_effect_class=call.side_effect_class,
+            execution_mode=call.execution_mode,
+            idempotency_key=f"duplicate-{uuid.uuid4().hex}",
+            status="awaiting_approval",
+            state_revision=1,
+            attempt_count=0,
+            interrupt_id=interrupt.id,
+        )
+        self.db.add(duplicate)
+        interrupt.expires_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+        self.db.commit()
+
+        with self.assertRaises(DurableInterruptApiError):
+            expire_one_interrupt(
+                self.db,
+                run_id=run.id,
+                interrupt_id=interrupt.id,
+            )
+
+        self.db.refresh(run)
+        self.db.refresh(call)
+        self.db.refresh(duplicate)
+        self.db.refresh(interrupt)
+        self.assertEqual(call.status, "awaiting_approval")
+        self.assertEqual(duplicate.status, "awaiting_approval")
+        self.assertEqual(interrupt.status, "pending")
 
 
 class CallOwnedDecisionHttpTests(unittest.TestCase):

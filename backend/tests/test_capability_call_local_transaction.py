@@ -158,6 +158,7 @@ class LocalTransactionalGoldenPathTests(unittest.TestCase):
         from tests.assistant_runtime_support import make_main_agent_run
         from app.assistant.policy import (
             create_initial_ledger_state,
+            create_initial_obligation_ledger_state,
             normalize_run_budget_limits,
         )
         import hashlib
@@ -216,11 +217,12 @@ class LocalTransactionalGoldenPathTests(unittest.TestCase):
             budget_digest=budget_ledger.ledger_digest,
             payload=budget_ledger.model_dump(mode="json", by_alias=True),
         )
+        obligation_ledger = create_initial_obligation_ledger_state()
         self.obligation = AssistantRunObligationRevision(
             run_id=self.run.id,
             revision=1,
-            obligation_digest="d" * 64,
-            payload={},
+            obligation_digest=obligation_ledger.ledger_digest,
+            payload=obligation_ledger.model_dump(mode="json", by_alias=True),
         )
         self.db.add_all([self.policy, self.budget, self.obligation])
         self.db.flush()
@@ -279,6 +281,313 @@ class LocalTransactionalGoldenPathTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.db.close()
 
+    def _approval_boundary_fixture(self, provider_call_id: str):
+        """Build a real aggregate pause request with one budget reservation."""
+        from types import SimpleNamespace
+
+        from app.assistant.capability_calls.aggregate import (
+            DurableCapabilityLedgerAggregate,
+        )
+        from app.assistant.domain.digests import sha256_canonical_json
+        from app.assistant.policy.budgets import BudgetLedger, DeterministicBudgetClock
+        from app.assistant.policy.contracts import (
+            build_authorization_decision_v2,
+            normalize_owner_budget_limits,
+            normalize_run_budget_limits,
+        )
+        from app.assistant.policy.runtime import (
+            BudgetLedgerDispatchGuard,
+            BudgetLedgerReservationPort,
+        )
+        from app.assistant.provider_loop.contracts import CapabilityCallReservationItem
+        from tests._db import allowing_test_write_guard
+        from tests.test_agent_policy_runtime import _base_manifest
+
+        arguments = {
+            "title": "approval boundary",
+            "content": "body",
+            "type_code": "KNOWLEDGE",
+            "tags": [],
+            "time_mode": "POINT",
+            "time_at": "2026-07-18",
+        }
+        decision = build_authorization_decision_v2(
+            policy_allowed=True,
+            dispatch_disposition="awaiting_call_approval",
+            reason_code="approval_required",
+            principal_digest=DIGEST_A,
+            entrypoint_policy_digest=DIGEST_A,
+            global_policy_digest=DIGEST_A,
+            owner_policy_digest=DIGEST_A,
+            allowed_side_effects=("none", "compute", "read", "draft", "write_local"),
+            grant_source_digest=DIGEST_B,
+            exposure_digest=DIGEST_A,
+            effective_policy_digest=DIGEST_A,
+            write_release_digest=DIGEST_B,
+        )
+        resolved_manifest, _surface = _base_manifest()
+        request = SimpleNamespace(
+            execution_scope=SimpleNamespace(run_id=self.run.id),
+            call=SimpleNamespace(
+                call_id=provider_call_id,
+                domain_key="create_entry",
+                arguments=arguments,
+            ),
+            current_manifest=resolved_manifest.model_copy(
+                update={"run_id": self.run.id, "manifest_digest": DIGEST_A}
+            ),
+            binding=SimpleNamespace(
+                ref=SimpleNamespace(
+                    binding_contract_digest=DIGEST_A,
+                    resolution_digest=DIGEST_B,
+                )
+            ),
+            descriptor=SimpleNamespace(
+                behavior=SimpleNamespace(side_effect="write_local"),
+                capability_type="tool",
+                target_id=None,
+                target_version_id=None,
+                descriptor_digest=DIGEST_A,
+            ),
+            authorization=SimpleNamespace(
+                owner=SimpleNamespace(
+                    owner_kind="main_agent",
+                    owner_id=None,
+                    owner_version_id=None,
+                )
+            ),
+        )
+        limits = normalize_run_budget_limits(
+            operator_limits={
+                "max_total_capability_calls": 2,
+                "max_parallel_calls": 1,
+                "max_same_read_signature": 2,
+            }
+        )
+        owner_version_id = uuid.uuid4()
+        ledger = BudgetLedger.create(
+            limits=limits,
+            owner_limits=(
+                normalize_owner_budget_limits(
+                    owner_kind="main_agent",
+                    owner_version_id=owner_version_id,
+                    run_limits=limits,
+                ),
+            ),
+            clock=DeterministicBudgetClock(),
+        )
+        self.assertTrue(
+            BudgetLedgerReservationPort(ledger=ledger)
+            .reserve_one(
+                CapabilityCallReservationItem(
+                    call_id=provider_call_id,
+                    owner_kind="main_agent",
+                    owner_version_id=owner_version_id,
+                    domain_key="create_entry",
+                    side_effect="write_local",
+                    arguments_digest=sha256_canonical_json(arguments),
+                    binding_contract_digest=DIGEST_A,
+                    capability_depth=1,
+                    agent_depth=1,
+                )
+            )
+            .allowed
+        )
+        aggregate = DurableCapabilityLedgerAggregate(
+            db=self.db,
+            authorization_factory=SimpleNamespace(
+                decision_for_call=lambda **_kwargs: decision
+            ),
+            idempotency_secret="s" * 32,
+            write_guard=allowing_test_write_guard(self.db),
+            lease=self.lease,
+            dispatch_guard=BudgetLedgerDispatchGuard(ledger=ledger),
+        )
+        return aggregate, request
+
+    def test_aggregate_proposal_faults_rollback_before_and_after_materialization(self) -> None:
+        from app.assistant.capability_calls.faults import (
+            CapabilityFaultPort,
+            CapabilityInjectedFault,
+        )
+        from app.assistant.capability_calls.models import AssistantCapabilityCall
+        from app.assistant.capability_calls.models import AssistantCapabilityCallAttempt
+        from app.entry.models import Entry
+
+        for point in ("before_proposal", "after_proposal"):
+            with self.subTest(point=point):
+                provider_call_id = f"proposal-fault-{point}"
+                aggregate, request = self._approval_boundary_fixture(provider_call_id)
+                aggregate.fault_port = CapabilityFaultPort.once(point)
+                if point == "before_proposal":
+                    with self.assertRaises(CapabilityInjectedFault):
+                        aggregate.prepare(request)
+                else:
+                    outcome = aggregate.prepare(request)
+                    from app.assistant.capabilities.contracts import ContinuationRef
+                    from app.assistant.provider_loop.messages import (
+                        ProviderAssistantMessage,
+                        ProviderUserMessage,
+                        digest_provider_transcript,
+                    )
+                    from tests.test_durable_checkpoint_codec import (
+                        _manifest,
+                        _surface,
+                        _tool_call,
+                        _waiting_continuation,
+                    )
+
+                    tool_call = _tool_call(_surface(_manifest())).model_copy(
+                        update={"call_id": provider_call_id}
+                    )
+                    base_messages = (
+                        ProviderUserMessage(content="create it"),
+                        ProviderAssistantMessage(content=None, tool_calls=(tool_call,)),
+                    )
+                    root_continuation = ContinuationRef(
+                        continuation_type="capability_call",
+                        contract_version=1,
+                        reference_id=outcome.pause_proposal["interruptId"],
+                        payload_digest=outcome.pause_proposal["proposalDigest"],
+                    )
+                    waiting_continuation = _waiting_continuation()
+                    continuation = waiting_continuation.model_copy(
+                        update={
+                            "execution_scope": waiting_continuation.execution_scope.model_copy(
+                                update={"run_id": self.run.id}
+                            ),
+                            "waiting_call": waiting_continuation.waiting_call.model_copy(
+                                update={
+                                    "call_id": provider_call_id,
+                                    "capability_continuation": root_continuation,
+                                }
+                            ),
+                            "transcript_digest": digest_provider_transcript(base_messages),
+                        }
+                    )
+                    with self.assertRaises(CapabilityInjectedFault):
+                        aggregate.commit_pause(continuation, base_messages)
+                self.assertEqual(
+                    self.db.query(AssistantCapabilityCall)
+                    .filter_by(provider_tool_call_id=provider_call_id)
+                    .count(),
+                    0,
+                )
+                self.assertEqual(
+                    self.db.query(AssistantCapabilityCallAttempt).count(), 0
+                )
+                self.assertEqual(self.db.query(Entry).count(), 0)
+
+    def test_after_checkpoint_observation_fault_recovers_committed_local_bundle(self) -> None:
+        from app.assistant.capability_calls.dispatcher import LedgerDispatcher
+        from app.assistant.capability_calls.faults import (
+            CapabilityFaultPort,
+            CapabilityInjectedFault,
+        )
+        from app.assistant.capability_calls.models import AssistantCapabilityCall
+        from app.assistant.capability_calls.models import AssistantCapabilityCallAttempt
+        from app.assistant.durable.models import AssistantRunInterrupt
+        from app.assistant.capabilities.contracts import ContinuationRef
+        from app.assistant.provider_loop.messages import (
+            ProviderAssistantMessage,
+            ProviderToolMessage,
+            ProviderUserMessage,
+            digest_provider_transcript,
+            project_tool_result_envelope,
+        )
+        from app.entry.models import Entry
+        from tests.test_durable_checkpoint_codec import (
+            _manifest,
+            _surface,
+            _tool_call,
+            _waiting_continuation,
+        )
+
+        provider_call_id = "checkpoint-observation-fault"
+        aggregate, request = self._approval_boundary_fixture(provider_call_id)
+        outcome = aggregate.prepare(request)
+        self.assertEqual(outcome.kind, "pause")
+        tool_call = _tool_call(_surface(_manifest())).model_copy(
+            update={"call_id": provider_call_id}
+        )
+        base_messages = (
+            ProviderUserMessage(content="create it"),
+            ProviderAssistantMessage(content=None, tool_calls=(tool_call,)),
+        )
+        root_continuation = ContinuationRef(
+            continuation_type="capability_call",
+            contract_version=1,
+            reference_id=outcome.pause_proposal["interruptId"],
+            payload_digest=outcome.pause_proposal["proposalDigest"],
+        )
+        waiting = _waiting_continuation()
+        continuation = waiting.model_copy(
+            update={
+                "execution_scope": waiting.execution_scope.model_copy(
+                    update={"run_id": self.run.id}
+                ),
+                "waiting_call": waiting.waiting_call.model_copy(
+                    update={
+                        "call_id": provider_call_id,
+                        "capability_continuation": root_continuation,
+                    }
+                ),
+                "transcript_digest": digest_provider_transcript(base_messages),
+            }
+        )
+        aggregate.commit_pause(continuation, base_messages)
+        call = (
+            self.db.query(AssistantCapabilityCall)
+            .filter_by(provider_tool_call_id=provider_call_id)
+            .one()
+        )
+        interrupt = self.db.get(AssistantRunInterrupt, call.interrupt_id)
+        self.assertIsNotNone(interrupt)
+        interrupt.status = "approved"
+        call.status = "authorized"
+        call.state_revision = int(call.state_revision) + 1
+        self.run.status = "running"
+        self.run.state_revision = int(self.run.state_revision) + 1
+        self.run.lease_owner = "worker-1"
+        self.run.lease_generation = 1
+        self.db.commit()
+
+        aggregate.fault_port = CapabilityFaultPort.once(
+            "after_commit_before_checkpoint_observation"
+        )
+        dispatcher = LedgerDispatcher(
+            inner=type("Inner", (), {"dispatch": lambda *_args, **_kwargs: None})(),
+            aggregate=aggregate,
+        )
+        result = dispatcher.dispatch(
+            request,
+            cancellation=type("Cancellation", (), {"is_cancelled": lambda _self: False})(),
+        )
+        tool_message = ProviderToolMessage(
+            call_id=provider_call_id,
+            provider_alias=tool_call.provider_alias,
+            content=project_tool_result_envelope(
+                domain_key="create_entry",
+                result=result.capability_result,
+            ),
+        )
+        with self.assertRaises(CapabilityInjectedFault):
+            aggregate.commit_progress((*base_messages, tool_message))
+
+        self.db.refresh(call)
+        self.assertEqual(call.status, "succeeded")
+        self.assertEqual(
+            self.db.query(AssistantCapabilityCallAttempt)
+            .filter_by(call_id=call.id, status="committed")
+            .count(),
+            1,
+        )
+        self.assertEqual(
+            self.db.query(Entry).filter_by(source_capability_call_id=call.id).count(),
+            1,
+        )
+        self.assertIsNotNone(aggregate.last_local_settlement)
+
     def test_mismatched_search_call_has_no_direct_local_settlement_entrypoint(self) -> None:
         """A mismatched call can only reach the aggregate-owned execution path."""
         import app.assistant.capability_calls as capability_calls
@@ -302,6 +611,61 @@ class LocalTransactionalGoldenPathTests(unittest.TestCase):
                 "app.assistant.capability_calls.local_settlement"
             )
         self.assertEqual(self.db.query(Entry).count(), 0)
+
+    def test_recovery_requires_the_complete_durable_bundle(self) -> None:
+        """A source Entry alone must not be treated as an acknowledged commit."""
+        from types import SimpleNamespace
+
+        from app.assistant.capability_calls.aggregate import (
+            DurableCapabilityLedgerAggregate,
+        )
+        from app.assistant.capability_calls.models import AssistantCapabilityCall
+        from app.assistant.capability_calls.local_write import (
+            LocalCommitRecovery,
+        )
+        from app.entry.models import Entry
+        from app.entry.schemas import EntryRequest
+        from app.entry.service import EntryService
+        from app.entry.models import TimeMode
+        from tests._db import allowing_test_write_guard
+
+        call = self.db.get(AssistantCapabilityCall, self.call_id)
+        self.assertIsNotNone(call)
+        entry = EntryService(self.db).create_in_uow(
+            EntryRequest(
+                title="partial durable entry",
+                summary="partial",
+                content="partial",
+                type_id=self.etype.id,
+                time_mode=TimeMode.POINT,
+                time_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+            ),
+            source_capability_call_id=call.id,
+        )
+        # Simulate a boundary-visible Entry with the rest of the settlement
+        # bundle still missing.  The fresh-session classifier must fail closed.
+        call.status = "needs_reconciliation"
+        call.output_artifact_id = None
+        call.side_effect_started_at = None
+        self.db.commit()
+
+        aggregate = DurableCapabilityLedgerAggregate(
+            db=self.db,
+            authorization_factory=SimpleNamespace(),
+            idempotency_secret="s" * 32,
+            write_guard=allowing_test_write_guard(self.db),
+            lease=self.lease,
+        )
+        recovery = aggregate.recover_local_commit(call.id)
+        self.assertIsInstance(recovery, LocalCommitRecovery)
+        self.assertEqual(recovery.kind, "unknown")
+        self.assertEqual(recovery.failure_code, "local_commit_outcome_unknown")
+        self.assertIsNone(recovery.attempt_id)
+        self.assertIsNone(recovery.output_artifact_id)
+        self.assertEqual(
+            self.db.query(Entry).filter_by(source_capability_call_id=call.id).count(),
+            1,
+        )
 
     def test_post_approval_guard_denial_is_durable_without_attempt_or_entry(self) -> None:
         from types import SimpleNamespace
@@ -815,6 +1179,87 @@ class LocalTransactionalGoldenPathTests(unittest.TestCase):
         snapshot = restarted_ledger.snapshot()
         self.assertEqual(snapshot.capability_calls_started, 1)
         self.assertEqual([item.state for item in snapshot.reservations], ["finished"])
+        committed = aggregate.recover_local_commit(self.call_id)
+        self.assertEqual(committed.kind, "committed")
+        from app.assistant.durable.models import (
+            AssistantRunCheckpoint,
+            AssistantRunObligationRevision,
+        )
+        from app.assistant.durable.codec import checkpoint_state_digest, decode_checkpoint
+        from app.assistant.policy.obligations import (
+            ObligationLedgerState,
+            compute_obligation_ledger_digest,
+        )
+
+        checkpoint = self.db.get(AssistantRunCheckpoint, self.run.current_checkpoint_id)
+        current_obligation = self.db.get(
+            AssistantRunObligationRevision,
+            self.run.current_obligation_revision_id,
+        )
+        self.assertIsNotNone(checkpoint)
+        self.assertIsNotNone(current_obligation)
+        current_ledger = ObligationLedgerState.model_validate(current_obligation.payload)
+        drifted_revision = int(current_ledger.revision) + 1
+        drifted_digest = compute_obligation_ledger_digest(
+            revision=drifted_revision,
+            obligations=current_ledger.obligations,
+            evidence_edges=current_ledger.evidence_edges,
+            followup_rounds_started=current_ledger.followup_rounds_started,
+        )
+        drifted_ledger = current_ledger.model_copy(
+            update={"revision": drifted_revision, "ledger_digest": drifted_digest}
+        )
+        drifted_obligation = AssistantRunObligationRevision(
+            run_id=self.run.id,
+            revision=int(current_obligation.revision) + 1,
+            parent_revision_id=current_obligation.id,
+            parent_digest=current_obligation.obligation_digest,
+            obligation_digest=drifted_ledger.ledger_digest,
+            payload=drifted_ledger.model_dump(mode="json", by_alias=True),
+        )
+        self.db.add(drifted_obligation)
+        self.db.flush()
+        self.run.current_obligation_revision_id = drifted_obligation.id
+        self.db.commit()
+        drifted = aggregate.recover_local_commit(self.call_id)
+        self.assertEqual(drifted.kind, "unknown")
+        self.run.current_obligation_revision_id = checkpoint.obligation_revision_id
+        self.db.commit()
+        self.db.refresh(current_obligation)
+        original_obligation_payload = dict(current_obligation.payload)
+        tampered_obligation_payload = dict(original_obligation_payload)
+        tampered_obligation_payload["followupRoundsStarted"] = 1
+        current_obligation.payload = tampered_obligation_payload
+        self.db.commit()
+        tampered_obligation = aggregate.recover_local_commit(self.call_id)
+        self.assertEqual(tampered_obligation.kind, "unknown")
+        current_obligation.payload = original_obligation_payload
+        self.db.commit()
+        original_checkpoint_payload = dict(checkpoint.state_payload)
+        tampered_checkpoint_payload = dict(original_checkpoint_payload)
+        tampered_checkpoint_payload["obligationRevisionId"] = str(uuid.uuid4())
+        checkpoint.state_payload = tampered_checkpoint_payload
+        checkpoint.state_digest = checkpoint_state_digest(
+            decode_checkpoint(tampered_checkpoint_payload)
+        )
+        self.db.commit()
+        tampered_checkpoint = aggregate.recover_local_commit(self.call_id)
+        self.assertEqual(tampered_checkpoint.kind, "unknown")
+        checkpoint.state_payload = original_checkpoint_payload
+        checkpoint.state_digest = checkpoint_state_digest(
+            decode_checkpoint(original_checkpoint_payload)
+        )
+        self.db.commit()
+        attempt = (
+            self.db.query(AssistantCapabilityCallAttempt)
+            .filter_by(call_id=self.call_id, status="committed")
+            .one()
+        )
+        attempt.response_digest = DIGEST_B
+        self.db.commit()
+        corrupt = aggregate.recover_local_commit(self.call_id)
+        self.assertEqual(corrupt.kind, "unknown")
+        self.assertEqual(corrupt.failure_code, "local_commit_outcome_unknown")
 
     def test_aggregate_local_dispatch_commits_entry_attempt_and_result_together(self) -> None:
         from types import SimpleNamespace
@@ -1025,6 +1470,43 @@ class LocalTransactionalGoldenPathTests(unittest.TestCase):
             inner=SimpleNamespace(dispatch=lambda *_args, **_kwargs: None),
             aggregate=aggregate,
         )
+        from app.assistant.capability_calls.faults import (
+            CapabilityFaultPort,
+            CapabilityInjectedFault,
+        )
+
+        aggregate.fault_port = CapabilityFaultPort.once(
+            "after_entry_stage_before_commit"
+        )
+        with self.assertRaises(CapabilityInjectedFault):
+            dispatcher.dispatch(
+                request,
+                cancellation=SimpleNamespace(is_cancelled=lambda: False),
+            )
+        self.assertEqual(
+            self.db.query(Entry)
+            .filter(Entry.source_capability_call_id == self.call_id)
+            .count(),
+            0,
+        )
+        self.db.refresh(call)
+        self.assertEqual(call.status, "authorized")
+
+        # Retry through a fresh aggregate after the proven rollback.
+        aggregate = DurableCapabilityLedgerAggregate(
+            db=self.db,
+            authorization_factory=SimpleNamespace(
+                decision_for_call=lambda **_kwargs: decision
+            ),
+            idempotency_secret="s" * 32,
+            write_guard=allowing_test_write_guard(self.db),
+            lease=self.lease,
+            dispatch_guard=budget_guard,
+        )
+        dispatcher = LedgerDispatcher(
+            inner=SimpleNamespace(dispatch=lambda *_args, **_kwargs: None),
+            aggregate=aggregate,
+        )
         result = dispatcher.dispatch(
             request,
             cancellation=SimpleNamespace(is_cancelled=lambda: False),
@@ -1100,6 +1582,9 @@ class LocalTransactionalGoldenPathTests(unittest.TestCase):
             request,
             cancellation=SimpleNamespace(is_cancelled=lambda: False),
         )
+        self.assertNotIn("title", result.capability_result.structured_output or {})
+        self.assertNotIn("content", result.capability_result.structured_output or {})
+        self.assertNotIn("aggregate golden", result.capability_result.user_text or "")
         tool_message = ProviderToolMessage(
             call_id="golden-aggregate-1",
             provider_alias=tool_call.provider_alias,
@@ -1108,13 +1593,145 @@ class LocalTransactionalGoldenPathTests(unittest.TestCase):
                 result=result.capability_result,
             ),
         )
-        aggregate.commit_progress(
-            (
-                *base_messages,
-                tool_message,
-            )
+        # A local settlement is one ledger-owned transaction.  The reader
+        # session must see the old approval-only state until the final Run CAS
+        # commits, then observe the complete Call/Attempt/Entry/Artifact/
+        # Checkpoint bundle together.
+        from sqlalchemy import event
+        from sqlalchemy.orm import sessionmaker
+
+        from app.assistant.durable.models import (
+            AssistantRunCheckpoint,
+            AssistantRunObligationRevision,
         )
 
+        settlement_call_id = (
+            self.db.query(AssistantCapabilityCall)
+            .filter_by(provider_tool_call_id="golden-aggregate-1")
+            .one()
+            .id
+        )
+        reader = sessionmaker(bind=self.db.get_bind(), future=True)()
+        before_commit_snapshots = []
+        commit_events = []
+
+        def _snapshot():
+            reader.rollback()
+            reader.expire_all()
+            visible_run = reader.get(type(self.run), self.run.id)
+            visible_call = reader.get(AssistantCapabilityCall, settlement_call_id)
+            visible_attempts = (
+                reader.query(AssistantCapabilityCallAttempt)
+                .filter(AssistantCapabilityCallAttempt.call_id == settlement_call_id)
+                .all()
+            )
+            visible_entry_count = (
+                reader.query(Entry)
+                .filter(Entry.source_capability_call_id == settlement_call_id)
+                .count()
+            )
+            visible_result_count = (
+                reader.query(AssistantRunArtifact)
+                .filter(
+                    AssistantRunArtifact.run_id == self.run.id,
+                    AssistantRunArtifact.kind == "capability_call_result",
+                )
+                .count()
+            )
+            visible_checkpoint = (
+                reader.get(AssistantRunCheckpoint, visible_run.current_checkpoint_id)
+                if visible_run is not None and visible_run.current_checkpoint_id is not None
+                else None
+            )
+            visible_obligation = (
+                reader.get(
+                    AssistantRunObligationRevision,
+                    visible_run.current_obligation_revision_id,
+                )
+                if visible_run is not None
+                and visible_run.current_obligation_revision_id is not None
+                else None
+            )
+            call_state = None
+            if visible_checkpoint is not None:
+                call_state = next(
+                    (
+                        item
+                        for item in visible_checkpoint.state_payload.get("capabilityCalls", [])
+                        if str(item.get("callId")) == str(settlement_call_id)
+                    ),
+                    None,
+                )
+            obligation_statuses = tuple(
+                sorted(
+                    str(item.get("status"))
+                    for item in (visible_obligation.payload or {}).get("obligations", [])
+                    if isinstance(item, dict)
+                )
+            ) if visible_obligation is not None else ()
+            return {
+                "call_status": None if visible_call is None else str(visible_call.status),
+                "attempt_count": len(visible_attempts),
+                "attempt_statuses": tuple(sorted(str(item.status) for item in visible_attempts)),
+                "entry_count": visible_entry_count,
+                "result_artifact_count": visible_result_count,
+                "checkpoint_schema": None if visible_checkpoint is None else int(visible_checkpoint.schema_version),
+                "checkpoint_call_status": None if call_state is None else str(call_state.get("status")),
+                "obligation_statuses": obligation_statuses,
+            }
+
+        def _before_commit(_session):
+            if _session is not self.db or _session.in_nested_transaction():
+                return
+            commit_events.append("before")
+            before_commit_snapshots.append(_snapshot())
+
+        def _after_commit(_session):
+            if _session is not self.db or _session.in_nested_transaction():
+                return
+            commit_events.append("after")
+
+        event.listen(self.db, "before_commit", _before_commit)
+        event.listen(self.db, "after_commit", _after_commit)
+        try:
+            from app.assistant.capability_calls.faults import (
+                CapabilityFaultPort,
+                CapabilityInjectedFault,
+            )
+
+            # The fault is after the Run CAS commit.  The caller observes an
+            # exception, but fresh-session recovery must classify the durable
+            # Entry as committed and preserve the finished budget reservation.
+            aggregate.fault_port = CapabilityFaultPort.once("after_commit_before_ack")
+            with self.assertRaises(CapabilityInjectedFault):
+                aggregate.commit_progress(
+                    (
+                        *base_messages,
+                        tool_message,
+                    )
+                )
+            after_commit_snapshot = _snapshot()
+        finally:
+            event.remove(self.db, "before_commit", _before_commit)
+            event.remove(self.db, "after_commit", _after_commit)
+            reader.close()
+
+        self.assertEqual(commit_events, ["before", "after"])
+        self.assertEqual(len(before_commit_snapshots), 1)
+        self.assertEqual(before_commit_snapshots[0]["call_status"], "authorized")
+        self.assertEqual(before_commit_snapshots[0]["attempt_count"], 0)
+        self.assertEqual(before_commit_snapshots[0]["entry_count"], 0)
+        self.assertEqual(before_commit_snapshots[0]["result_artifact_count"], 0)
+        self.assertNotEqual(before_commit_snapshots[0]["checkpoint_call_status"], "succeeded")
+        self.assertNotIn("satisfied", before_commit_snapshots[0]["obligation_statuses"])
+
+        self.assertEqual(after_commit_snapshot["call_status"], "succeeded")
+        self.assertEqual(after_commit_snapshot["attempt_count"], 1)
+        self.assertEqual(after_commit_snapshot["attempt_statuses"], ("committed",))
+        self.assertEqual(after_commit_snapshot["entry_count"], 1)
+        self.assertEqual(after_commit_snapshot["result_artifact_count"], 1)
+        self.assertEqual(after_commit_snapshot["checkpoint_schema"], 3)
+        self.assertEqual(after_commit_snapshot["checkpoint_call_status"], "succeeded")
         call = (
             self.db.query(AssistantCapabilityCall)
             .filter_by(provider_tool_call_id="golden-aggregate-1")
@@ -1122,6 +1739,21 @@ class LocalTransactionalGoldenPathTests(unittest.TestCase):
         )
         self.assertEqual(call.status, "succeeded")
         self.assertIsNotNone(call.side_effect_started_at)
+        settlement = aggregate.last_local_settlement
+        self.assertIsNotNone(settlement)
+        self.assertEqual(settlement.call_id, call.id)
+        self.assertEqual(settlement.output_artifact_id, call.output_artifact_id)
+        self.assertEqual(settlement.resulting_run_revision, self.run.state_revision)
+        committed_attempt = (
+            self.db.query(AssistantCapabilityCallAttempt)
+            .filter_by(call_id=call.id, status="committed")
+            .one()
+        )
+        self.assertTrue(committed_attempt.side_effect_started)
+        self.assertEqual(
+            call.side_effect_started_at,
+            committed_attempt.side_effect_started_at,
+        )
         self.assertEqual(
             self.db.query(AssistantCapabilityCallAttempt)
             .filter_by(call_id=call.id, status="committed")
@@ -1144,10 +1776,7 @@ class LocalTransactionalGoldenPathTests(unittest.TestCase):
             [item.state for item in budget_ledger.snapshot().reservations],
             ["finished"],
         )
-        from app.assistant.durable.models import (
-            AssistantRunCheckpoint,
-            AssistantRunProviderMessage,
-        )
+        from app.assistant.durable.models import AssistantRunProviderMessage
 
         self.db.refresh(self.run)
         checkpoint = (
@@ -1159,6 +1788,24 @@ class LocalTransactionalGoldenPathTests(unittest.TestCase):
         self.assertEqual(checkpoint.state_payload["capabilityCalls"][0]["status"], "succeeded")
         self.assertEqual(self.db.query(AssistantRunProviderMessage).count(), 3)
         self.assertEqual(self.run.state_revision, 4)
+
+        from app.assistant.capability_calls.repository import CapabilityCallConflict
+
+        conflicting_request = SimpleNamespace(**vars(request))
+        conflicting_request.call = SimpleNamespace(
+            call_id=request.call.call_id,
+            domain_key=request.call.domain_key,
+            arguments={**request.call.arguments, "content": "different body"},
+        )
+        with self.assertRaises(CapabilityCallConflict) as conflict:
+            aggregate.prepare(conflicting_request)
+        self.assertEqual(conflict.exception.code, "idempotency_conflict")
+        self.assertEqual(
+            self.db.query(Entry)
+            .filter(Entry.source_capability_call_id == call.id)
+            .count(),
+            1,
+        )
 
 
 if __name__ == "__main__":

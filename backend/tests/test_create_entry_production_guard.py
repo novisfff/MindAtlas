@@ -348,6 +348,25 @@ def test_new_write_guard_fails_before_call(write_state, arrangement, reason):
     assert write_state.lock.calls == 1
 
 
+def test_reconciliation_terminalization_unblocks_the_next_new_proposal(write_state):
+    """The unresolved-write gate is global, and clears only after terminalization."""
+    write_state.unresolved["needs_reconciliation"] = 1
+    blocked = write_state.propose_new_create()
+    assert blocked.allowed is False
+    assert blocked.reason_code == "reconciliation_required"
+    assert write_state.capability_call_count() == 0
+
+    # This models the durable reconciliation service's post-commit observation:
+    # once the last unresolved Call is terminal, the same locked admission path
+    # can evaluate a fresh proposal without manufacturing a Call on the blocked
+    # attempt.
+    write_state.unresolved["needs_reconciliation"] = 0
+    allowed = write_state.propose_new_create()
+    assert allowed.allowed is True
+    assert allowed.reason_code is None
+    assert write_state.capability_call_count() == 0
+
+
 def test_allowed_snapshot_binds_all_frozen_write_contracts(write_state):
     from app.assistant.capability_calls.write_guard import (
         CREATE_ENTRY_CONTRACT_DIGEST,

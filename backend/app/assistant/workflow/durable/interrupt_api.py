@@ -1021,6 +1021,8 @@ def decide_call_owned(
     outcome: str,
     comment: str | None = None,
     actor: Any,
+    fault_port: Any | None = None,
+    commit: bool = True,
 ) -> dict[str, Any]:
     """Resolve a capability-call approval with authenticated operator authority."""
     from app.operator_auth.contracts import OperatorPrincipal
@@ -1062,7 +1064,8 @@ def decide_call_owned(
                     "resolution_request_id reused with different decision or actor",
                     run=locked_run,
                 )
-            db.commit()
+            if commit:
+                db.commit()
             db.refresh(existing)
             return serialize_interrupt_safe(existing, run=locked_run)
 
@@ -1117,6 +1120,8 @@ def decide_call_owned(
                 run=locked_run,
             )
 
+        if fault_port is not None:
+            fault_port.hit("before_approval_decision")
         child_rows, budget_id, checkpoint_id, deadline = _build_resume_children(
             db,
             run=locked_run,
@@ -1179,6 +1184,12 @@ def decide_call_owned(
                 status_code=409,
             ) from exc
 
+        if fault_port is not None:
+            # This is after the exact Interrupt + Call decision has been staged
+            # under the Run lock, but before the aggregate CAS commit.  Any
+            # injected exception is rolled back by the boundary below.
+            fault_port.hit("after_approval_decision")
+
         run_repo = DurableRunRepository(db)
         events = (
             EventSpec(
@@ -1215,6 +1226,7 @@ def decide_call_owned(
                 current_budget_revision_id=budget_id,
             ),
             set_deadline_at=deadline,
+            commit=commit,
         )
         db.refresh(interrupt)
         return serialize_interrupt_safe(interrupt, run=commit.run)
@@ -1644,6 +1656,37 @@ def expire_one_interrupt(
             db.commit()
             return True
 
+        # A Call can retain the reverse pointer even if the Interrupt's
+        # origin/payload was drifted into a legal workflow-owned shape.  Do
+        # not let expiry take the generic branch in that case: it would make
+        # the Interrupt terminal while leaving the CapabilityCall awaiting
+        # approval.  The mutation above is inside this transaction, so the
+        # binding error rolls it back and keeps the pair safely pending.
+        from app.assistant.capability_calls.models import AssistantCapabilityCall
+
+        reverse_linked_calls = list(
+            db.execute(
+                select(AssistantCapabilityCall)
+                .where(
+                    AssistantCapabilityCall.interrupt_id == result.interrupt.id,
+                )
+                .with_for_update()
+            ).scalars()
+        )
+        if str(result.interrupt.interrupt_origin) == "capability_call":
+            if (
+                len(reverse_linked_calls) != 1
+                or result.interrupt.capability_call_id is None
+                or reverse_linked_calls[0].id != result.interrupt.capability_call_id
+            ):
+                raise _call_owned_binding_error(
+                    "capability call reverse linkage is not exact"
+                )
+        elif reverse_linked_calls:
+            raise _call_owned_binding_error(
+                "capability call reverse linkage conflicts with Interrupt origin"
+            )
+
         if str(result.interrupt.interrupt_origin) == "capability_call":
             # Expiry is a call-owned decision as well: validate the frozen
             # binding before closing the call, then resume the waiting Run so
@@ -1986,6 +2029,8 @@ def service_decide_call_owned(
     outcome: str,
     comment: str | None = None,
     actor: Any,
+    fault_port: Any | None = None,
+    commit: bool = True,
 ) -> dict[str, Any]:
     try:
         return decide_call_owned(
@@ -2000,6 +2045,8 @@ def service_decide_call_owned(
             outcome=outcome,
             comment=comment,
             actor=actor,
+            fault_port=fault_port,
+            commit=commit,
         )
     except DurableInterruptApiError as exc:
         _raise_api(exc)

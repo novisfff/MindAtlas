@@ -32,6 +32,7 @@ CODE_STALE_CALL_REVISION = "stale_call_revision"
 CODE_STALE_RUN_REVISION = "stale_run_revision"
 CODE_LEASE_MISMATCH = "lease_mismatch"
 CODE_IDENTITY_MISMATCH = "call_identity_mismatch"
+CODE_IDEMPOTENCY_CONFLICT = "idempotency_conflict"
 CODE_CALL_NOT_FOUND = "call_not_found"
 CODE_INVALID_TRANSITION = "invalid_call_transition"
 CODE_RUN_CANCELLING = "run_cancelling_blocks_ordinary_dispatch"
@@ -537,6 +538,8 @@ class CapabilityCallRepository:
         to_status: str,
         request_digest: str | None = None,
         response_digest: str | None = None,
+        side_effect_started: bool | None = None,
+        side_effect_started_at: datetime | None = None,
         error_code: str | None = None,
         ended_at: datetime | None = None,
         now: datetime | None = None,
@@ -575,6 +578,29 @@ class CapabilityCallRepository:
                     CODE_IDENTITY_MISMATCH, f"{field} is immutable once set"
                 )
             setattr(attempt, field, value)
+        if side_effect_started is not None:
+            if bool(attempt.side_effect_started) and not side_effect_started:
+                raise CapabilityCallConflict(
+                    CODE_INVALID_TRANSITION,
+                    "side_effect_started is irreversible",
+                )
+            if side_effect_started:
+                attempt.side_effect_started = True
+                if side_effect_started_at is None and attempt.side_effect_started_at is None:
+                    raise CapabilityCallConflict(
+                        CODE_INVALID_TRANSITION,
+                        "side_effect_started_at is required when side effect starts",
+                    )
+        if side_effect_started_at is not None:
+            if (
+                attempt.side_effect_started_at is not None
+                and attempt.side_effect_started_at != side_effect_started_at
+            ):
+                raise CapabilityCallConflict(
+                    CODE_INVALID_TRANSITION,
+                    "side_effect_started_at is immutable once set",
+                )
+            attempt.side_effect_started_at = side_effect_started_at
         attempt.status = to_status
         if error_code is not None:
             attempt.error_code = error_code
@@ -609,6 +635,7 @@ class CapabilityCallRepository:
 
 __all__ = [
     "CODE_IDENTITY_MISMATCH",
+    "CODE_IDEMPOTENCY_CONFLICT",
     "CODE_INVALID_TRANSITION",
     "CODE_LEASE_MISMATCH",
     "CODE_CALL_NOT_FOUND",
