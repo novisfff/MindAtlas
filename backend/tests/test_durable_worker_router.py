@@ -76,6 +76,19 @@ def test_checkpoint_v2_durable_action_routes_even_when_new_admissions_are_off(
     assert session.closed is True
 
 
+def test_call_owned_schema_v3_dispatch_routes_to_provider_executor() -> None:
+    provider, durable, session = _execute_with_checkpoint(
+        SimpleNamespace(
+            schema_version=3,
+            next_action=SimpleNamespace(kind="dispatch_calls"),
+        )
+    )
+
+    assert len(provider.calls) == 1
+    assert durable.calls == []
+    assert session.closed is True
+
+
 def test_default_worker_installs_durable_unit_router(tmp_path) -> None:
     from app.assistant.durable.unit_router import DurableRunUnitRouter
     from app.assistant.worker import AssistantWorker, AssistantWorkerConfig

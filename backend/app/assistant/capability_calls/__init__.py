@@ -62,9 +62,7 @@ from app.assistant.capability_calls.uow import (  # noqa: F401
     CapabilityUnitOfWork,
 )
 from app.assistant.capability_calls.approval import (  # noqa: F401
-    authorize_call_after_approval,
     build_approval_binding,
-    close_non_approved_call,
     render_safe_approval_card,
 )
 from app.assistant.capability_calls.dispatcher import (  # noqa: F401
@@ -119,9 +117,7 @@ __all__ = [
     "decode_capability_result",
     "encode_capability_result",
     "select_dispatcher",
-    "authorize_call_after_approval",
     "build_approval_binding",
-    "close_non_approved_call",
     "render_safe_approval_card",
     "CapabilityUnitOfWork",
     "CapabilityReconciliationService",

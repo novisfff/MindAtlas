@@ -19,9 +19,16 @@ from sqlalchemy.orm import Session
 from app.assistant.durable.codec import (
     checkpoint_state_digest,
     decode_checkpoint,
+    decode_checkpoint_v3,
     encode_checkpoint_v2,
+    encode_checkpoint_v3,
 )
-from app.assistant.durable.contracts import DurableAgentCheckpointV2, DurableNextActionV2
+from app.assistant.durable.contracts import (
+    DurableAgentCheckpointV2,
+    DurableAgentCheckpointV3,
+    DurableCapabilityCallStateV1,
+    DurableNextActionV2,
+)
 from app.assistant.durable.models import (
     AssistantRunBudgetRevision,
     AssistantRunCheckpoint,
@@ -228,7 +235,7 @@ def _allowed_actions(
     if interrupt_origin == "capability_call":
         # Call-owned approval has a separate authenticated decision route;
         # resume tokens are deliberately not exposed as an alternate path.
-        return ["approve", "reject"] if kind == "approval" else []
+        return ["approve", "reject", "cancel"] if kind == "approval" else []
     if kind == "approval":
         return ["approve", "reject", "token", "resolve"]
     if kind == "input":
@@ -472,8 +479,27 @@ def _build_resume_children(
     run: AssistantChatRun,
     interrupt: AssistantRunInterrupt,
     expected_revision: int,
+    call_owned_call: Any | None = None,
+    call_owned_outcome: str | None = None,
+    _force_generic: bool = False,
 ) -> tuple[list[Any], UUID, UUID, datetime]:
     """Derive child budget + resume-ready Checkpoint rows (not yet committed)."""
+    if str(interrupt.interrupt_origin) == "capability_call" and not _force_generic:
+        if call_owned_call is None or call_owned_outcome is None:
+            raise DurableInterruptApiError(
+                "protocol_error",
+                "call-owned resume requires the locked CapabilityCall and outcome",
+                status_code=409,
+            )
+        return _build_call_owned_resume_children(
+            db,
+            run=run,
+            interrupt=interrupt,
+            expected_revision=expected_revision,
+            call=call_owned_call,
+            outcome=call_owned_outcome,
+        )
+
     from app.assistant.durable.checkpoints import (  # noqa: PLC0415
         _current_transcript_digest,
         _next_checkpoint_sequence,
@@ -584,6 +610,151 @@ def _build_resume_children(
         state_digest=state_digest,
     )
     deadline = child_ledger.deadline_at_utc
+    return [budget_row, ck_row], budget_id, checkpoint_id, deadline
+
+
+def _build_call_owned_resume_children(
+    db: Session,
+    *,
+    run: AssistantChatRun,
+    interrupt: AssistantRunInterrupt,
+    expected_revision: int,
+    call: Any,
+    outcome: str,
+) -> tuple[list[Any], UUID, UUID, datetime]:
+    """Build a v3 Provider-resume child for one exact call-owned decision.
+
+    Capability-call pauses are Provider-loop pauses, not Workflow-frame pauses.
+    The waiting v3 checkpoint is therefore kept as v3 with its frozen
+    ``ProviderLoopContinuation`` intact.  A v2 ``resume_child`` would be routed
+    to the Workflow executor and has no workflow state to reconstruct.
+    """
+    # Reuse the ordinary budget derivation, but discard its workflow-only v2
+    # checkpoint.  This keeps the budget lineage and database-time deadline
+    # identical across workflow and capability-call resolution paths.
+    generic_rows, budget_id, _discarded_checkpoint_id, deadline = _build_resume_children(
+        db,
+        run=run,
+        interrupt=interrupt,
+        expected_revision=expected_revision,
+        call_owned_call=None,
+        call_owned_outcome=None,
+        _force_generic=True,
+    )
+    budget_rows = [
+        row for row in generic_rows if isinstance(row, AssistantRunBudgetRevision)
+    ]
+    if len(budget_rows) != 1:
+        raise DurableInterruptApiError(
+            "protocol_error",
+            "call-owned resume budget lineage is invalid",
+            status_code=409,
+        )
+    budget_row = budget_rows[0]
+
+    waiting_row = db.get(AssistantRunCheckpoint, interrupt.checkpoint_id)
+    if waiting_row is None or not isinstance(waiting_row.state_payload, Mapping):
+        raise DurableInterruptApiError(
+            "protocol_error",
+            "call-owned waiting checkpoint is missing",
+            status_code=409,
+        )
+    try:
+        waiting = decode_checkpoint_v3(waiting_row.state_payload)
+    except Exception as exc:  # noqa: BLE001 - fail closed at the boundary
+        raise DurableInterruptApiError(
+            "protocol_error",
+            f"call-owned waiting checkpoint is not schema v3: {exc}",
+            status_code=409,
+        ) from exc
+    if not isinstance(waiting, DurableAgentCheckpointV3):
+        raise DurableInterruptApiError(
+            "protocol_error",
+            "call-owned waiting checkpoint is not a v3 checkpoint",
+            status_code=409,
+        )
+    if waiting.provider_loop_continuation is None:
+        raise DurableInterruptApiError(
+            "protocol_error",
+            "call-owned waiting checkpoint has no Provider continuation",
+            status_code=409,
+        )
+
+    target_status = {
+        "approved": "authorized",
+        "rejected": "rejected",
+        "expired": "expired",
+        "cancelled": "cancelled",
+    }.get(str(outcome))
+    if target_status is None:
+        raise DurableInterruptApiError(
+            CODE_INTERRUPT_OUTCOME_INVALID,
+            "unsupported call-owned approval outcome",
+            status_code=422,
+        )
+    states: list[DurableCapabilityCallStateV1] = []
+    replaced = False
+    for state in waiting.capability_calls:
+        if state.call_id != call.id:
+            states.append(state)
+            continue
+        if replaced:
+            raise DurableInterruptApiError(
+                "protocol_error",
+                "call-owned waiting checkpoint contains the Call more than once",
+                status_code=409,
+            )
+        states.append(
+            state.model_copy(
+                update={
+                    "status": target_status,
+                    "interrupt_id": interrupt.id,
+                }
+            )
+        )
+        replaced = True
+    if not replaced:
+        raise DurableInterruptApiError(
+            "protocol_error",
+            "call-owned waiting checkpoint does not contain the exact Call",
+            status_code=409,
+        )
+
+    # The Provider loop owns this continuation.  ``dispatch_calls`` makes the
+    # v3 checkpoint take the enforced Provider path, where the aggregate will
+    # replay the exact frozen sibling reservation and never use a Workflow
+    # material resolver.
+    resume_checkpoint = waiting.model_copy(
+        update={
+            "budget_revision_id": budget_id,
+            "next_action": DurableNextActionV2(kind="dispatch_calls"),
+            "capability_calls": tuple(states),
+        }
+    )
+    checkpoint_id = uuid4()
+    state_payload = encode_checkpoint_v3(resume_checkpoint)
+    state_digest = checkpoint_state_digest(resume_checkpoint)
+    from app.assistant.durable.checkpoints import _next_checkpoint_sequence  # noqa: PLC0415
+
+    ck_row = AssistantRunCheckpoint(
+        id=checkpoint_id,
+        run_id=run.id,
+        sequence=_next_checkpoint_sequence(db, run.id),
+        expected_state_revision=int(expected_revision),
+        committed_state_revision=int(expected_revision) + 1,
+        schema_version=3,
+        manifest_revision_id=resume_checkpoint.manifest_revision_id,
+        policy_revision_id=resume_checkpoint.policy_revision_id,
+        budget_revision_id=budget_id,
+        obligation_revision_id=resume_checkpoint.obligation_revision_id,
+        provider_message_ordinal=resume_checkpoint.provider_message_ordinal,
+        provider_transcript_digest=resume_checkpoint.provider_transcript_digest,
+        phase=resume_checkpoint.phase,
+        logical_unit_id=waiting_row.logical_unit_id,
+        reason=f"call_owned_interrupt_resolved:{interrupt.id}",
+        state_payload=state_payload,
+        state_digest=state_digest,
+    )
     return [budget_row, ck_row], budget_id, checkpoint_id, deadline
 
 
@@ -852,7 +1023,9 @@ def decide_call_owned(
     actor: Any,
 ) -> dict[str, Any]:
     """Resolve a capability-call approval with authenticated operator authority."""
-    if actor is None or getattr(actor, "role", None) != "operator":
+    from app.operator_auth.contracts import OperatorPrincipal
+
+    if not isinstance(actor, OperatorPrincipal) or actor.role != "operator":
         raise DurableInterruptApiError(
             "operator_role_required", "operator role is required", status_code=403
         )
@@ -949,6 +1122,8 @@ def decide_call_owned(
             run=locked_run,
             interrupt=interrupt,
             expected_revision=int(locked_run.state_revision),
+            call_owned_call=call,
+            call_owned_outcome=outcome,
         )
         for row in child_rows:
             db.add(row)
@@ -1479,15 +1654,31 @@ def expire_one_interrupt(
                 interrupt=result.interrupt,
                 allow_resolved=True,
             )
+            from app.assistant.capability_calls.repository import CapabilityCallRepository
+
+            # Expiry is terminal for the Call even if a stale/crashed Run is
+            # no longer in a waiting status.  Never leave a call-owned
+            # Interrupt expired while its Call remains awaiting approval.
+            expected_revision = int(run.state_revision)
+            CapabilityCallRepository(db).transition_call(
+                call_id=call.id,
+                expected_call_revision=int(call.state_revision),
+                expected_run_revision=expected_revision,
+                to_status="expired",
+                lease=None,
+                failure_code="approval_expired",
+                allow_while_cancelling=True,
+            )
             if str(run.status) not in WAITING_STATUSES:
                 db.commit()
                 return True
-            expected_revision = int(run.state_revision)
             child_rows, budget_id, checkpoint_id, deadline = _build_resume_children(
                 db,
                 run=run,
                 interrupt=result.interrupt,
                 expected_revision=expected_revision,
+                call_owned_call=call,
+                call_owned_outcome="expired",
             )
             for row in child_rows:
                 db.add(row)
@@ -1496,16 +1687,6 @@ def expire_one_interrupt(
             result.interrupt.resolution_budget_revision_id = budget_id
             result.interrupt.resolution_run_revision = expected_revision + 1
             db.flush()
-            from app.assistant.capability_calls.repository import CapabilityCallRepository
-
-            CapabilityCallRepository(db).transition_call(
-                call_id=call.id,
-                expected_call_revision=int(call.state_revision),
-                expected_run_revision=expected_revision,
-                to_status="expired",
-                lease=None,
-                failure_code="approval_expired",
-            )
             events = (
                 EventSpec(
                     event_key=(

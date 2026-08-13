@@ -246,8 +246,76 @@ class AssistantService:
         )
 
         repo = DurableRunRepository(self.db)
+        call_owned_interrupt_handled = False
+
+        def _cancel_call_owned_before_stop(locked_run: Any) -> None:
+            """Close a pending call-owned approval in the stop CAS transaction.
+
+            A generic Interrupt cancel is not sufficient: it can leave the
+            linked CapabilityCall awaiting approval.  Validate the frozen
+            binding under Run-first locking, then mutate Call + Interrupt while
+            ``DurableRunRepository`` still owns the same transaction.
+            """
+            # A normal call-owned pause is waiting_approval, but a crash or
+            # stale pointer can leave the Run queued/running while the pending
+            # Interrupt remains.  Close the linked Call for every nonterminal
+            # stop source; repeated cancelling stops also repair any prior
+            # partial cleanup while remaining idempotent when nothing is
+            # pending.
+            from app.assistant.workflow.durable.interrupt_api import (
+                _load_and_verify_call_owned_binding,
+            )
+            # Query only the call-owned origin here.  The generic cleanup
+            # below still handles workflow-node Interrupts, and this avoids a
+            # second repository lookup for the ordinary path while retaining
+            # a row lock for the coupled Call + Interrupt mutation.
+            from sqlalchemy import select
+
+            from app.assistant.durable.models import AssistantRunInterrupt
+
+            pending = self.db.execute(
+                select(AssistantRunInterrupt)
+                .where(
+                    AssistantRunInterrupt.run_id == locked_run.id,
+                    AssistantRunInterrupt.status == "pending",
+                    AssistantRunInterrupt.interrupt_origin == "capability_call",
+                )
+                .with_for_update()
+            ).scalar_one_or_none()
+            if pending is None:
+                return
+            from app.assistant.workflow.durable.interrupts import (
+                DurableInterruptRepository,
+            )
+
+            interrupt_repo = DurableInterruptRepository(self.db)
+            call, _binding = _load_and_verify_call_owned_binding(
+                self.db,
+                run=locked_run,
+                interrupt=pending,
+            )
+            from app.assistant.capability_calls.repository import CapabilityCallRepository
+
+            CapabilityCallRepository(self.db).transition_call(
+                call_id=call.id,
+                expected_call_revision=int(call.state_revision),
+                expected_run_revision=int(locked_run.state_revision),
+                to_status="cancelled",
+                lease=None,
+                failure_code="approval_cancelled",
+                allow_while_cancelling=True,
+            )
+            interrupt_repo.cancel_interrupt(
+                run_id=locked_run.id,
+                interrupt_id=pending.id,
+                comment="run stopped",
+            )
+            nonlocal call_owned_interrupt_handled
+            call_owned_interrupt_handled = True
 
         def _cancel_pending_durable_interrupt() -> None:
+            if call_owned_interrupt_handled:
+                return
             from app.assistant.workflow.durable.interrupts import (
                 DurableInterruptRepository,
             )
@@ -282,6 +350,7 @@ class AssistantService:
         # non-semantic and does not bump; result/recovery/stop do).
         last_conflict: DurableRunConflict | None = None
         for _ in range(5):
+            call_owned_interrupt_handled = False
             self.db.refresh(run)
             status = str(run.status or "")
             if status in TERMINAL_STATUSES:
@@ -314,6 +383,7 @@ class AssistantService:
                     run_id=run.id,
                     expected_revision=expected_revision,
                     events=events,
+                    before_commit=_cancel_call_owned_before_stop,
                 )
             except DurableRunConflict as exc:
                 last_conflict = exc

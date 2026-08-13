@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 from uuid import UUID
 
 from sqlalchemy import func, select, update
@@ -248,6 +248,11 @@ class _TransitionPlan:
     set_memory_committed_at: bool = False
     enter_ready_for_memory: bool = False
     reject_if_ready_for_memory: bool = False
+    # Optional same-transaction mutation hook used only by tightly coupled
+    # stop boundaries (for example, closing a call-owned approval before the
+    # Run is cancelled). The hook runs after Run-first CAS validation and
+    # before any Run fields/events are committed.
+    before_commit: Callable[[AssistantChatRun], None] | None = None
     # When True, status may stay running for semantic child/event writes.
     allow_same_status: bool = False
     bump_recovery_count: bool = False
@@ -493,6 +498,7 @@ class DurableRunRepository:
         run_id: UUID,
         expected_revision: int,
         events: Sequence[EventSpec] = (),
+        before_commit: Callable[[AssistantChatRun], None] | None = None,
     ) -> DurableCommitResult:
         """API stop: CAS by revision/status only (no lease required).
 
@@ -521,6 +527,7 @@ class DurableRunRepository:
                 rule_name="stop_request",
                 events=tuple(events),
                 set_cancel_requested=True,
+                before_commit=before_commit,
             )
         )
         # Kill point 12: after stop request commits before cancellation seal.
@@ -993,6 +1000,9 @@ class DurableRunRepository:
             self._resolve_stop_request(run, plan)
             self._validate_cas(run, plan, now=now)
 
+            if plan.before_commit is not None:
+                plan.before_commit(run)
+
             # Plan 08: cancellation may be sealed only after every call whose
             # side effect started has a proven terminal outcome.  The Run row
             # is already locked here, preserving the global Run-first lock
@@ -1008,9 +1018,12 @@ class DurableRunRepository:
 
             # Idempotent stop while already cancelling: no revision bump.
             if plan.rule_name == "stop_idempotent":
-                # Release the FOR UPDATE lock without mutating state.
-                self.db.rollback()
-                # Re-load outside the aborted transaction for a clean view.
+                # Keep the transaction when a stop hook repaired a coupled
+                # call-owned Interrupt.  With no hook this is still a
+                # mutation-free commit that releases the FOR UPDATE lock and
+                # preserves the no-revision-bump contract.
+                self.db.commit()
+                # Re-load outside the transaction for a clean view.
                 run = self.get_run(plan.run_id) or run
                 return DurableCommitResult(
                     run=run,

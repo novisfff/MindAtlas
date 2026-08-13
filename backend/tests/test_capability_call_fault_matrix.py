@@ -290,7 +290,7 @@ class FaultMatrixUnitTests(unittest.TestCase):
         finally:
             db.close()
 
-    def test_F16_duplicate_approval_idempotent_binding(self) -> None:
+    def test_F16_legacy_call_only_approval_fails_closed(self) -> None:
         from app.assistant.capability_calls.approval import (
             authorize_call_after_approval,
             build_approval_binding,
@@ -343,31 +343,20 @@ class FaultMatrixUnitTests(unittest.TestCase):
                 authorization_digest=call.authorization_digest,
                 principal_digest=DIGEST_A,
             )
-            a1 = authorize_call_after_approval(
-                repo=repo,
-                call_id=call.id,
-                expected_call_revision=int(call.state_revision),
-                expected_run_revision=1,
-                lease=lease,
-                approval_binding=binding,
-                expected_authorization_digest=DIGEST_A,
-            )
-            db.commit()
-            self.assertEqual(a1.status, "authorized")
-            self.assertEqual(a1.attempt_count, 0)
-            # Second authorize on already-authorized is illegal transition — one win.
             from app.assistant.capability_calls.repository import CapabilityCallConflict
 
             with self.assertRaises(CapabilityCallConflict):
                 authorize_call_after_approval(
                     repo=repo,
                     call_id=call.id,
-                    expected_call_revision=int(a1.state_revision),
+                    expected_call_revision=int(call.state_revision),
                     expected_run_revision=1,
                     lease=lease,
                     approval_binding=binding,
                     expected_authorization_digest=DIGEST_A,
                 )
+            db.refresh(call)
+            self.assertEqual(call.status, "awaiting_approval")
         finally:
             db.close()
 

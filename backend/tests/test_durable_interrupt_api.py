@@ -220,6 +220,15 @@ def _create_call_owned_pending_interrupt(db, *, run, expires_at: datetime | None
     from app.assistant.durable.models import AssistantRunArtifact
     from app.assistant.policy.contracts import compute_principal_digest
     from app.assistant.workflow.durable.interrupts import DurableInterruptRepository
+    from app.assistant.capabilities.contracts import ContinuationRef
+    from app.assistant.durable.codec import checkpoint_state_digest, encode_checkpoint_v3
+    from app.assistant.durable.contracts import (
+        DurableAgentCheckpointV3,
+        DurableCapabilityCallStateV1,
+        DurableNextActionV2,
+    )
+    from app.assistant.provider_loop.contracts import create_execution_scope
+    from tests.test_durable_checkpoint_codec import _waiting_continuation
 
     parent = _parent_ledger()
     manifest, policy, budget, obligation, ck, ledger = _seed_revisions(
@@ -349,6 +358,73 @@ def _create_call_owned_pending_interrupt(db, *, run, expires_at: datetime | None
         expires_at=expires_at,
     )
     call.interrupt_id = created.interrupt.id
+    # The production aggregate pauses on a v3 Provider checkpoint.  Keep this
+    # helper faithful so decision tests exercise the same resume boundary.
+    continuation = _waiting_continuation()
+    scope = create_execution_scope(
+        run_id=run.id,
+        conversation_id=run.conversation_id,
+        principal=continuation.execution_scope.principal,
+        tenant_scope_id=continuation.execution_scope.tenant_scope_id,
+    )
+    waiting_call = continuation.waiting_call.model_copy(
+        update={
+            "call_id": str(call.provider_tool_call_id),
+            "binding_contract_digest": binding_contract_digest,
+            "descriptor_digest": call.descriptor_digest,
+            "capability_continuation": ContinuationRef(
+                continuation_type="capability_call",
+                contract_version=1,
+                reference_id=str(created.interrupt.id),
+                payload_digest=binding.approval_binding_digest,
+            ),
+        }
+    )
+    continuation = continuation.model_copy(
+        update={
+            "execution_scope": scope,
+            "current_manifest_revision": int(manifest.revision),
+            "current_manifest_digest": str(manifest.manifest_digest),
+            "waiting_call": waiting_call,
+        }
+    )
+    checkpoint = DurableAgentCheckpointV3(
+        run_id=run.id,
+        phase="waiting",
+        manifest_revision_id=manifest.id,
+        policy_revision_id=policy.id,
+        budget_revision_id=budget.id,
+        obligation_revision_id=obligation.id,
+        provider_message_ordinal=2,
+        provider_transcript_digest=continuation.transcript_digest,
+        provider_loop_continuation=continuation,
+        inflight_unit=None,
+        capability_frames=(),
+        artifact_ids=(artifact.id,),
+        visible_text_artifact_id=None,
+        next_action=DurableNextActionV2(kind="wait"),
+        policy_contract_version=2,
+        capability_calls=(
+            DurableCapabilityCallStateV1(
+                call_id=call.id,
+                logical_call_key=call.logical_call_key,
+                provider_tool_call_id=str(call.provider_tool_call_id),
+                provider_order=0,
+                status="awaiting_approval",
+                attempt_id=None,
+                output_artifact_id=None,
+                interrupt_id=created.interrupt.id,
+                approval_binding_digest=call.approval_binding_digest,
+                result_message_digest=None,
+            ),
+        ),
+    )
+    ck.schema_version = 3
+    ck.phase = "waiting"
+    ck.provider_message_ordinal = checkpoint.provider_message_ordinal
+    ck.provider_transcript_digest = checkpoint.provider_transcript_digest
+    ck.state_payload = encode_checkpoint_v3(checkpoint)
+    ck.state_digest = checkpoint_state_digest(checkpoint)
     db.commit()
     db.refresh(run)
     db.refresh(call)
@@ -1394,6 +1470,23 @@ class DurableInterruptApiTests(unittest.TestCase):
             self.db.query(AssistantRunCheckpoint).filter_by(run_id=run.id).count(),
             before_checkpoints + 1,
         )
+        current_checkpoint = self.db.get(
+            AssistantRunCheckpoint,
+            run.current_checkpoint_id,
+        )
+        self.assertIsNotNone(current_checkpoint)
+        self.assertEqual(current_checkpoint.schema_version, 3)
+        self.assertEqual(
+            current_checkpoint.state_payload["nextAction"]["kind"],
+            "dispatch_calls",
+        )
+        self.assertIsNotNone(
+            current_checkpoint.state_payload.get("providerLoopContinuation")
+        )
+        self.assertEqual(
+            current_checkpoint.state_payload["capabilityCalls"][0]["status"],
+            "authorized",
+        )
         replay = decide_call_owned(
             self.db,
             conversation_id=conv.id,
@@ -1479,6 +1572,24 @@ class DurableInterruptApiTests(unittest.TestCase):
                     .filter_by(call_id=call.id)
                     .count(),
                     0,
+                )
+                from app.assistant.durable.models import AssistantRunArtifact
+                from app.entry.models import Entry
+
+                self.assertEqual(
+                    self.db.query(Entry)
+                    .filter(Entry.source_capability_call_id == call.id)
+                    .count(),
+                    0,
+                )
+                self.assertFalse(
+                    any(
+                        str(artifact.metadata_json.get("callId") or "")
+                        == str(call.id)
+                        for artifact in self.db.query(AssistantRunArtifact)
+                        .filter_by(run_id=run.id, kind="capability_call_result")
+                        .all()
+                    )
                 )
 
     def test_call_owned_binding_drift_fails_closed_before_mutation(self) -> None:
@@ -1628,6 +1739,120 @@ class DurableInterruptApiTests(unittest.TestCase):
         self.assertEqual(call.status, "awaiting_approval")
         self.assertEqual(interrupt.status, "pending")
 
+    def test_workflow_or_other_call_interrupt_cannot_authorize_target_call(self) -> None:
+        from app.assistant.workflow.durable.interrupt_api import (
+            DurableInterruptApiError,
+            decide_call_owned,
+        )
+        from tests.operator_session_helpers import make_service_principal
+
+        conv, _msg, run = _make_waiting_run(self.db)
+        interrupt, call = _create_call_owned_pending_interrupt(self.db, run=run)
+        # A workflow-origin Interrupt with the same Run can never authorize the
+        # call-owned target, even when the request carries that Call ID.
+        interrupt.interrupt_origin = "workflow_node"
+        interrupt.capability_call_id = None
+        interrupt.workflow_frame_id = uuid.uuid4()
+        interrupt.node_id = "approval-node"
+        interrupt.node_visit_id = f"visit-{uuid.uuid4()}"
+        self.db.commit()
+        with self.assertRaises(DurableInterruptApiError):
+            decide_call_owned(
+                self.db,
+                conversation_id=conv.id,
+                run_id=run.id,
+                interrupt_id=interrupt.id,
+                call_id=call.id,
+                resolution_request_id=uuid.uuid4(),
+                expected_request_revision=int(interrupt.request_revision),
+                expected_run_revision=int(interrupt.request_run_revision),
+                outcome="approved",
+                actor=make_service_principal("workflow-boundary"),
+            )
+        self.db.refresh(call)
+        self.assertEqual(call.status, "awaiting_approval")
+
+        # A second Call's exact Interrupt cannot authorize the first Call.
+        conv2, _msg2, run2 = _make_waiting_run(self.db)
+        other_interrupt, other_call = _create_call_owned_pending_interrupt(
+            self.db, run=run2
+        )
+        with self.assertRaises(DurableInterruptApiError):
+            decide_call_owned(
+                self.db,
+                conversation_id=conv2.id,
+                run_id=run2.id,
+                interrupt_id=other_interrupt.id,
+                call_id=call.id,
+                resolution_request_id=uuid.uuid4(),
+                expected_request_revision=int(other_interrupt.request_revision),
+                expected_run_revision=int(other_interrupt.request_run_revision),
+                outcome="approved",
+                actor=make_service_principal("other-call-boundary"),
+            )
+        self.db.refresh(other_call)
+        self.assertEqual(other_call.status, "awaiting_approval")
+
+    def test_stop_closes_call_owned_interrupt_and_call_in_one_transaction(self) -> None:
+        from app.assistant.service import AssistantService
+
+        conv, _msg, run = _make_waiting_run(self.db)
+        interrupt, call = _create_call_owned_pending_interrupt(self.db, run=run)
+        payload = AssistantService(self.db).stop_run(
+            conversation_id=conv.id,
+            run_id=run.id,
+        )
+        self.assertEqual(payload["status"], "cancelled")
+        self.db.refresh(run)
+        self.db.refresh(call)
+        self.db.refresh(interrupt)
+        self.assertEqual(run.status, "cancelled")
+        self.assertEqual(call.status, "cancelled")
+        self.assertEqual(interrupt.status, "cancelled")
+        self.assertEqual(call.attempt_count, 0)
+        self.assertIsNone(call.side_effect_started_at)
+
+    def test_repeated_stop_repairs_call_owned_cleanup_while_cancelling(self) -> None:
+        from app.assistant.service import AssistantService
+
+        conv, _msg, run = _make_waiting_run(self.db)
+        interrupt, call = _create_call_owned_pending_interrupt(self.db, run=run)
+        run.status = "cancelling"
+        run.cancel_requested_at = datetime.now(timezone.utc)
+        self.db.commit()
+
+        payload = AssistantService(self.db).stop_run(
+            conversation_id=conv.id,
+            run_id=run.id,
+        )
+        self.assertEqual(payload["status"], "cancelling")
+        self.db.refresh(call)
+        self.db.refresh(interrupt)
+        self.assertEqual(call.status, "cancelled")
+        self.assertEqual(interrupt.status, "cancelled")
+
+    def test_expiry_closes_call_owned_call_even_if_run_is_not_waiting(self) -> None:
+        from app.assistant.workflow.durable.interrupt_api import expire_one_interrupt
+
+        conv, _msg, run = _make_waiting_run(self.db)
+        interrupt, call = _create_call_owned_pending_interrupt(self.db, run=run)
+        interrupt.expires_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+        run.status = "cancelling"
+        run.cancel_requested_at = datetime.now(timezone.utc)
+        self.db.commit()
+
+        self.assertTrue(
+            expire_one_interrupt(
+                self.db,
+                run_id=run.id,
+                interrupt_id=interrupt.id,
+            )
+        )
+        self.db.refresh(call)
+        self.db.refresh(interrupt)
+        self.assertEqual(call.status, "expired")
+        self.assertEqual(interrupt.status, "expired")
+
 
 class CallOwnedDecisionHttpTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -1709,6 +1934,62 @@ class CallOwnedDecisionHttpTests(unittest.TestCase):
         extra_binding["approvalBindingDigest"] = "f" * 64
         rejected_shape = client.post(path, json=extra_binding, headers=headers)
         self.assertEqual(rejected_shape.status_code, 422, rejected_shape.text)
+
+    def test_http_negative_session_csrf_role_and_stale_paths_do_not_mutate(self) -> None:
+        from app.assistant.router import router as assistant_router
+        from app.operator_auth.constants import SESSION_COOKIE_NAME
+        from app.operator_auth.models import OperatorAccount
+        from tests.operator_session_helpers import (
+            build_authenticated_skill_client,
+            operator_test_settings,
+        )
+
+        settings = operator_test_settings(ASSISTANT_INTERRUPT_TOKEN_PEPPER=PEPPER)
+        client, headers, _ = build_authenticated_skill_client(
+            db=self.db,
+            include_routers=[assistant_router],
+            settings=settings,
+        )
+        conv, _msg, run = _make_waiting_run(self.db)
+        interrupt, call = _create_call_owned_pending_interrupt(self.db, run=run)
+        path = (
+            f"/api/assistant/conversations/{conv.id}/runs/{run.id}/capability-calls/"
+            f"{call.id}/interrupts/{interrupt.id}/decision"
+        )
+        body = {
+            "resolutionRequestId": str(uuid.uuid4()),
+            "expectedRequestRevision": int(interrupt.request_revision),
+            "expectedRunRevision": int(interrupt.request_run_revision),
+            "outcome": "approved",
+        }
+
+        wrong_csrf = dict(headers)
+        wrong_csrf["X-MindAtlas-CSRF"] = "wrong-csrf"
+        self.assertEqual(client.post(path, json=body, headers=wrong_csrf).status_code, 403)
+
+        stale = dict(body)
+        stale["expectedRunRevision"] = int(run.state_revision) + 1
+        stale_response = client.post(path, json=stale, headers=headers)
+        self.assertEqual(stale_response.status_code, 409, stale_response.text)
+
+        account = self.db.query(OperatorAccount).one()
+        account.role = "viewer"
+        self.db.commit()
+        viewer_response = client.post(path, json=body, headers=headers)
+        self.assertEqual(viewer_response.status_code, 403, viewer_response.text)
+        account.role = "operator"
+        self.db.commit()
+
+        client.cookies.set(SESSION_COOKIE_NAME, "invalid-session")
+        invalid_session = client.post(path, json=body, headers=headers)
+        self.assertEqual(invalid_session.status_code, 401, invalid_session.text)
+
+        self.db.refresh(call)
+        self.db.refresh(interrupt)
+        self.db.refresh(run)
+        self.assertEqual(call.status, "awaiting_approval")
+        self.assertEqual(interrupt.status, "pending")
+        self.assertEqual(run.status, "waiting_approval")
 
 if __name__ == "__main__":
     unittest.main()
