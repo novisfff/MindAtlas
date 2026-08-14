@@ -97,6 +97,12 @@ def record_unsupported_write_attempt(
     normalized_entrypoint = _normalize_safe_entrypoint(safe_entrypoint)
     with _attempt_lock:
         _unsupported_write_attempts[(normalized_branch, normalized_entrypoint)] += 1
+    from app.assistant.capability_calls.observability import record_capability_metric
+
+    record_capability_metric(
+        "mindatlas_agent_unsupported_write_total",
+        {"branch": normalized_branch, "entrypoint": normalized_entrypoint},
+    )
     logger.info(
         "agent_unsupported_write branch=%s entrypoint=%s",
         normalized_branch,

@@ -50,6 +50,7 @@ class ReconciliationCallSummary(CamelModel):
     run_id: UUID
     status: str
     state_revision: int
+    run_revision: int
     failure_code: str | None = None
     execution_mode: str
     side_effect_started_at: str | None = None

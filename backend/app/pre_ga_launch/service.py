@@ -407,6 +407,12 @@ class PreGaLaunchService:
                 "candidatePassed": bool(candidate.passed),
             },
         )
+        from app.pre_ga_launch.observability import record_pre_ga_metric
+
+        record_pre_ga_metric(
+            "mindatlas_pre_ga_launch_candidate_total",
+            {"result_code": "passed" if bool(candidate.passed) else "failed"},
+        )
         self.db.commit()
         return PreGaLaunchCandidateResult(candidate)
 
@@ -418,6 +424,12 @@ class PreGaLaunchService:
             if replay.consumption_request_digest != digest:
                 raise PreGaLaunchError("launch_request_reuse_conflict", status_code=409)
             control = self.repo.lock_control()
+            from app.pre_ga_launch.observability import record_pre_ga_metric
+
+            record_pre_ga_metric(
+                "mindatlas_pre_ga_launch_consume_total",
+                {"result_code": "replayed"},
+            )
             return LaunchConsumptionResult(control, replay, replayed=True)
         candidate = self.db.get(PreGaLaunchCandidate, candidate_id)
         if candidate is None:
@@ -474,6 +486,12 @@ class PreGaLaunchService:
                 "controlRevision": int(control.revision),
             },
         )
+        from app.pre_ga_launch.observability import record_pre_ga_metric
+
+        record_pre_ga_metric(
+            "mindatlas_pre_ga_launch_consume_total",
+            {"result_code": "succeeded"},
+        )
         self.db.commit()
         return LaunchConsumptionResult(control, use)
 
@@ -481,9 +499,19 @@ class PreGaLaunchService:
         self.repo.lock_launch()
         control = self.repo.lock_control()
         if control.revision == 0 or control.active_candidate_id is None or control.active_subject_digest is None:
+            from app.pre_ga_launch.observability import record_pre_ga_metric
+
+            record_pre_ga_metric(
+                "mindatlas_pre_ga_launch_state",
+                {"state": "unapproved"},
+            )
             return PreGaLaunchAuthorization(False, "launch_control_missing", control.revision, None)
         candidate = self.db.get(PreGaLaunchCandidate, control.active_candidate_id)
         if candidate is None or candidate.subject_digest != control.active_subject_digest:
+            from app.pre_ga_launch.observability import record_pre_ga_metric
+
+            record_pre_ga_metric("mindatlas_pre_ga_launch_state", {"state": "stale"})
+            record_pre_ga_metric("mindatlas_pre_ga_launch_drift_total", {"dimension": "target"})
             return PreGaLaunchAuthorization(False, "launch_subject_stale", control.revision, control.active_subject_digest)
         use = self.db.get(PreGaLaunchGateUse, control.active_gate_use_id)
         if (
@@ -492,15 +520,31 @@ class PreGaLaunchService:
             or use.subject_digest != candidate.subject_digest
             or use.resulting_control_revision != control.revision
         ):
+            from app.pre_ga_launch.observability import record_pre_ga_metric
+
+            record_pre_ga_metric("mindatlas_pre_ga_launch_state", {"state": "stale"})
             return PreGaLaunchAuthorization(False, "launch_subject_stale", control.revision, control.active_subject_digest)
         try:
             current = self._subject_for_candidate(candidate)
         except PreGaLaunchError as exc:
             if exc.safe_code == "launch_evidence_invalid":
+                from app.pre_ga_launch.observability import record_pre_ga_metric
+
+                record_pre_ga_metric("mindatlas_pre_ga_launch_state", {"state": "evidence_unavailable"})
                 return PreGaLaunchAuthorization(False, "launch_evidence_unavailable", control.revision, control.active_subject_digest)
+            from app.pre_ga_launch.observability import record_pre_ga_metric
+
+            record_pre_ga_metric("mindatlas_pre_ga_launch_state", {"state": "stale"})
             return PreGaLaunchAuthorization(False, "launch_subject_unavailable", control.revision, control.active_subject_digest)
         if current.subject_digest != candidate.subject_digest:
+            from app.pre_ga_launch.observability import record_pre_ga_metric
+
+            record_pre_ga_metric("mindatlas_pre_ga_launch_state", {"state": "stale"})
+            record_pre_ga_metric("mindatlas_pre_ga_launch_drift_total", {"dimension": "target"})
             return PreGaLaunchAuthorization(False, "launch_subject_stale", control.revision, control.active_subject_digest)
+        from app.pre_ga_launch.observability import record_pre_ga_metric
+
+        record_pre_ga_metric("mindatlas_pre_ga_launch_state", {"state": "current"})
         return PreGaLaunchAuthorization(True, None, control.revision, control.active_subject_digest)
 
 

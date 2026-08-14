@@ -60,3 +60,33 @@ def test_scripted_provider_rejects_ordinal_reuse_tool_drift_and_paid_endpoint() 
         )
     with pytest.raises(ScriptedProviderError, match="endpoint"):
         provider.complete(request, scenario_id="smoke", request_ordinal=2, endpoint="https://api.openai.com/v1")
+
+
+def test_scripted_provider_can_inject_unsupported_tool_for_boundary_assertion() -> None:
+    from app.release.scripted_provider import (
+        ScriptedProvider,
+        ScriptedProviderScript,
+        ScriptedProviderStep,
+    )
+
+    provider = ScriptedProvider(
+        ScriptedProviderScript(
+            scenario_id="unsupported",
+            steps=(
+                ScriptedProviderStep(
+                    scenario_id="unsupported",
+                    request_ordinal=1,
+                    expected_tool_names=("update_entry",),
+                    response_kind="tool_call",
+                    tool_name="update_entry",
+                    fault_code=None,
+                ),
+            ),
+        )
+    )
+    response = provider.complete(
+        {"messages": [], "tools": [{"type": "function", "function": {"name": "update_entry"}}]},
+        scenario_id="unsupported",
+        request_ordinal=1,
+    )
+    assert response["choices"][0]["message"]["tool_calls"][0]["function"]["name"] == "update_entry"

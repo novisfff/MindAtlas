@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import re
 from typing import Any, ClassVar, Literal
-from uuid import UUID
+from uuid import UUID, uuid5
 
 from pydantic import Field, ValidationInfo, field_validator, model_validator
 
@@ -33,6 +33,11 @@ SCHEMA_CONTRACT_MATERIAL_DOMAIN = "mindatlas:schema-contract-material:v1"
 RUNNER_IDENTITY_DOMAIN = "mindatlas:release-runner-identity:v1"
 REHEARSAL_AUTH_DOMAIN = "mindatlas:rehearsal-authorization:v1"
 REHEARSAL_AUTH_CLAIMS_DOMAIN = "mindatlas:rehearsal-authorization-claims:v1"
+DEPLOYED_ARTIFACT_IDENTITY_DOMAIN = "mindatlas:deployed-artifact-identity:v1"
+APPLICATION_IMAGE_SET_DOMAIN = "mindatlas:application-image-set:v1"
+DEPLOYED_ARTIFACT_SET_DOMAIN = "mindatlas:deployed-artifact-set:v1"
+REHEARSAL_ATTEMPT_RECEIPT_DOMAIN = "mindatlas:rehearsal-attempt-receipt:v1"
+REHEARSAL_ATTEMPT_NAMESPACE = UUID("9c53dc2c-fb2a-4a1a-9e10-000000000011")
 
 
 def _require_digest(value: str, *, field_name: str) -> str:
@@ -374,6 +379,132 @@ class SignedReleaseAttestationV1(ReleaseContract):
     signature_base64url: str = Field(min_length=1)
 
 
+class SafeReleaseEvidenceSummaryV1(ReleaseContract):
+    """Repository-safe projection generated from verified evidence bytes."""
+
+    schema_version: Literal[1] = 1
+    evidence_kind: Literal["automated_qualification", "production_rehearsal"]
+    release_source_revision: str
+    qualification_target_digest: str
+    manifest_digest: str
+    attestation_digest: str
+    artifact_aggregate_digest: str
+    key_id: str
+    assertion_passed: int = Field(gt=0)
+    assertion_failed: Literal[0] = 0
+    started_at: datetime
+    ended_at: datetime
+    offline_verification: Literal["passed"] = "passed"
+    target_container_verification: Literal["passed"] = "passed"
+    soak_claimed: Literal[False] = False
+
+    @field_validator("release_source_revision")
+    @classmethod
+    def validate_source_revision(cls, value: str) -> str:
+        if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{40}", value) is None:
+            raise ValueError("release_source_revision must be a lowercase git SHA")
+        return value
+
+
+class DeployedArtifactIdentityV1(ReleaseContract):
+    schema_version: Literal[1] = 1
+    build_revision: str = Field(min_length=1, max_length=128)
+    platform: Literal["linux/amd64"]
+    api_image_digest: str
+    assistant_worker_image_digest: str
+    web_image_digest: str
+    dependency_lock_set_digest: str
+    image_set_digest: str
+    deployed_artifact_set_digest: str
+
+    @classmethod
+    def build(cls, **values: Any) -> "DeployedArtifactIdentityV1":
+        values = dict(values)
+        values["image_set_digest"] = sha256_canonical_json(
+            {
+                "domain": APPLICATION_IMAGE_SET_DOMAIN,
+                "api": values["api_image_digest"],
+                "assistantWorker": values["assistant_worker_image_digest"],
+                "web": values["web_image_digest"],
+            }
+        )
+        values["deployed_artifact_set_digest"] = sha256_canonical_json(
+            {
+                "domain": DEPLOYED_ARTIFACT_SET_DOMAIN,
+                **{
+                    key: values[key]
+                    for key in (
+                        "build_revision",
+                        "platform",
+                        "api_image_digest",
+                        "assistant_worker_image_digest",
+                        "web_image_digest",
+                        "dependency_lock_set_digest",
+                        "image_set_digest",
+                    )
+                },
+            }
+        )
+        return cls.model_validate(values)
+
+
+class SignedDeployedArtifactIdentityV1(ReleaseContract):
+    schema_version: Literal[1] = 1
+    domain: Literal["mindatlas:deployed-artifact-identity:v1"]
+    key_id: str
+    identity: DeployedArtifactIdentityV1
+    signature_base64url: str = Field(min_length=1)
+
+
+class RehearsalAttemptStartedReceiptV1(ReleaseContract):
+    schema_version: Literal[1] = 1
+    attempt_id: UUID
+    subject: "RehearsalAttemptSubjectV1"
+    selected_automation_manifest_digest: str
+    selected_automation_attestation_digest: str
+    started_at: datetime
+    receipt_digest: str
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        subject: "RehearsalAttemptSubjectV1",
+        selected_automation_manifest_digest: str,
+        selected_automation_attestation_digest: str,
+        started_at: datetime,
+    ) -> "RehearsalAttemptStartedReceiptV1":
+        attempt_id = uuid5(REHEARSAL_ATTEMPT_NAMESPACE, subject.subject_digest)
+        values: dict[str, Any] = {
+            "attempt_id": attempt_id,
+            "subject": subject,
+            "selected_automation_manifest_digest": selected_automation_manifest_digest,
+            "selected_automation_attestation_digest": selected_automation_attestation_digest,
+            "started_at": started_at,
+            "receipt_digest": "0" * 64,
+        }
+        draft = cls.model_construct(**values)
+        values["receipt_digest"] = _domain_digest(
+            REHEARSAL_ATTEMPT_RECEIPT_DOMAIN,
+            draft,
+            exclude="receipt_digest",
+        )
+        return cls.model_validate(values)
+
+    @model_validator(mode="after")
+    def validate_receipt(self) -> "RehearsalAttemptStartedReceiptV1":
+        if self.attempt_id != uuid5(REHEARSAL_ATTEMPT_NAMESPACE, self.subject.subject_digest):
+            raise ValueError("attempt_id does not match subject")
+        expected = _domain_digest(
+            REHEARSAL_ATTEMPT_RECEIPT_DOMAIN,
+            self,
+            exclude="receipt_digest",
+        )
+        if self.receipt_digest != expected:
+            raise ValueError("receipt_digest does not match receipt")
+        return self
+
+
 def artifact_aggregate_digest(refs: Any) -> str:
     payload = []
     for ref in sorted(
@@ -490,6 +621,9 @@ class RehearsalAttemptSubjectV1(ReleaseContract):
         return self
 
 
+RehearsalAttemptStartedReceiptV1.model_rebuild()
+
+
 class RehearsalProfileAuthorizationV1(ReleaseContract):
     schema_version: Literal[1] = 1
     authorization_id: UUID
@@ -597,20 +731,29 @@ def runner_identity_digest(
 
 __all__ = [
     "ARTIFACT_AGGREGATE_DOMAIN",
+    "APPLICATION_IMAGE_SET_DOMAIN",
     "ContentAddressedEvidenceRef",
+    "DEPLOYED_ARTIFACT_IDENTITY_DOMAIN",
+    "DEPLOYED_ARTIFACT_SET_DOMAIN",
     "INFRASTRUCTURE_DOMAIN",
     "MANIFEST_DIGEST_DOMAIN",
     "QualificationInfrastructureIdentityV1",
     "ReleaseArtifactRefV1",
     "ReleaseAssertionResultV1",
+    "DeployedArtifactIdentityV1",
     "ReleaseEvidenceManifestV1",
+    "SafeReleaseEvidenceSummaryV1",
     "ReleaseQualificationTargetV1",
+    "RehearsalAttemptStartedReceiptV1",
     "RehearsalAttemptSubjectV1",
     "RehearsalProfileAuthorizationV1",
     "SignedReleaseAttestationV1",
+    "SignedDeployedArtifactIdentityV1",
     "SignedRehearsalProfileAuthorizationV1",
     "artifact_aggregate_digest",
     "canonical_release_manifest_bytes",
     "runner_identity_digest",
+    "REHEARSAL_ATTEMPT_RECEIPT_DOMAIN",
+    "REHEARSAL_ATTEMPT_NAMESPACE",
     "schema_contract_material_digest",
 ]

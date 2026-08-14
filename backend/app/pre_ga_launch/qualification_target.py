@@ -22,6 +22,7 @@ from app.release.contracts import (
     ReleaseQualificationTargetV1,
     runner_identity_digest,
     schema_contract_material_digest,
+    SignedDeployedArtifactIdentityV1,
 )
 from app.release.scenarios import (
     REQUIRED_ASSERTION_SET_DIGEST,
@@ -43,7 +44,12 @@ class DeployedArtifactIdentity:
     deployed_artifact_set_digest: str
 
     @classmethod
-    def from_file(cls, path: Path) -> "DeployedArtifactIdentity":
+    def from_file(
+        cls,
+        path: Path,
+        *,
+        trust_set: Any | None = None,
+    ) -> "DeployedArtifactIdentity":
         """Load an immutable deployment manifest at a server-owned path."""
         if not path.is_absolute() or path.is_symlink():
             raise ValueError("deployment_identity_path_must_be_absolute_regular_file")
@@ -53,7 +59,22 @@ class DeployedArtifactIdentity:
             raw = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, ValueError, TypeError):
             raise ValueError("deployment_identity_invalid") from None
-        if not isinstance(raw, dict) or set(raw) != {
+        if not isinstance(raw, dict):
+            raise ValueError("deployment_identity_invalid")
+        if "identity" in raw:
+            if trust_set is None:
+                raise ValueError("deployment_identity_trust_required")
+            try:
+                from app.release.trust import verify_deployed_artifact_identity
+
+                identity = verify_deployed_artifact_identity(
+                    SignedDeployedArtifactIdentityV1.model_validate(raw),
+                    trust_set,
+                )
+                raw = identity.model_dump(mode="json", by_alias=True)
+            except Exception:
+                raise ValueError("deployment_identity_signature_invalid") from None
+        elif set(raw) != {
             "schemaVersion",
             "buildRevision",
             "imageSetDigest",
@@ -102,8 +123,14 @@ class ServerOwnedQualificationTargetProvider:
         if not raw_path:
             raise QualificationTargetUnavailable("deployed_artifact_identity_missing")
         try:
-            identity = DeployedArtifactIdentity.from_file(Path(raw_path))
-        except ValueError:
+            trust_path = Path(
+                str(getattr(self.settings, "release_trust_set_path", "") or "")
+            )
+            trust = load_trust_set(trust_path)
+            identity = DeployedArtifactIdentity.from_file(
+                Path(raw_path), trust_set=trust
+            )
+        except (OSError, ValueError, ReleaseEvidenceTrustError):
             raise QualificationTargetUnavailable("deployed_artifact_identity_invalid") from None
         build = str(getattr(self.settings, "app_build_revision", "") or "").strip()
         if not build or identity.build_revision != build:

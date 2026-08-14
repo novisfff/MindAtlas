@@ -2,7 +2,7 @@ import { apiClient } from '@/lib/api/client'
 
 export interface OperatorSession {
   authenticated: boolean
-  role?: 'operator'
+  role?: 'operator' | 'viewer'
   idleExpiresAt?: string
   absoluteExpiresAt?: string
 }

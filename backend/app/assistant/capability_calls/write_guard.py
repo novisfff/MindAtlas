@@ -430,6 +430,15 @@ class ProductionWriteGuard:
         *,
         counts: Mapping[str, int] | None = None,
     ) -> ProductionWriteGuardSnapshot:
+        from app.assistant.capability_calls.observability import record_capability_metric
+
+        # Phase is supplied by the call site in the full runner; this static
+        # boundary defaults to proposal and never accepts request metadata.
+        safe_reason = str(reason_code)
+        record_capability_metric(
+            "mindatlas_create_entry_write_guard_rejection_total",
+            {"reason_code": safe_reason, "phase": "proposal"},
+        )
         return ProductionWriteGuardSnapshot(
             allowed=False,
             reason_code=str(reason_code),

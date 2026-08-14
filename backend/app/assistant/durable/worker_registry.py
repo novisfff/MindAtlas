@@ -131,8 +131,9 @@ class WorkerIdentity:
         s = settings or get_settings()
         build = str(getattr(s, "app_build_revision", None) or "development").strip()
         host = socket.gethostname() or None
+        configured_label = instance_label or os.environ.get("ASSISTANT_WORKER_INSTANCE_LABEL")
         return cls(
-            worker_id=worker_id or generate_worker_id(instance_label=instance_label),
+            worker_id=worker_id or generate_worker_id(instance_label=configured_label),
             app_build_revision=build,
             runtime_contract_version=RUNTIME_CONTRACT_VERSION,
             supported_checkpoint_codec_versions=tuple(

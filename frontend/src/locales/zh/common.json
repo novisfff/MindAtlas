@@ -5,7 +5,9 @@
     "entries": "记录",
     "graph": "图谱",
     "calendar": "日历",
-    "settings": "设置"
+    "settings": "设置",
+    "preGaLaunch": "Pre-GA 发布控制",
+    "reconciliation": "能力对账"
   },
   "common": {
     "save": "保存",
@@ -1041,7 +1043,11 @@
       "assistantSkillsLegacy": "技能库（旧版）",
       "assistantSkillsLegacyDesc": "迁移期间保留的旧版技能设置",
       "mainAgentProfile": "主代理配置",
-      "mainAgentProfileDesc": "提示层、目录范围、控制能力与评估门禁"
+      "mainAgentProfileDesc": "提示层、目录范围、控制能力与评估门禁",
+      "preGaLaunch": "Pre-GA 发布控制",
+      "preGaLaunchDesc": "查看资格证据，并消费一个已批准的发布候选项。",
+      "reconciliation": "能力对账",
+      "reconciliationDesc": "查看不确定的能力调用，并记录操作员决策。"
     },
     "graph": {
       "title": "知识图谱",
@@ -2545,7 +2551,113 @@
       "runtime_closure_drift": "运行时闭包与已准备的 revision 不一致。请停止并检查部署完整性，不可绕过。",
       "worker_unavailable": "当前没有与本构建、契约和编解码兼容的 Worker 在线。",
       "schema_incompatible": "Schema 与当前 Main Agent 运行时不兼容。请停止并检查部署完整性，不可绕过。",
+      "pre_ga_launch_unapproved": "Pre-GA 发布批准不是当前状态。请在启动新运行前检查受保护的资格候选项。",
       "new_runs_disabled": "新对话运行已被 Operator 开关禁用。"
+    }
+  },
+  "preGaLaunch": {
+    "title": "Pre-GA 发布控制",
+    "description": "查看资格证据并消费一个已批准的候选项。此界面不会绕过服务端发布门禁。",
+    "loading": "正在加载发布控制…",
+    "operatorOnly": "需要操作员授权",
+    "defaultConsumeReason": "操作员消费已批准的 Pre-GA 发布候选项。",
+    "errors": {
+      "sessionExpired": "操作员会话已过期，请重新登录。",
+      "forbidden": "此操作需要操作员授权。",
+      "conflict": "控制状态已变化，请刷新并检查最新候选项。",
+      "invalid": "请求不完整，或摘要、UUID、原因无效。",
+      "unavailable": "发布控制服务暂不可用，未修改任何状态。",
+      "generic": "请求未完成，界面不会展示原始服务端响应。"
+    },
+    "status": {
+      "title": "发布状态",
+      "description": "当前主题和控制修订号以服务端为准。",
+      "unapprovedHelp": "只有消费受保护的服务端候选项后，发布才会获批。",
+      "currentHelp": "当前发布主题已生效。任何变更前都应检查漂移和审计证据。"
+    },
+    "states": {
+      "current": "当前主题",
+      "unapproved": "未批准"
+    },
+    "fields": {
+      "state": "状态",
+      "controlRevision": "控制修订号",
+      "subject": "当前主题",
+      "reason": "原因",
+      "candidate": "候选项",
+      "target": "资格目标",
+      "evidence": "自动化证据",
+      "unknownCalls": "未知调用",
+      "reconciliation": "对账队列",
+      "activeRuns": "活跃运行",
+      "failureCodes": "失败代码"
+    },
+    "create": {
+      "title": "创建资格候选项",
+      "description": "只提交证据摘要引用；证据内容保留在受保护的证据存储中。",
+      "automatedManifest": "自动化清单摘要",
+      "automatedAttestation": "自动化证明摘要",
+      "rehearsalManifest": "演练清单摘要",
+      "rehearsalAttestation": "演练证明摘要",
+      "reason": "操作员原因",
+      "submit": "创建候选项"
+    },
+    "consume": {
+      "submit": "消费候选项"
+    },
+    "history": {
+      "title": "候选项历史",
+      "description": "这里只展示摘要前缀、有限状态和固定失败代码。",
+      "empty": "暂无资格候选项。"
+    },
+    "candidateStates": {
+      "passing_unused": "通过 · 未使用",
+      "failed": "失败",
+      "expired_unused": "已过期 · 未使用",
+      "consumed_current": "已消费 · 当前",
+      "consumed_stale": "已消费 · 过期"
+    },
+    "unsupportedCapability": {
+      "title": "能力不受支持",
+      "description": "此助手动作不属于当前生产契约，未尝试执行写入。",
+      "action": "请求动作：{{action}}"
+    }
+  },
+  "reconciliation": {
+    "title": "能力对账",
+    "description": "使用有限元数据查看不确定的能力调用，并记录操作员决策。",
+    "loading": "正在加载对账队列…",
+    "operatorOnly": "查看者模式：只有操作员可以处理调用。",
+    "errors": {
+      "sessionExpired": "操作员会话已过期，请重新登录。",
+      "forbidden": "此操作需要操作员授权。",
+      "conflict": "调用或运行已变化，请刷新队列后重试。",
+      "invalid": "请输入有效的证据 UUID 和原因。",
+      "unavailable": "对账服务暂不可用，未修改任何状态。",
+      "generic": "对账请求未完成。"
+    },
+    "queue": {
+      "title": "待处理队列",
+      "description": "这里永远不会展示原始参数、提示词或供应商载荷。",
+      "empty": "没有需要对账的能力调用。"
+    },
+    "fields": {
+      "run": "运行",
+      "callRevision": "调用修订号",
+      "runRevision": "运行修订号",
+      "attempts": "尝试次数",
+      "failure": "失败"
+    },
+    "localCreateEntry": "这个旧的本地新建记录调用不能从界面重试；请使用证据和明确决策进行对账。",
+    "form": {
+      "decision": "决策",
+      "markFailed": "标记失败",
+      "markSucceeded": "标记成功",
+      "markCompensated": "标记已补偿",
+      "artifacts": "证据工件 UUID",
+      "artifactsPlaceholder": "uuid, uuid",
+      "reason": "原因",
+      "submit": "记录决策"
     }
   }
 }

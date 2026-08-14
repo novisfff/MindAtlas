@@ -49,14 +49,20 @@ REQUIRED_ASSERTION_SET = frozenset(
     {
         "qualification-target",
         "schema-identity",
+        "operator-auth",
+        "bootstrap-readiness",
         "two-workers-ready",
-        "write-faults",
-        "reconciliation",
+        "worker-fault-matrix",
+        "interrupt-idempotency",
+        "streaming",
+        "create-entry",
+        "recovery-reconciliation",
         "artifact-gc",
         "l2-memory",
         "readiness",
         "launch-control",
         "secret-scan",
+        "isolation",
         "teardown",
     }
 )
@@ -151,7 +157,6 @@ class ReleaseScenarioSetV1(ReleaseContract):
                 for step in scenario.steps
                 for assertion_id in step.expected_assertion_ids
             }
-            | set(REQUIRED_ASSERTION_SET)
         )
         required_digest = sha256_canonical_json(
             {"domain": REQUIRED_ASSERTION_DOMAIN, "assertionIds": ids}
@@ -183,6 +188,34 @@ class ReleaseScenarioSetV1(ReleaseContract):
             raise ScenarioSetError("duplicate scenario id")
         if not REQUIRED_ASSERTION_SET <= set(self.required_assertion_ids):
             raise ScenarioSetError("required assertion coverage is incomplete")
+        referenced = sorted(
+            {
+                assertion_id
+                for scenario in self.scenarios
+                if scenario.release_critical
+                for step in scenario.steps
+                for assertion_id in step.expected_assertion_ids
+            }
+        )
+        if referenced != list(self.required_assertion_ids):
+            raise ScenarioSetError("required assertion inventory is not scenario-derived")
+        expected_required_digest = sha256_canonical_json(
+            {"domain": REQUIRED_ASSERTION_DOMAIN, "assertionIds": referenced}
+        )
+        if self.required_assertion_set_digest != expected_required_digest:
+            raise ScenarioSetError("required assertion digest mismatch")
+        expected_scenario_digest = sha256_canonical_json(
+            {
+                "domain": SCENARIO_SET_DOMAIN,
+                "contractVersion": self.contract_version,
+                "scenarios": [
+                    scenario.model_dump(mode="json", by_alias=True, exclude_none=False)
+                    for scenario in sorted(self.scenarios, key=lambda item: item.scenario_id)
+                ],
+            }
+        )
+        if self.digest != expected_scenario_digest:
+            raise ScenarioSetError("scenario set digest mismatch")
         return self
 
 

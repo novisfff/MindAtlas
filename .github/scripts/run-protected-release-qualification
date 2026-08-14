@@ -1,0 +1,57 @@
+#!/bin/sh
+set -eu
+
+target_alias=${1:?target alias is required}
+source_revision=${2:?source revision is required}
+
+case "$target_alias" in
+  *[!A-Za-z0-9_.:-]*|'')
+    echo release_target_alias_invalid
+    exit 2
+    ;;
+esac
+
+# The protected runner installation supplies these paths and descriptor
+# numbers. Values themselves never become command-line arguments.
+: "${MINDATLAS_RELEASE_RUN_DIR:?MINDATLAS_RELEASE_RUN_DIR is required}"
+: "${MINDATLAS_QUALIFICATION_TARGET_FILE:?MINDATLAS_QUALIFICATION_TARGET_FILE is required}"
+: "${MINDATLAS_TARGET_PROVISIONING_BUNDLE:?MINDATLAS_TARGET_PROVISIONING_BUNDLE is required}"
+: "${MINDATLAS_AUTOMATION_SIGNING_KEY_FD:?MINDATLAS_AUTOMATION_SIGNING_KEY_FD is required}"
+: "${MINDATLAS_RELEASE_TRUST_SET_FILE:?MINDATLAS_RELEASE_TRUST_SET_FILE is required}"
+: "${MINDATLAS_RELEASE_OCI_BUNDLE:?MINDATLAS_RELEASE_OCI_BUNDLE is required}"
+: "${MINDATLAS_RELEASE_PROFILE_EXECUTOR:?MINDATLAS_RELEASE_PROFILE_EXECUTOR is required}"
+
+test -x "$MINDATLAS_RELEASE_PROFILE_EXECUTOR"
+case "$MINDATLAS_RELEASE_PROFILE_EXECUTOR" in
+  /*) ;;
+  *) echo release_profile_executor_must_be_absolute; exit 2 ;;
+esac
+test ! -L "$MINDATLAS_RELEASE_PROFILE_EXECUTOR"
+test "$MINDATLAS_RELEASE_PROFILE_EXECUTOR" != "$(pwd)/.github/scripts/run-protected-release-qualification"
+export MINDATLAS_RELEASE_PROTECTED_RUNNER="$MINDATLAS_RELEASE_PROFILE_EXECUTOR"
+
+test "$(git rev-parse HEAD)" = "$source_revision"
+test -z "$(git status --porcelain)"
+
+cd backend
+.venv/bin/python scripts/run_pre_ga_release.py profile prepare \
+  --kind automated_qualification \
+  --run-dir "$MINDATLAS_RELEASE_RUN_DIR" \
+  --qualification-target "$MINDATLAS_QUALIFICATION_TARGET_FILE" \
+  --target-provisioning-bundle "$MINDATLAS_TARGET_PROVISIONING_BUNDLE" \
+  --signing-key-fd "$MINDATLAS_AUTOMATION_SIGNING_KEY_FD" \
+  --trust-set "$MINDATLAS_RELEASE_TRUST_SET_FILE" \
+  --oci-bundle "$MINDATLAS_RELEASE_OCI_BUNDLE" \
+  --no-build
+
+.venv/bin/python scripts/run_pre_ga_release.py profile run \
+  --kind automated_qualification \
+  --run-dir "$MINDATLAS_RELEASE_RUN_DIR" \
+  --oci-bundle "$MINDATLAS_RELEASE_OCI_BUNDLE" \
+  --no-build
+
+.venv/bin/python scripts/run_pre_ga_release.py profile verify \
+  --kind automated_qualification \
+  --run-dir "$MINDATLAS_RELEASE_RUN_DIR" \
+  --oci-bundle "$MINDATLAS_RELEASE_OCI_BUNDLE" \
+  --no-build

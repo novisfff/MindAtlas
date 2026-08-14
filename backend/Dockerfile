@@ -99,6 +99,16 @@ HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=3 \
   CMD ["python", "-m", "app.assistant.worker", "--healthcheck"]
 CMD ["python", "-m", "app.assistant.worker"]
 
+# Release-only targets.  They share the reviewed runtime layer so the API and
+# both workers are always built from one immutable application image.
+FROM base AS scripted-provider
+ENV SCRIPTED_PROVIDER_BIND=0.0.0.0:8081
+EXPOSE 8081
+CMD ["python", "-m", "app.release.scripted_provider"]
+
+FROM base AS release-migrate
+CMD ["alembic", "upgrade", "head"]
+
 # Stage 6: Parse Worker target (Docling document parsing)
 FROM python:3.11-slim AS parse-worker-builder
 

@@ -217,7 +217,7 @@ def test_v2_factory_freezes_tagged_server_decision_for_read() -> None:
 
 def test_server_decision_forces_write_pause_without_orphan_call() -> None:
     from tests._db import make_session
-    from tests.test_capability_call_repository import _make_main_agent_run
+    from tests.test_capability_call_repository import _make_main_agent_run, _manifest
     from app.assistant.capability_calls.aggregate import DurableCapabilityLedgerAggregate
     from app.assistant.capability_calls.models import AssistantCapabilityCall
     from app.assistant.durable.repository import LeaseToken
@@ -236,6 +236,8 @@ def test_server_decision_forces_write_pause_without_orphan_call() -> None:
         )
         run.lease_owner = "worker-1"
         run.lease_generation = 2
+        manifest = _manifest(db, run.id)
+        run.current_manifest_revision_id = manifest.id
         db.commit()
         decision = build_authorization_decision_v2(
             policy_allowed=True,
@@ -256,6 +258,11 @@ def test_server_decision_forces_write_pause_without_orphan_call() -> None:
         )
         request = SimpleNamespace(
             execution_scope=SimpleNamespace(run_id=run.id),
+            current_manifest=SimpleNamespace(
+                run_id=run.id,
+                revision=manifest.revision,
+                manifest_digest=manifest.manifest_digest,
+            ),
             call=SimpleNamespace(
                 call_id="provider-write-1",
                 domain_key="create_entry",

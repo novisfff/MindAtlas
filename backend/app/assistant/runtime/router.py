@@ -71,6 +71,7 @@ REASON_TO_MESSAGE: dict[str, str] = {
     "system_seed_invalid": "assistant_system_seed_invalid",
     "profile_unpublished": "assistant_profile_unpublished",
     "model_unbound": "assistant_model_unbound",
+    "pre_ga_launch_unapproved": "assistant_pre_ga_launch_unapproved",
     "schema_incompatible": "assistant_schema_incompatible",
     "build_revision_missing": "assistant_build_revision_missing",
     "profile_gate_use_missing": "assistant_gate_evidence_missing",

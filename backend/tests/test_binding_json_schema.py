@@ -384,7 +384,7 @@ SYSTEM_TOOL_GOLDEN_DIGESTS: dict[str, tuple[str, str]] = {
         "0d20ad4d75d04f1fe9ffd366b89d77f0bce8de00088bc714bb44a8392b7e7f5d",
     ),
     "create_entry": (
-        "b77249cf8ba259c0b5482a4886f64c3877e306e0f97663e572ebb7d07e566091",
+        "8d61a567763bf5ed212afee36590f3e2fbae7719cf3c5b61a7382f633b424c32",
         "e468374fea087a54ad782602c8cf15e387e1d06977198fc0c3d870349249adba",
     ),
     "query_knowledge_graph": (
@@ -422,7 +422,7 @@ SYSTEM_TOOL_GOLDEN_DIGESTS: dict[str, tuple[str, str]] = {
 }
 
 SYSTEM_TOOL_CONTRACT_SET_DIGEST = (
-    "fb14255be369d04b575425f8e0eb0edcc8f358bd14343a45072da23e37c34448"
+    "af3b38502740e5cb73b7056caeb7d0a2e0a84aa2a97206ef3d7fded73d75fd21"
 )
 
 

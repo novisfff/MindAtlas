@@ -1,5 +1,5 @@
 import { useNavigate } from 'react-router-dom'
-import { FileType, Tags, ChevronRight, Bot, Wrench, Network, Sparkles, Settings2, Clock3, PlugZap, Package, ShieldCheck } from 'lucide-react'
+import { FileType, Tags, ChevronRight, Bot, Wrench, Network, Sparkles, Settings2, Clock3, PlugZap, Package, ShieldCheck, ListChecks } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { uiChrome, uiRadius } from '@/components/ui/styles'
 import {
@@ -156,6 +156,24 @@ export function SettingsPage() {
       path: '/settings/system-setup',
       color: 'text-slate-700',
       bgColor: 'bg-slate-500/10'
+    },
+    {
+      id: 'pre-ga-launch',
+      titleKey: 'pages.settings.preGaLaunch',
+      descKey: 'pages.settings.preGaLaunchDesc',
+      icon: ShieldCheck,
+      path: '/settings/pre-ga-launch',
+      color: 'text-rose-600',
+      bgColor: 'bg-rose-500/10'
+    },
+    {
+      id: 'reconciliation',
+      titleKey: 'pages.settings.reconciliation',
+      descKey: 'pages.settings.reconciliationDesc',
+      icon: ListChecks,
+      path: '/settings/reconciliation',
+      color: 'text-amber-600',
+      bgColor: 'bg-amber-500/10'
     }
   ]
 

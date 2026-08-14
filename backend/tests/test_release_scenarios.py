@@ -44,6 +44,21 @@ def test_scenario_loader_rejects_unknown_steps_and_skip(tmp_path: Path) -> None:
         load_scenario_set(path)
 
 
+def test_scenario_loader_rejects_release_critical_set_without_required_group(tmp_path: Path) -> None:
+    from app.release.scenarios import ScenarioSetError, load_scenario_set
+
+    payload = json.loads(Path("release/scenarios/pre_ga_launch.v1.json").read_text(encoding="utf-8"))
+    for scenario in payload["scenarios"]:
+        for step in scenario["steps"]:
+            step["expectedAssertionIds"] = [
+                value for value in step["expectedAssertionIds"] if value != "operator-auth"
+            ]
+    path = tmp_path / "missing-operator-auth.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ScenarioSetError, match="coverage"):
+        load_scenario_set(path)
+
+
 def test_scenario_digest_is_order_stable_but_duplicate_ids_fail(tmp_path: Path) -> None:
     from app.release.scenarios import ScenarioSetError, load_scenario_set
 
@@ -59,3 +74,31 @@ def test_scenario_digest_is_order_stable_but_duplicate_ids_fail(tmp_path: Path) 
     duplicate_path.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(ScenarioSetError, match="duplicate"):
         load_scenario_set(duplicate_path)
+
+
+def test_release_scenario_executor_runs_fixed_dependency_order_and_aggregates() -> None:
+    from app.release.runner import ReleaseObservation, ReleaseScenarioExecutor
+    from app.release.scenarios import load_scenario_set
+
+    class Port:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str]] = []
+
+        def execute_step(self, *, scenario_id: str, step):
+            self.calls.append((scenario_id, step.step_id))
+            return tuple(
+                ReleaseObservation(
+                    assertion_id=assertion_id,
+                    passed=True,
+                    safe_failure_code=None,
+                    payload={"stepId": step.step_id},
+                )
+                for assertion_id in step.expected_assertion_ids
+            )
+
+    port = Port()
+    observations = ReleaseScenarioExecutor(load_scenario_set(), port).execute()
+    assert {item.assertion_id for item in observations} == set(load_scenario_set().required_assertion_ids)
+    assert port.calls[0] == ("create-entry-boundary-faults", "before-call-insert")
+    assert port.calls[-1] == ("worker-takeover-and-duplicate-delivery", "final-teardown")
+    assert all(item.passed for item in observations)

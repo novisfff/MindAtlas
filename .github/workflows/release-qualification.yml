@@ -1,0 +1,252 @@
+name: Release Qualification
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_revision:
+        description: Exact commit to qualify
+        required: true
+        type: string
+      target_alias:
+        description: Code-owned production target alias
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      source_revision:
+        required: true
+        type: string
+      target_alias:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: release-qualification-${{ inputs.source_revision }}
+  cancel-in-progress: false
+
+jobs:
+  source-clean:
+    name: Source and lock gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact source revision
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.source_revision }}
+          fetch-depth: 0
+      - name: Reject source drift
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ inputs.source_revision }}"
+          test -z "$(git status --porcelain)"
+          git diff --check
+      - name: Validate reviewed lock identities
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          python3 scripts/lock_release_images.py --check
+          python3 -m compileall -q app scripts
+
+  unit-and-order:
+    name: Backend and frontend contract gates
+    needs: source-clean
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.source_revision }}
+          fetch-depth: 0
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Setup Node 20
+        uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install locked backend dependencies
+        working-directory: backend
+        run: python -m pip install --disable-pip-version-check --require-hashes -r requirements/api-worker.lock
+      - name: Install and test frontend
+        working-directory: frontend
+        run: npm ci && npm run test -- --run
+      - name: Run release contract suites
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          python -m pytest tests/test_release_profile.py tests/test_release_target_fixture.py tests/test_release_scenarios.py tests/test_rehearsal_profile_authorization.py -q
+          python scripts/run_test_order_regression.py
+
+  build-images:
+    name: Build immutable application images once
+    needs: unit-and-order
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.source_revision }}
+          fetch-depth: 0
+      - name: Setup Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build backend runtime image
+        uses: docker/build-push-action@v6
+        with:
+          context: backend
+          file: backend/Dockerfile
+          target: runtime
+          platforms: linux/amd64
+          load: true
+          tags: mindatlas-release-backend:${{ inputs.source_revision }}
+          build-args: |
+            APP_BUILD_REVISION=${{ inputs.source_revision }}
+      - name: Compute frontend artifact digest
+        id: frontend-digest
+        working-directory: frontend
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run build
+          digest="$(node scripts/compute-build-content-digest.mjs dist)"
+          test "${#digest}" -eq 64
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - name: Build frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: frontend
+          file: frontend/Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: mindatlas-release-web:${{ inputs.source_revision }}
+          build-args: |
+            APP_BUILD_REVISION=${{ inputs.source_revision }}
+            FRONTEND_BUILD_CONTENT_DIGEST=${{ steps.frontend-digest.outputs.digest }}
+      - name: Build scripted provider image
+        uses: docker/build-push-action@v6
+        with:
+          context: backend
+          file: backend/Dockerfile
+          target: scripted-provider
+          platforms: linux/amd64
+          load: true
+          tags: mindatlas-release-scripted-provider:${{ inputs.source_revision }}
+          build-args: |
+            APP_BUILD_REVISION=${{ inputs.source_revision }}
+
+      - name: Export the exact application image bundle
+        run: |
+          set -euo pipefail
+          bundle="$RUNNER_TEMP/release-application-images.tar"
+          docker save -o "$bundle" \
+            "mindatlas-release-backend:${{ inputs.source_revision }}" \
+            "mindatlas-release-scripted-provider:${{ inputs.source_revision }}" \
+            "mindatlas-release-web:${{ inputs.source_revision }}"
+          docker image inspect \
+            "mindatlas-release-backend:${{ inputs.source_revision }}" \
+            "mindatlas-release-scripted-provider:${{ inputs.source_revision }}" \
+            "mindatlas-release-web:${{ inputs.source_revision }}" \
+            > "$RUNNER_TEMP/release-image-inspection.json"
+          test -s "$bundle"
+          test -s "$RUNNER_TEMP/release-image-inspection.json"
+
+      - name: Upload the immutable application bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-qualification-application-bundle
+          path: |
+            ${{ runner.temp }}/release-application-images.tar
+            ${{ runner.temp }}/release-image-inspection.json
+          if-no-files-found: error
+
+  release-profile:
+    name: Protected standalone release profile
+    needs: build-images
+    runs-on: [self-hosted, release-qualification]
+    environment: release-qualification
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.source_revision }}
+          fetch-depth: 0
+      - name: Download the exact application bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: release-qualification-application-bundle
+          path: ${{ runner.temp }}/release-application-bundle
+      - name: Verify the application bundle handoff
+        run: |
+          set -euo pipefail
+          test -s "$RUNNER_TEMP/release-application-bundle/release-application-images.tar"
+          test -s "$RUNNER_TEMP/release-application-bundle/release-image-inspection.json"
+      - name: Reject untrusted signing context
+        run: |
+          set -euo pipefail
+          # The self-hosted installation opens the signing key before the job
+          # starts. Only its descriptor number crosses this workflow boundary.
+          test -n "${MINDATLAS_AUTOMATION_SIGNING_KEY_FD:-}"
+          test "$MINDATLAS_AUTOMATION_SIGNING_KEY_FD" -ge 0
+          test "${{ inputs.target_alias }}" != ""
+          test "$(git rev-parse HEAD)" = "${{ inputs.source_revision }}"
+          test -z "$(git status --porcelain)"
+      - name: Validate release topology
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          python scripts/lock_release_images.py --check
+          python scripts/run_pre_ga_release.py profile validate-compose \
+            --compose ../deploy/compose.release-qualification.yml \
+            --image-lock ../deploy/release-images.lock
+      - name: Run protected qualification wrapper
+        env:
+          AUTOMATED_EVIDENCE_SIGNING_KEY_B64: ${{ secrets.AUTOMATED_EVIDENCE_SIGNING_KEY_B64 }}
+          RELEASE_TARGET_ALIAS: ${{ inputs.target_alias }}
+        run: |
+          set -euo pipefail
+          # The self-hosted runner wrapper materializes descriptor-only secrets
+          # and invokes profile prepare/run/verify. It must not receive target
+          # digests, outcome values, scenario subsets, or raw key arguments.
+          test -x .github/scripts/run-protected-release-qualification || {
+            echo release_protected_runner_wrapper_missing
+            exit 2
+          }
+          MINDATLAS_RELEASE_OCI_BUNDLE="$RUNNER_TEMP/release-application-bundle/release-application-images.tar" \
+            .github/scripts/run-protected-release-qualification "$RELEASE_TARGET_ALIAS" "${{ inputs.source_revision }}"
+
+      - name: Upload protected profile evidence
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-qualification-profile-evidence
+          path: ${{ runner.temp }}/mindatlas-release-evidence
+          if-no-files-found: error
+
+  offline-evidence:
+    name: Offline evidence and artifact upload
+    needs: release-profile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.source_revision }}
+          fetch-depth: 1
+      - name: Download protected profile evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: release-qualification-profile-evidence
+          path: ${{ runner.temp }}/mindatlas-release-evidence
+      - name: Require protected profile outputs
+        run: |
+          set -euo pipefail
+          test -d "$RUNNER_TEMP/mindatlas-release-evidence"
+          test -f "$RUNNER_TEMP/mindatlas-release-evidence/release-summary.json"
+      - name: Upload safe release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-qualification-${{ inputs.source_revision }}
+          path: ${{ runner.temp }}/mindatlas-release-evidence
+          if-no-files-found: error

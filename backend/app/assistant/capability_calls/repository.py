@@ -444,6 +444,13 @@ class CapabilityCallRepository:
         if is_terminal_call_status(to_status):
             call.terminal_at = ts
         self.db.flush()
+        if to_status in {"unknown", "needs_reconciliation"}:
+            from app.assistant.capability_calls.observability import record_capability_metric
+
+            record_capability_metric(
+                "mindatlas_capability_unresolved",
+                {"status": str(to_status)},
+            )
         return call
 
     def fail_before_side_effect(

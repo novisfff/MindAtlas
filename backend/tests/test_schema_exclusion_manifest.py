@@ -92,9 +92,13 @@ def test_trigger_keys_are_bound_to_exact_table_names() -> None:
     assert all(key[2].startswith(f"trg_{key[3]}_reject_") for key in trigger_keys)
 
 
-def test_plan4_revision_is_reserved_not_live() -> None:
+def test_plan4_revision_is_additive_and_live() -> None:
     assert NEXT_RESERVED_REVISION != CLEAN_ROOT_REVISION
-    assert list(ALEMBIC_VERSIONS.glob(f"{NEXT_RESERVED_REVISION}*.py")) == []
+    revisions = list(ALEMBIC_VERSIONS.glob(f"{NEXT_RESERVED_REVISION}*.py"))
+    assert len(revisions) == 1
+    source = revisions[0].read_text(encoding="utf-8")
+    assert 'down_revision = "pre_ga_v1_0001"' in source
+    assert "pre_ga_v1_0001_clean_baseline.py" not in source
 
 
 def test_live_metadata_registration_does_not_import_legacy_models() -> None:

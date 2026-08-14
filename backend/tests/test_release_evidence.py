@@ -225,3 +225,27 @@ def test_canonical_manifest_serialization_has_no_float_or_secret_markers() -> No
     assert b"password" not in encoded.lower()
     assert b"authorization" not in encoded.lower()
     json.loads(encoded)
+
+
+def test_release_runner_rejects_sensitive_observation_payload(tmp_path: Path) -> None:
+    from app.release.evidence import ContentAddressedEvidenceStore, ReleaseEvidenceIntegrityError
+    from app.release.runner import ReleaseObservation, ReleaseRunner
+    from app.release.trust import ReleaseEvidenceSigner
+
+    signer = ReleaseEvidenceSigner.from_private_key_bytes(
+        key_id="qualification-key",
+        private_key_bytes=bytes(range(32)),
+    )
+    runner = ReleaseRunner(
+        store=ContentAddressedEvidenceStore(tmp_path),
+        signer=signer,
+    )
+    with pytest.raises(ReleaseEvidenceIntegrityError, match="sensitive"):
+        runner.observation_result(
+            ReleaseObservation(
+                assertion_id="safe-assertion",
+                passed=True,
+                safe_failure_code=None,
+                payload={"prompt": "must never be evidence"},
+            )
+        )

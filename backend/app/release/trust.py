@@ -18,15 +18,19 @@ from pydantic import Field, model_validator
 
 from app.assistant.domain.digests import sha256_canonical_json
 from app.release.contracts import (
+    DEPLOYED_ARTIFACT_IDENTITY_DOMAIN,
     MANIFEST_DIGEST_DOMAIN,
+    DeployedArtifactIdentityV1,
     ReleaseContract,
     ReleaseEvidenceManifestV1,
+    SignedDeployedArtifactIdentityV1,
 )
 
 
 ATTESTATION_DOMAIN = b"mindatlas:release-evidence:v1\x00"
 ATTESTATION_OBJECT_DIGEST_DOMAIN = "mindatlas:release-attestation-object:v1"
 TRUST_SET_DOMAIN = "mindatlas:release-trust-set:v1"
+DEPLOYED_ARTIFACT_ATTESTATION_DOMAIN = b"mindatlas:deployed-artifact-identity:v1\x00"
 
 
 def _b64url_encode(value: bytes) -> str:
@@ -152,6 +156,8 @@ class ReleaseEvidenceSigner:
         not_before: datetime = datetime(2000, 1, 1, tzinfo=timezone.utc),
         not_after: datetime = datetime(2100, 1, 1, tzinfo=timezone.utc),
         revoked: bool = False,
+        allowed_domains: tuple[Literal["release_evidence", "deployed_artifact_identity", "rehearsal_authorization"], ...] = ("release_evidence",),
+        allowed_evidence_kinds: tuple[Literal["automated_qualification", "production_rehearsal"], ...] = ("automated_qualification", "production_rehearsal"),
     ) -> ReleaseEvidenceTrustKeyV1:
         public = self._private_key.public_key().public_bytes(
             encoding=serialization.Encoding.Raw,
@@ -160,8 +166,8 @@ class ReleaseEvidenceSigner:
         return ReleaseEvidenceTrustKeyV1(
             key_id=self.key_id,
             public_key_base64url=_b64url_encode(public),
-            allowed_domains=("release_evidence",),
-            allowed_evidence_kinds=("automated_qualification", "production_rehearsal"),
+            allowed_domains=allowed_domains,
+            allowed_evidence_kinds=allowed_evidence_kinds,
             not_before=not_before,
             not_after=not_after,
             revoked=revoked,
@@ -178,6 +184,21 @@ class ReleaseEvidenceSigner:
             domain="mindatlas:release-evidence:v1",
             key_id=self.key_id,
             manifest_digest=manifest.manifest_digest,
+            signature_base64url=_b64url_encode(signature),
+        )
+
+    def sign_deployed_artifact_identity(
+        self,
+        identity: DeployedArtifactIdentityV1,
+    ) -> SignedDeployedArtifactIdentityV1:
+        signature = self._private_key.sign(
+            DEPLOYED_ARTIFACT_ATTESTATION_DOMAIN
+            + bytes.fromhex(deployed_artifact_identity_digest(identity))
+        )
+        return SignedDeployedArtifactIdentityV1(
+            domain=DEPLOYED_ARTIFACT_IDENTITY_DOMAIN,
+            key_id=self.key_id,
+            identity=identity,
             signature_base64url=_b64url_encode(signature),
         )
 
@@ -240,6 +261,50 @@ def verify_release_attestation(
     return envelope
 
 
+def deployed_artifact_identity_digest(identity: DeployedArtifactIdentityV1) -> str:
+    return sha256_canonical_json(
+        {
+            "domain": DEPLOYED_ARTIFACT_IDENTITY_DOMAIN,
+            "identity": identity.model_dump(mode="json", by_alias=True),
+        }
+    )
+
+
+def verify_deployed_artifact_identity(
+    value: SignedDeployedArtifactIdentityV1 | dict[str, Any],
+    trust_set: ReleaseTrustSetV1 | ReleaseEvidenceTrustKeyV1,
+    *,
+    now: datetime | None = None,
+) -> DeployedArtifactIdentityV1:
+    try:
+        envelope = (
+            value
+            if isinstance(value, SignedDeployedArtifactIdentityV1)
+            else SignedDeployedArtifactIdentityV1.model_validate(value)
+        )
+    except ValueError:
+        raise ReleaseEvidenceTrustError("deployed_artifact_identity_invalid") from None
+    trust = _as_trust_set(trust_set)
+    key = next((item for item in trust.keys if item.key_id == envelope.key_id), None)
+    if key is None:
+        raise ReleaseEvidenceTrustError("trust_key_unknown")
+    if key.revoked or "deployed_artifact_identity" not in key.allowed_domains:
+        raise ReleaseEvidenceTrustError("deployed_artifact_identity_domain_not_allowed")
+    observed = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    if observed < key.not_before or observed > key.not_after:
+        raise ReleaseEvidenceTrustError("trust_key_outside_validity")
+    try:
+        public = Ed25519PublicKey.from_public_bytes(_b64url_decode(key.public_key_base64url))
+        public.verify(
+            _b64url_decode(envelope.signature_base64url),
+            DEPLOYED_ARTIFACT_ATTESTATION_DOMAIN
+            + bytes.fromhex(deployed_artifact_identity_digest(envelope.identity)),
+        )
+    except (ValueError, InvalidSignature):
+        raise ReleaseEvidenceTrustError("deployed_artifact_identity_signature_invalid") from None
+    return envelope.identity
+
+
 def load_trust_set(path: Path) -> ReleaseTrustSetV1:
     try:
         return ReleaseTrustSetV1.model_validate_json(path.read_text(encoding="utf-8"))
@@ -249,11 +314,14 @@ def load_trust_set(path: Path) -> ReleaseTrustSetV1:
 
 __all__ = [
     "ATTESTATION_DOMAIN",
+    "DEPLOYED_ARTIFACT_ATTESTATION_DOMAIN",
     "ReleaseEvidenceSigner",
     "ReleaseEvidenceTrustError",
     "ReleaseEvidenceTrustKeyV1",
     "ReleaseTrustSetV1",
     "attestation_object_digest",
+    "deployed_artifact_identity_digest",
     "load_trust_set",
     "verify_release_attestation",
+    "verify_deployed_artifact_identity",
 ]

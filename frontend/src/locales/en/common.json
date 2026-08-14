@@ -5,7 +5,9 @@
     "entries": "Entries",
     "graph": "Graph",
     "calendar": "Calendar",
-    "settings": "Settings"
+    "settings": "Settings",
+    "preGaLaunch": "Pre-GA launch",
+    "reconciliation": "Reconciliation"
   },
   "common": {
     "save": "Save",
@@ -1052,7 +1054,11 @@
       "assistantSkillsLegacy": "Skill Library (legacy)",
       "assistantSkillsLegacyDesc": "Legacy skill settings retained during migration",
       "mainAgentProfile": "Main Agent Profile",
-      "mainAgentProfileDesc": "Prompt layers, catalog scope, control capabilities, and evaluation gates"
+      "mainAgentProfileDesc": "Prompt layers, catalog scope, control capabilities, and evaluation gates",
+      "preGaLaunch": "Pre-GA launch control",
+      "preGaLaunchDesc": "Review qualification evidence and consume one approved launch candidate.",
+      "reconciliation": "Capability reconciliation",
+      "reconciliationDesc": "Review uncertain capability calls and record an operator decision."
     },
     "graph": {
       "title": "Knowledge Graph",
@@ -2555,7 +2561,113 @@
       "runtime_closure_drift": "Runtime closure drifted from the prepared revision. Stop and inspect deployment integrity; do not bypass.",
       "worker_unavailable": "No compatible worker is online for this build, contract, and codec.",
       "schema_incompatible": "Schema is incompatible with this Main Agent runtime. Stop and inspect deployment integrity; do not bypass.",
+      "pre_ga_launch_unapproved": "Pre-GA launch approval is not current. Review the protected qualification candidate before starting new runs.",
       "new_runs_disabled": "New chat runs are disabled by the operator switch."
+    }
+  },
+  "preGaLaunch": {
+    "title": "Pre-GA launch control",
+    "description": "Review qualification evidence and consume one approved candidate. This surface never bypasses server-side launch gates.",
+    "loading": "Loading launch control…",
+    "operatorOnly": "Operator authorization required",
+    "defaultConsumeReason": "Approved pre-GA launch candidate consumed by operator.",
+    "errors": {
+      "sessionExpired": "Your operator session expired. Sign in again.",
+      "forbidden": "This action requires operator authorization.",
+      "conflict": "Control state changed. Refresh and review the latest candidate.",
+      "invalid": "The request is incomplete or contains an invalid digest, UUID, or reason.",
+      "unavailable": "The launch control service is unavailable. No state was changed.",
+      "generic": "The request could not be completed. No raw server response is shown."
+    },
+    "status": {
+      "title": "Launch status",
+      "description": "The active subject and control revision are server-authoritative.",
+      "unapprovedHelp": "Launch remains unapproved until the protected server-side candidate is consumed.",
+      "currentHelp": "The current launch subject is active. Review drift and audit evidence before any change."
+    },
+    "states": {
+      "current": "Current subject",
+      "unapproved": "Not approved"
+    },
+    "fields": {
+      "state": "State",
+      "controlRevision": "Control revision",
+      "subject": "Active subject",
+      "reason": "Reason",
+      "candidate": "Candidate",
+      "target": "Qualification target",
+      "evidence": "Automated evidence",
+      "unknownCalls": "Unknown calls",
+      "reconciliation": "Reconciliation queue",
+      "activeRuns": "Active runs",
+      "failureCodes": "Failure codes"
+    },
+    "create": {
+      "title": "Create a qualification candidate",
+      "description": "Submit digest references only. Evidence contents stay in the protected evidence store.",
+      "automatedManifest": "Automated manifest digest",
+      "automatedAttestation": "Automated attestation digest",
+      "rehearsalManifest": "Rehearsal manifest digest",
+      "rehearsalAttestation": "Rehearsal attestation digest",
+      "reason": "Operator reason",
+      "submit": "Create candidate"
+    },
+    "consume": {
+      "submit": "Consume candidate"
+    },
+    "history": {
+      "title": "Candidate history",
+      "description": "Only digest prefixes, bounded statuses, and fixed failure codes are displayed.",
+      "empty": "No qualification candidates are available."
+    },
+    "candidateStates": {
+      "passing_unused": "Passing · unused",
+      "failed": "Failed",
+      "expired_unused": "Expired · unused",
+      "consumed_current": "Consumed · current",
+      "consumed_stale": "Consumed · stale"
+    },
+    "unsupportedCapability": {
+      "title": "Capability not supported",
+      "description": "This assistant action is not part of the current production contract. No write was attempted.",
+      "action": "Requested action: {{action}}"
+    }
+  },
+  "reconciliation": {
+    "title": "Capability reconciliation",
+    "description": "Review uncertain capability calls with bounded metadata and record an operator decision.",
+    "loading": "Loading reconciliation queue…",
+    "operatorOnly": "Viewer mode: only operators can reconcile calls.",
+    "errors": {
+      "sessionExpired": "Your operator session expired. Sign in again.",
+      "forbidden": "This action requires operator authorization.",
+      "conflict": "The call or run changed. Refresh the queue before retrying.",
+      "invalid": "Provide valid evidence UUIDs and a reason.",
+      "unavailable": "The reconciliation service is unavailable. No state was changed.",
+      "generic": "The reconciliation request could not be completed."
+    },
+    "queue": {
+      "title": "Open queue",
+      "description": "Raw arguments, prompts, and provider payloads are never displayed here.",
+      "empty": "No capability calls require reconciliation."
+    },
+    "fields": {
+      "run": "Run",
+      "callRevision": "Call revision",
+      "runRevision": "Run revision",
+      "attempts": "Attempts",
+      "failure": "Failure"
+    },
+    "localCreateEntry": "This legacy local create-entry call cannot be retried from the UI; reconcile it with evidence and an explicit decision.",
+    "form": {
+      "decision": "Decision",
+      "markFailed": "Mark failed",
+      "markSucceeded": "Mark succeeded",
+      "markCompensated": "Mark compensated",
+      "artifacts": "Evidence artifact UUIDs",
+      "artifactsPlaceholder": "uuid, uuid",
+      "reason": "Reason",
+      "submit": "Record decision"
     }
   }
 }

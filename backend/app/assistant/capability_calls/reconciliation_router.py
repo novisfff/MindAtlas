@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from starlette.requests import Request
 
 from app.assistant.capability_calls.models import AssistantCapabilityCall
+from app.assistant.models import AssistantChatRun
 from app.assistant.capability_calls.reconciliation import (
     CapabilityReconciliationService,
     HmacReconciliationEvidenceVerifier,
@@ -51,12 +52,13 @@ def _evidence_secret(settings: Settings) -> str:
     return secret
 
 
-def _safe_call_summary(call: AssistantCapabilityCall) -> dict[str, object]:
+def _safe_call_summary(call: AssistantCapabilityCall, *, run_revision: int) -> dict[str, object]:
     return {
         "callId": str(call.id),
         "runId": str(call.run_id),
         "status": str(call.status),
         "stateRevision": int(call.state_revision),
+        "runRevision": int(run_revision),
         "failureCode": str(call.failure_code) if call.failure_code else None,
         "executionMode": str(call.execution_mode),
         "sideEffectStartedAt": (
@@ -111,7 +113,20 @@ def list_reconciliation_calls(
         .limit(limit)
         .all()
     )
-    return ApiResponse.ok({"items": [_safe_call_summary(row) for row in rows], "total": total})
+    return ApiResponse.ok(
+        {
+            "items": [
+                _safe_call_summary(
+                    row,
+                    run_revision=int(
+                        getattr(db.get(AssistantChatRun, row.run_id), "state_revision", 0)
+                    ),
+                )
+                for row in rows
+            ],
+            "total": total,
+        }
+    )
 
 
 @router.post("/{call_id}/reconcile", status_code=200, response_model=ApiResponse)
