@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "contractVersion": 1,
+  "scenarios": [
+    {
+      "schemaVersion": 1,
+      "scenarioId": "pre-ga-launch-smoke",
+      "releaseCritical": true,
+      "requiredServices": ["postgres", "minio", "api", "frontend", "scripted-provider"],
+      "workerCount": 2,
+      "timeoutSeconds": 1800,
+      "steps": [
+        {"schemaVersion": 1, "stepId": "setup", "kind": "setup", "faultPoint": "none", "expectedAssertionIds": ["qualification-target"], "timeoutSeconds": 120},
+        {"schemaVersion": 1, "stepId": "identity", "kind": "readiness", "faultPoint": "none", "expectedAssertionIds": ["schema-identity", "two-workers-ready"], "dependsOn": ["setup"], "timeoutSeconds": 120},
+        {"schemaVersion": 1, "stepId": "write-faults", "kind": "local_create", "faultPoint": "after_entry_commit_before_ack", "expectedAssertionIds": ["write-faults"], "dependsOn": ["identity"], "timeoutSeconds": 240},
+        {"schemaVersion": 1, "stepId": "reconcile", "kind": "reconciliation", "faultPoint": "connection_drop_during_commit", "expectedAssertionIds": ["reconciliation"], "dependsOn": ["write-faults"], "timeoutSeconds": 240},
+        {"schemaVersion": 1, "stepId": "artifacts", "kind": "artifact_gc", "faultPoint": "none", "expectedAssertionIds": ["artifact-gc", "secret-scan"], "dependsOn": ["reconcile"], "timeoutSeconds": 120},
+        {"schemaVersion": 1, "stepId": "memory", "kind": "l2_memory", "faultPoint": "none", "expectedAssertionIds": ["l2-memory"], "dependsOn": ["artifacts"], "timeoutSeconds": 120},
+        {"schemaVersion": 1, "stepId": "launch", "kind": "launch_control", "faultPoint": "none", "expectedAssertionIds": ["launch-control", "readiness"], "dependsOn": ["memory"], "timeoutSeconds": 120},
+        {"schemaVersion": 1, "stepId": "teardown", "kind": "teardown", "faultPoint": "none", "expectedAssertionIds": ["teardown"], "dependsOn": ["launch"], "timeoutSeconds": 120}
+      ]
+    }
+  ]
+}

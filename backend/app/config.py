@@ -79,6 +79,24 @@ class Settings(BaseSettings):
         default="development",
         alias="MINDATLAS_DEPLOYMENT_CLASS",
     )
+    # Release evidence trust is public configuration; private signing keys are
+    # supplied only through an already-open runner descriptor.
+    release_trust_set_path: str = Field(
+        default="",
+        alias="MINDATLAS_RELEASE_TRUST_SET_PATH",
+    )
+    release_profile_authorization_path: str = Field(
+        default="",
+        alias="MINDATLAS_RELEASE_PROFILE_AUTHORIZATION_PATH",
+    )
+    release_evidence_root: str = Field(
+        default="",
+        alias="MINDATLAS_RELEASE_EVIDENCE_ROOT",
+    )
+    release_deployment_identity_path: str = Field(
+        default="",
+        alias="MINDATLAS_RELEASE_DEPLOYMENT_IDENTITY_PATH",
+    )
 
     # Plan 03 live model capability probe (paid Provider call). Default-disabled.
     # confirmProviderCall=true is cost acknowledgement only, not authentication.

@@ -18,7 +18,7 @@ def test_runtime_schema_compatibility_is_family_bound_singleton() -> None:
     assert service is runtime_schema_compatibility()
     assert PLAN3_SCHEMA_REQUIREMENT.schema_family == "pre_ga_v1"
     assert PLAN3_SCHEMA_REQUIREMENT.compatible_revisions == {
-        "pre_ga_v1_0001": 1,
+        "pre_ga_v1_0002": 2,
     }
 
 
@@ -68,7 +68,7 @@ def test_compatible_snapshot_shape_is_bounded() -> None:
         safe_reason=None,
         diagnostic_code=None,
         schema_family="pre_ga_v1",
-        schema_revision="pre_ga_v1_0001",
+        schema_revision="pre_ga_v1_0002",
         deployment_class=DeploymentClass.DEVELOPMENT,
         structural_fingerprint="a" * 64,
         runtime_identity_digest="b" * 64,

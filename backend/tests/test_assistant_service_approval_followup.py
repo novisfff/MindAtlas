@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import sys
-import types
 import unittest
 
 from tests._bootstrap import bootstrap_backend_imports, reset_caches
@@ -11,51 +9,6 @@ from tests._db import make_session
 bootstrap_backend_imports()
 reset_caches()
 
-
-def _install_fastapi_stubs() -> None:
-    if "fastapi" in sys.modules:
-        return
-
-    fastapi = types.ModuleType("fastapi")
-    fastapi_exceptions = types.ModuleType("fastapi.exceptions")
-    fastapi_responses = types.ModuleType("fastapi.responses")
-
-    class FastAPI:  # pragma: no cover - test stub
-        pass
-
-    class RequestValidationError(Exception):  # pragma: no cover - test stub
-        pass
-
-    class JSONResponse:  # pragma: no cover - test stub
-        def __init__(self, *args, **kwargs) -> None:
-            pass
-
-    fastapi.FastAPI = FastAPI
-    fastapi_exceptions.RequestValidationError = RequestValidationError
-    fastapi_responses.JSONResponse = JSONResponse
-    sys.modules["fastapi"] = fastapi
-    sys.modules["fastapi.exceptions"] = fastapi_exceptions
-    sys.modules["fastapi.responses"] = fastapi_responses
-
-    starlette_requests = types.ModuleType("starlette.requests")
-    starlette_exceptions = types.ModuleType("starlette.exceptions")
-    starlette_status = types.ModuleType("starlette.status")
-
-    class Request:  # pragma: no cover - test stub
-        pass
-
-    class HTTPException(Exception):  # pragma: no cover - test stub
-        def __init__(self, status_code: int = 500, detail: str | None = None) -> None:
-            super().__init__(detail or "")
-            self.status_code = status_code
-            self.detail = detail
-
-    starlette_requests.Request = Request
-    starlette_exceptions.HTTPException = HTTPException
-    starlette_status.HTTP_500_INTERNAL_SERVER_ERROR = 500
-    sys.modules["starlette.requests"] = starlette_requests
-    sys.modules["starlette.exceptions"] = starlette_exceptions
-    sys.modules["starlette.status"] = starlette_status
 
 
 @unittest.skip('legacy HITL approval followup removed (Plan 10 B2)')
@@ -104,7 +57,6 @@ class AssistantServiceApprovalFollowupTests(unittest.TestCase):
 
     def test_submit_approval_backfills_empty_assistant_message_when_run_disconnected(self) -> None:
         from app.assistant.models import Message  # noqa: E402
-        _install_fastapi_stubs()
         from app.assistant.service import AssistantService  # noqa: E402
 
         conversation, assistant_message, approval = self._create_conversation_with_pending_approval(
@@ -132,7 +84,6 @@ class AssistantServiceApprovalFollowupTests(unittest.TestCase):
 
     def test_submit_approval_creates_new_followup_when_target_message_not_empty(self) -> None:
         from app.assistant.models import Message  # noqa: E402
-        _install_fastapi_stubs()
         from app.assistant.service import AssistantService  # noqa: E402
 
         conversation, assistant_message, approval = self._create_conversation_with_pending_approval(
@@ -162,7 +113,6 @@ class AssistantServiceApprovalFollowupTests(unittest.TestCase):
     def test_runtime_waiting_but_stream_inactive_still_creates_followup(self) -> None:
         from app.assistant.models import Message  # noqa: E402
         from app.assistant.workflow.human_approval_runtime import GLOBAL_HUMAN_LOOP_COORDINATOR  # noqa: E402
-        _install_fastapi_stubs()
         from app.assistant.service import AssistantService  # noqa: E402
 
         conversation, assistant_message, approval = self._create_conversation_with_pending_approval(
@@ -195,7 +145,6 @@ class AssistantServiceApprovalFollowupTests(unittest.TestCase):
 
     def test_runtime_waiting_with_active_stream_does_not_write_followup_for_empty_target(self) -> None:
         from app.assistant.workflow.human_approval_runtime import GLOBAL_HUMAN_LOOP_COORDINATOR  # noqa: E402
-        _install_fastapi_stubs()
         from app.assistant.service import AssistantService  # noqa: E402
 
         conversation, assistant_message, approval = self._create_conversation_with_pending_approval(
@@ -225,7 +174,6 @@ class AssistantServiceApprovalFollowupTests(unittest.TestCase):
 
     def test_runtime_waiting_with_active_stream_keeps_non_empty_target_message(self) -> None:
         from app.assistant.workflow.human_approval_runtime import GLOBAL_HUMAN_LOOP_COORDINATOR  # noqa: E402
-        _install_fastapi_stubs()
         from app.assistant.service import AssistantService  # noqa: E402
 
         conversation, assistant_message, approval = self._create_conversation_with_pending_approval(

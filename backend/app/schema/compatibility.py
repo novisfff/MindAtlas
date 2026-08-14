@@ -28,7 +28,7 @@ from app.schema.contracts import (
 from app.schema.exclusions import LEGACY_TABLE_NAMES
 from app.schema.identity import (
     SchemaIdentityError,
-    load_expected_schema_contract,
+    load_expected_schema_contract_v2,
     read_schema_identity,
     schema_runtime_identity_digest,
 )
@@ -50,16 +50,16 @@ class SchemaCompatibilityRequirement:
 
 
 def _load_requirement() -> SchemaCompatibilityRequirement:
-    expected = load_expected_schema_contract()
+    expected = load_expected_schema_contract_v2()
     return SchemaCompatibilityRequirement(
         schema_family=expected.schema_family,
-        minimum_revision_ordinal=1,
-        compatible_revisions={CLEAN_ROOT_REVISION: 1},
+        minimum_revision_ordinal=2,
+        compatible_revisions={expected.schema_revision: 2},
         expected_application_fingerprints={
-            CLEAN_ROOT_REVISION: expected.application_structural_fingerprint,
+            expected.schema_revision: expected.application_structural_fingerprint,
         },
         expected_marker_control_fingerprints={
-            CLEAN_ROOT_REVISION: expected.schema_identity_control_fingerprint,
+            expected.schema_revision: expected.schema_identity_control_fingerprint,
         },
         seed_contract_digest=expected.seed_contract_digest,
         runtime_contract_version=expected.runtime_contract_version,
@@ -187,7 +187,7 @@ class FamilyBoundRuntimeSchemaCompatibility:
         if fingerprint != expected_fingerprint:
             return _incompatible_snapshot("fingerprint_mismatch")
 
-        expected = load_expected_schema_contract()
+        expected = load_expected_schema_contract_v2()
         logical_keys = {item.key for item in projected.objects}
         controls = tuple(item for item in document.objects if item.key not in logical_keys)
         control_fingerprint = structural_fingerprint(

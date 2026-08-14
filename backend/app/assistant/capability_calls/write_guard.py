@@ -154,6 +154,32 @@ class _DenyLaunchAuthorization:
         return False
 
 
+class _DefaultLaunchAuthorization:
+    """Use the durable production gate when no test port is injected."""
+
+    def allows_current_subject(
+        self,
+        db: Session,
+        *,
+        closure: Any,
+        deployment_class: DeploymentClass,
+    ) -> bool:
+        del closure
+        if deployment_class is not DeploymentClass.PRODUCTION:
+            # Rehearsal writes are authorized only by the release-profile
+            # adapter, which must be injected by that profile. Development is
+            # intentionally write-disabled.
+            return False
+        try:
+            from app.pre_ga_launch.factory import default_pre_ga_launch_service
+
+            return bool(
+                default_pre_ga_launch_service(db).evaluate_current_launch().launched
+            )
+        except Exception:
+            return False
+
+
 def acquire_write_safety_advisory_lock(db: Session) -> None:
     """Acquire the one production write-safety transaction lock.
 
@@ -249,7 +275,7 @@ class ProductionWriteGuard:
             if schema_compatibility is not None
             else Plan2AlembicHeadCompatibility()
         )
-        self.launch_authorization = launch_authorization or _DenyLaunchAuthorization()
+        self.launch_authorization = launch_authorization or _DefaultLaunchAuthorization()
         self.deployment_class = deployment_class or _deployment_class_from_process(
             self.settings
         )
@@ -275,6 +301,9 @@ class ProductionWriteGuard:
             raise CapabilityNotSupported(normalize_unsupported_branch(normalized))
         if not lock_already_held:
             try:
+                from app.pre_ga_launch.repository import LaunchRepository
+
+                LaunchRepository(self.db).lock_launch()
                 self.lock_port.acquire(self.db)
             except Exception:
                 return self._blocked("write_safety_blocked")
@@ -300,6 +329,9 @@ class ProductionWriteGuard:
             raise CapabilityNotSupported(normalize_unsupported_branch(raw))
         if not lock_already_held:
             try:
+                from app.pre_ga_launch.repository import LaunchRepository
+
+                LaunchRepository(self.db).lock_launch()
                 self.lock_port.acquire(self.db)
             except Exception:
                 return self._blocked("write_safety_blocked")

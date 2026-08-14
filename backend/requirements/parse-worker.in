@@ -1,0 +1,22 @@
+# Direct attachment parse-worker inputs. The API/Assistant Worker stack is
+# intentionally absent; this input is compiled independently.
+--constraint constraints-python311.txt
+# PyTorch's official CPU index is required for the linux/amd64 CPU wheels;
+# the generated lock intentionally omits this install directive.
+--extra-index-url https://download.pytorch.org/whl/cpu
+# These direct parser/runtime versions are the reviewed Python 3.11/CPU
+# compatibility boundary represented by parse-worker.lock. Keeping the heavy
+# Docling/ModelScope/Torch roots exact makes the cross-architecture compiler
+# deterministic instead of relying on a moving resolver frontier.
+pydantic==2.13.4
+pydantic-settings==2.15.0
+sqlalchemy==2.0.52
+psycopg2-binary==2.9.12
+minio==7.2.20
+cryptography==50.0.0
+starlette==0.52.1
+docling==2.119.0
+rapidocr-onnxruntime==1.4.4
+modelscope==1.39.1
+torch==2.7.0+cpu
+torchvision==0.22.0+cpu

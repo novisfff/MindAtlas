@@ -17,7 +17,7 @@ reset_caches()
 
 
 def test_openai_is_direct_requirement() -> None:
-    requirements = Path(__file__).resolve().parents[1] / "requirements.txt"
+    requirements = Path(__file__).resolve().parents[1] / "requirements" / "api-worker.in"
     text = requirements.read_text(encoding="utf-8")
     lines = [
         line.strip()

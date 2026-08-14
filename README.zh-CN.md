@@ -126,7 +126,7 @@ cd backend
 python -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate
 
-pip install -r requirements.txt
+pip install --require-hashes -r requirements/api-worker.lock
 
 cp .env.example .env
 # 按需编辑 .env，配置数据库、对象存储，以及可选的 AI / LightRAG 参数
@@ -152,7 +152,7 @@ python -m app.lightrag.worker
 ```bash
 cd backend
 source .venv/bin/activate
-pip install -r requirements-docling.txt
+pip install --require-hashes -r requirements/parse-worker.lock
 python -m app.attachment.worker
 ```
 

@@ -49,6 +49,28 @@ class RuntimeSchemaCompatibility(Protocol):
     def is_compatible(self, db: Session) -> bool: ...
 
 
+class LaunchAuthorizationProbe(Protocol):
+    """Read-only durable launch authorization used by production readiness."""
+
+    def evaluate_current_launch(self) -> Any: ...
+
+
+class _DefaultLaunchAuthorization:
+    """Resolve the server-owned launch service lazily and fail closed."""
+
+    def __init__(self, db: Session, settings: Any) -> None:
+        self.db = db
+        self.settings = settings
+
+    def evaluate_current_launch(self) -> Any:
+        from app.pre_ga_launch.factory import default_pre_ga_launch_service
+
+        return default_pre_ga_launch_service(
+            self.db,
+            settings=self.settings,
+        ).evaluate_current_launch()
+
+
 class Plan2AlembicHeadCompatibility:
     """Compatibility import shim backed by the family-bound Plan 3 service."""
 
@@ -152,6 +174,7 @@ class AssistantReadinessService:
         profile_probe: Any | None = None,
         model_probe: Any | None = None,
         closure_builder: AssistantRuntimeClosureBuilder | None = None,
+        launch_authorization: LaunchAuthorizationProbe | None = None,
     ) -> None:
         self.db = db
         self.settings = settings if settings is not None else get_settings()
@@ -183,6 +206,7 @@ class AssistantReadinessService:
         )
         self.repo = AssistantRuntimeRepository(db)
         self.closure_builder = closure_builder or AssistantRuntimeClosureBuilder(db)
+        self.launch_authorization = launch_authorization
 
     def evaluate(self) -> AssistantReadinessSnapshot:
         """Observational readiness: no writes, no locks required."""
@@ -242,6 +266,7 @@ class AssistantReadinessService:
                 candidate=candidate,
                 ignore_rollout_inactive=True,
                 ignore_new_runs_disabled=True,
+                ignore_launch_authorization=True,
             )
         finally:
             if nested is not None:
@@ -269,6 +294,7 @@ class AssistantReadinessService:
             candidate=candidate,
             ignore_rollout_inactive=True,
             ignore_new_runs_disabled=True,
+            ignore_launch_authorization=True,
         )
 
     def _evaluate(
@@ -279,6 +305,7 @@ class AssistantReadinessService:
         candidate: AssistantRuntimeClosure | None = None,
         ignore_rollout_inactive: bool = False,
         ignore_new_runs_disabled: bool = False,
+        ignore_launch_authorization: bool = False,
     ) -> AssistantReadinessSnapshot:
         # Note: schema_incompatible is listed after worker_unavailable in the
         # public reason-code tuple, but structural schema failure short-circuits
@@ -350,6 +377,20 @@ class AssistantReadinessService:
                 reasons.add("new_runs_disabled")
             if control is not None and not bool(control.new_runs_enabled):
                 reasons.add("new_runs_disabled")
+        if (
+            not ignore_launch_authorization
+            and str(getattr(self.settings, "mindatlas_deployment_class", ""))
+            == "production"
+        ):
+            try:
+                authorization = self.launch_authorization or _DefaultLaunchAuthorization(
+                    self.db,
+                    self.settings,
+                )
+                if not authorization.evaluate_current_launch().launched:
+                    reasons.add("pre_ga_launch_unapproved")
+            except Exception:
+                reasons.add("pre_ga_launch_unapproved")
         workers = self._compatible_workers(closure)
         if not workers:
             reasons.add("worker_unavailable")
@@ -469,6 +510,7 @@ def project_activation_candidate_readiness(
 
 __all__ = (
     "AssistantReadinessService",
+    "LaunchAuthorizationProbe",
     "Plan2AlembicHeadCompatibility",
     "RuntimeSchemaCompatibility",
     "project_activation_candidate_readiness",

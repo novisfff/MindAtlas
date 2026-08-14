@@ -32,6 +32,7 @@ RUNTIME_READINESS_REASON_CODES: tuple[str, ...] = (
     "model_unbound",
     "rollout_inactive",
     "runtime_closure_drift",
+    "pre_ga_launch_unapproved",
     "worker_unavailable",
     "schema_incompatible",
     "new_runs_disabled",

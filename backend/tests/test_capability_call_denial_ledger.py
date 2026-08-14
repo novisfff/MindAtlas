@@ -354,7 +354,7 @@ def test_denied_prepare_requires_reservation_and_rejects_input_drift() -> None:
 
         aggregate.reserve_siblings(requests, messages)
         requests[0].call.arguments = {"q": "drifted"}
-        with pytest.raises(CapabilityCallConflict, match="does not match"):
+        with pytest.raises(CapabilityCallConflict, match="canonical input"):
             aggregate.prepare(requests[0])
         assert db.query(AssistantCapabilityCall).count() == 1
         assert db.query(AssistantCapabilityCall).one().status == "denied"

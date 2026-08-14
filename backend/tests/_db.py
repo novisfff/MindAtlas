@@ -120,6 +120,15 @@ def _compile_check_constraint_for_sqlite(
     **kwargs,
 ):  # noqa: ANN201
     rendered = compiler.visit_check_constraint(constraint, **kwargs)
+    rendered = rendered.replace(
+        "expires_at = issued_at + INTERVAL '24 hours'",
+        "abs(julianday(expires_at) - julianday(issued_at) - 1.0) < 0.000001",
+    )
+    rendered = rendered.replace(
+        "safe_failure_codes = '[]'::jsonb",
+        "safe_failure_codes = '[]'",
+    )
+    rendered = rendered.replace("jsonb_array_length(", "json_array_length(")
     rendered = _SHA256_REGEX_SQL.sub(
         lambda match: f"length({match.group('column')}) = 64",
         rendered,

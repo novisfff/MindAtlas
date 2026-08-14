@@ -126,7 +126,7 @@ cd backend
 python -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate
 
-pip install -r requirements.txt
+pip install --require-hashes -r requirements/api-worker.lock
 
 cp .env.example .env
 # Edit .env for database, storage, and any optional AI / LightRAG settings
@@ -152,7 +152,7 @@ If you want attachment parsing with Docling:
 ```bash
 cd backend
 source .venv/bin/activate
-pip install -r requirements-docling.txt
+pip install --require-hashes -r requirements/parse-worker.lock
 python -m app.attachment.worker
 ```
 

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import sys
-import types
 import unittest
 from unittest.mock import patch
 
@@ -12,51 +10,6 @@ from tests._db import make_session
 bootstrap_backend_imports()
 reset_caches()
 
-
-def _install_fastapi_stubs() -> None:
-    if "fastapi" in sys.modules:
-        return
-
-    fastapi = types.ModuleType("fastapi")
-    fastapi_exceptions = types.ModuleType("fastapi.exceptions")
-    fastapi_responses = types.ModuleType("fastapi.responses")
-
-    class FastAPI:  # pragma: no cover - test stub
-        pass
-
-    class RequestValidationError(Exception):  # pragma: no cover - test stub
-        pass
-
-    class JSONResponse:  # pragma: no cover - test stub
-        def __init__(self, *args, **kwargs) -> None:
-            pass
-
-    fastapi.FastAPI = FastAPI
-    fastapi_exceptions.RequestValidationError = RequestValidationError
-    fastapi_responses.JSONResponse = JSONResponse
-    sys.modules["fastapi"] = fastapi
-    sys.modules["fastapi.exceptions"] = fastapi_exceptions
-    sys.modules["fastapi.responses"] = fastapi_responses
-
-    starlette_requests = types.ModuleType("starlette.requests")
-    starlette_exceptions = types.ModuleType("starlette.exceptions")
-    starlette_status = types.ModuleType("starlette.status")
-
-    class Request:  # pragma: no cover - test stub
-        pass
-
-    class HTTPException(Exception):  # pragma: no cover - test stub
-        def __init__(self, status_code: int = 500, detail: str | None = None) -> None:
-            super().__init__(detail or "")
-            self.status_code = status_code
-            self.detail = detail
-
-    starlette_requests.Request = Request
-    starlette_exceptions.HTTPException = HTTPException
-    starlette_status.HTTP_500_INTERNAL_SERVER_ERROR = 500
-    sys.modules["starlette.requests"] = starlette_requests
-    sys.modules["starlette.exceptions"] = starlette_exceptions
-    sys.modules["starlette.status"] = starlette_status
 
 
 class _FailingAgent:
@@ -85,7 +38,6 @@ class AssistantServiceNoOuterFallbackTests(unittest.TestCase):
         self.db.close()
 
     def test_generate_response_does_not_call_outer_openai_fallback(self) -> None:
-        _install_fastapi_stubs()
         from app.assistant.orchestration.openai_fallback_client import OpenAiFallbackConfig  # noqa: E402
         from app.assistant.service import AssistantService  # noqa: E402
 
