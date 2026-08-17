@@ -10,6 +10,7 @@ profile producing signed evidence.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import hashlib
 from http.cookiejar import CookieJar
 import json
@@ -66,6 +67,20 @@ _MAX_TARGET_HTTP_BODY = 8 * 1024 * 1024
 _SESSION_COOKIE_NAME = "mindatlas_session"
 _CSRF_COOKIE_NAME = "mindatlas_csrf"
 _CSRF_HEADER_NAME = "X-MindAtlas-CSRF"
+_REHEARSAL_ATTEMPT_LEDGER_ALIAS = "production-rehearsal-attempts-v1"
+_COMPLETE_RUN_ARTIFACT_KINDS = frozenset(
+    {
+        "junit",
+        "migration_summary",
+        "audit_summary",
+        "metric_summary",
+        "scenario_trace",
+        "test_order_summary",
+        "profile_topology_summary",
+        "secret_scan_summary",
+        "teardown_summary",
+    }
+)
 
 
 class ReleaseCliError(ValueError):
@@ -556,6 +571,8 @@ def prepare_profile(args: argparse.Namespace) -> dict[str, Any]:
     )
     automation_manifest_digest: str | None = None
     automation_attestation_digest: str | None = None
+    attempt_receipt: Any | None = None
+    attempt_receipt_path: Path | None = None
     if args.kind == "production_rehearsal":
         _require_file(getattr(args, "automation_evidence", None), code="release_automation_evidence_missing")
         try:
@@ -580,6 +597,32 @@ def prepare_profile(args: argparse.Namespace) -> dict[str, Any]:
         except (TypeError, ValueError):
             raise ReleaseCliError("release_attempt_ledger_credential_fd_unavailable") from None
         _require_fd(attempt_fd, code="release_attempt_ledger_credential_fd_unavailable")
+        target_contract = _load_target_contract(args.qualification_target)
+        if target_contract.qualification_target_digest != material["targetDigest"]:
+            raise ReleaseCliError("release_target_material_drift")
+        ledger_root_value = os.environ.get("MINDATLAS_RELEASE_ATTEMPT_LEDGER_ROOT", "")
+        ledger_root = Path(ledger_root_value) if ledger_root_value else None
+        from app.release.contracts import RehearsalAttemptSubjectV1
+
+        attempt_receipt, attempt_receipt_path = _claim_rehearsal_attempt(
+            subject=RehearsalAttemptSubjectV1.build(
+                qualification_target_digest=target_contract.qualification_target_digest,
+                build_revision=target_contract.build_revision,
+                image_set_digest=target_contract.image_set_digest,
+                deployed_artifact_set_digest=target_contract.deployed_artifact_set_digest,
+                dependency_lock_set_digest=target_contract.dependency_lock_set_digest,
+                scenario_set_digest=target_contract.scenario_set_digest,
+                required_assertion_set_digest=target_contract.required_assertion_set_digest,
+                runner_contract_version=target_contract.runner_contract_version,
+                runner_identity_digest=target_contract.runner_identity_digest,
+                evidence_trust_set_digest=target_contract.evidence_trust_set_digest,
+            ),
+            selected_automation_manifest_digest=automation_manifest_digest,
+            selected_automation_attestation_digest=automation_attestation_digest,
+            ledger_alias=args.attempt_ledger_alias,
+            credential_fd=attempt_fd,
+            ledger_root=ledger_root,
+        )
     try:
         from app.release.scenarios import REQUIRED_ASSERTION_SET_DIGEST, SCENARIO_SET_DIGEST
         from scripts.lock_release_images import load_lock
@@ -610,6 +653,9 @@ def prepare_profile(args: argparse.Namespace) -> dict[str, Any]:
         (args.run_dir / name).chmod(0o600)
     (args.run_dir / "deployment-identity.json").chmod(0o444)
     (args.run_dir / "trust-set.json").chmod(0o644)
+    if attempt_receipt_path is not None and attempt_receipt is not None:
+        shutil.copyfile(attempt_receipt_path, args.run_dir / "rehearsal-attempt-started.v1.json")
+        (args.run_dir / "rehearsal-attempt-started.v1.json").chmod(0o444)
     state = {
         "schemaVersion": 1,
         "kind": args.kind,
@@ -644,6 +690,10 @@ def prepare_profile(args: argparse.Namespace) -> dict[str, Any]:
         state["attemptLedgerAlias"] = _require_safe_alias(args.attempt_ledger_alias)
         state["automationManifestDigest"] = automation_manifest_digest
         state["automationAttestationDigest"] = automation_attestation_digest
+        state["attemptReceipt"] = "rehearsal-attempt-started.v1.json"
+        state["attemptReceiptDigest"] = attempt_receipt.receipt_digest
+        state["attemptId"] = str(attempt_receipt.attempt_id)
+        state["attemptSubjectDigest"] = attempt_receipt.subject.subject_digest
     (args.run_dir / "profile-state.json").write_bytes(_canonical(state) + b"\n")
     (args.run_dir / "profile-state.json").chmod(0o600)
     return {"kind": args.kind, "state": state["state"], "runId": state["runId"]}
@@ -659,8 +709,47 @@ def _require_prepared_run(run_dir: Path) -> dict[str, Any]:
     return state
 
 
+def _verify_attempt_receipt(run_dir: Path, state: dict[str, Any]) -> None:
+    if state.get("kind") != "production_rehearsal":
+        return
+    receipt_name = state.get("attemptReceipt")
+    if not isinstance(receipt_name, str) or Path(receipt_name).name != receipt_name:
+        raise ReleaseCliError("release_rehearsal_attempt_receipt_invalid")
+    receipt_path = _require_regular_file(
+        run_dir / receipt_name,
+        code="release_rehearsal_attempt_receipt_missing",
+    )
+    try:
+        from app.release.contracts import RehearsalAttemptStartedReceiptV1
+
+        receipt = RehearsalAttemptStartedReceiptV1.model_validate(_json_file(receipt_path))
+    except (ReleaseCliError, ValueError):
+        raise ReleaseCliError("release_rehearsal_attempt_receipt_invalid") from None
+    if (
+        receipt.receipt_digest != state.get("attemptReceiptDigest")
+        or str(receipt.attempt_id) != state.get("attemptId")
+        or receipt.subject.subject_digest != state.get("attemptSubjectDigest")
+    ):
+        raise ReleaseCliError("release_rehearsal_attempt_receipt_drift")
+
+
+def _complete_run_artifact_bundle(args: argparse.Namespace, *, evidence_kind: str) -> Path:
+    if evidence_kind == "automated_qualification":
+        argument_name = "automation_artifact_bundle"
+        environment_name = "MINDATLAS_AUTOMATED_EVIDENCE_ARTIFACT_BUNDLE"
+    else:
+        argument_name = "rehearsal_artifact_bundle"
+        environment_name = "MINDATLAS_REHEARSAL_EVIDENCE_ARTIFACT_BUNDLE"
+    configured = getattr(args, argument_name, None)
+    if configured is None:
+        value = os.environ.get(environment_name, "")
+        configured = Path(value) if value else None
+    return _require_regular_file(configured, code="release_artifact_bundle_missing")
+
+
 def run_profile(args: argparse.Namespace) -> dict[str, Any]:
     state = _require_prepared_run(args.run_dir)
+    _verify_attempt_receipt(args.run_dir, state)
     if not bool(getattr(args, "no_build", False)):
         raise ReleaseCliError("release_profile_requires_no_build")
     if str(getattr(args, "kind", "") or state.get("kind")) != state.get("kind"):
@@ -807,6 +896,7 @@ def run_profile(args: argparse.Namespace) -> dict[str, Any]:
 
 def verify_profile(args: argparse.Namespace) -> dict[str, Any]:
     state = _require_prepared_run(args.run_dir)
+    _verify_attempt_receipt(args.run_dir, state)
     if str(getattr(args, "kind", "") or state.get("kind")) != state.get("kind"):
         raise ReleaseCliError("release_run_kind_mismatch")
     evidence = list(args.run_dir.glob("evidence/*.json"))
@@ -880,16 +970,20 @@ def verify_complete_run(args: argparse.Namespace) -> dict[str, Any]:
         if not isinstance(payload, dict) or payload.get("schemaVersion") != 1:
             raise ReleaseCliError("release_complete_run_summary_invalid")
         return {"kind": state["kind"], "state": "complete-run-summary-verified"}
-    _require_file(args.qualification_target, code="release_qualification_target_missing")
-    _require_file(args.automation_evidence, code="release_automation_evidence_missing")
-    _require_file(args.rehearsal_evidence, code="release_rehearsal_evidence_missing")
-    _require_file(args.scenario_set, code="release_scenario_set_missing")
-    _require_file(args.required_e2e_module, code="release_required_e2e_module_missing")
+    _require_regular_file(args.qualification_target, code="release_qualification_target_missing")
+    _require_regular_file(args.automation_evidence, code="release_automation_evidence_missing")
+    _require_regular_file(args.rehearsal_evidence, code="release_rehearsal_evidence_missing")
+    _require_regular_file(args.scenario_set, code="release_scenario_set_missing")
+    _require_regular_file(args.required_e2e_module, code="release_required_e2e_module_missing")
     if not isinstance(args.source_revision, str) or not re.fullmatch(r"[0-9a-f]{40}", args.source_revision):
         raise ReleaseCliError("release_source_revision_invalid")
-    if args.trust_set is None:
+    trust_path = args.trust_set
+    if trust_path is None:
+        configured = os.environ.get("MINDATLAS_RELEASE_TRUST_SET_FILE", "")
+        trust_path = Path(configured) if configured else None
+    if trust_path is None:
         raise ReleaseCliError("release_trust_set_missing")
-    _require_file(args.trust_set, code="release_trust_set_missing")
+    trust_path = _require_regular_file(trust_path, code="release_trust_set_missing")
     target = verify_target(args.qualification_target)
     try:
         from app.release.scenarios import load_scenario_set
@@ -903,11 +997,12 @@ def verify_complete_run(args: argparse.Namespace) -> dict[str, Any]:
     # This command is an offline completeness gate, not a transcript replay.
     # The signed manifest verifier proves identity/signature and this command
     # proves the fixed scenario/assertion inventory was not silently replaced.
+    artifact_bundles_verified = 0
     for evidence_path, expected_kind in (
         (args.automation_evidence, "automated_qualification"),
         (args.rehearsal_evidence, "production_rehearsal"),
     ):
-        manifest, _ = _verified_manifest(evidence_path, args.trust_set)
+        manifest, _ = _verified_manifest(evidence_path, trust_path)
         if manifest.evidence_kind != expected_kind:
             raise ReleaseCliError("release_evidence_kind_mismatch")
         if manifest.build_revision != args.source_revision:
@@ -919,12 +1014,33 @@ def verify_complete_run(args: argparse.Namespace) -> dict[str, Any]:
         if manifest.required_assertion_set_digest != scenario_set.required_assertion_set_digest:
             raise ReleaseCliError("release_required_assertion_set_digest_mismatch")
         assertion_ids = {item.assertion_id for item in manifest.assertion_results}
-        if not set(scenario_set.required_assertion_ids) <= assertion_ids:
-            raise ReleaseCliError("release_evidence_assertion_inventory_incomplete")
-    return {"state": "complete-run-evidence-present", "sourceRevision": args.source_revision}
+        required_assertion_ids = set(scenario_set.required_assertion_ids)
+        if assertion_ids != required_assertion_ids:
+            raise ReleaseCliError("release_evidence_assertion_inventory_invalid")
+        if any(not item.passed for item in manifest.assertion_results):
+            raise ReleaseCliError("release_evidence_assertions_failed")
+        artifact_kinds = {item.artifact_kind for item in manifest.artifact_refs}
+        if not _COMPLETE_RUN_ARTIFACT_KINDS <= artifact_kinds:
+            raise ReleaseCliError("release_evidence_artifact_inventory_incomplete")
+        artifact_bundle = _complete_run_artifact_bundle(args, evidence_kind=expected_kind)
+        try:
+            from scripts.verify_release_attestation import verify
+
+            _, artifact_exit_code = verify(evidence_path, artifact_bundle, trust_path)
+        except Exception:
+            raise ReleaseCliError("release_artifact_bundle_verification_failed") from None
+        if artifact_exit_code != 0:
+            raise ReleaseCliError("release_evidence_assertions_failed")
+        artifact_bundles_verified += 1
+    compare_evidence(args.automation_evidence, args.rehearsal_evidence, trust_path)
+    return {
+        "state": "complete-run-evidence-present",
+        "sourceRevision": args.source_revision,
+        "artifactBundlesVerified": artifact_bundles_verified,
+    }
 
 
-def verify_target(path: Path) -> dict[str, Any]:
+def _load_target_contract(path: Path) -> Any:
     from app.release.target_fixture import RehearsalInitializationFixtureV1
     from app.release.contracts import ReleaseQualificationTargetV1
 
@@ -932,12 +1048,25 @@ def verify_target(path: Path) -> dict[str, Any]:
     try:
         if isinstance(raw, dict) and "target" in raw and "fixtureDigest" in raw:
             fixture = RehearsalInitializationFixtureV1.model_validate(raw)
-            target = fixture.target
-            return {"targetDigest": target.qualification_target_digest, "fixtureDigest": fixture.fixture_digest}
-        target = ReleaseQualificationTargetV1.model_validate(raw)
+            return fixture.target
+        return ReleaseQualificationTargetV1.model_validate(raw)
     except ValueError:
         raise ReleaseCliError("release_target_invalid") from None
-    return {"targetDigest": target.qualification_target_digest}
+
+
+def verify_target(path: Path) -> dict[str, Any]:
+    target = _load_target_contract(path)
+    result = {"targetDigest": target.qualification_target_digest}
+    raw = _json_file(path)
+    if isinstance(raw, dict) and "target" in raw and "fixtureDigest" in raw:
+        from app.release.target_fixture import RehearsalInitializationFixtureV1
+
+        try:
+            fixture = RehearsalInitializationFixtureV1.model_validate(raw)
+        except ValueError:
+            raise ReleaseCliError("release_target_invalid") from None
+        result["fixtureDigest"] = fixture.fixture_digest
+    return result
 
 
 def capture_target(args: argparse.Namespace) -> dict[str, Any]:
@@ -1411,7 +1540,10 @@ def _validate_oci_image_bundle(path: Path, identity: Any) -> dict[str, Any]:
                 if role in images:
                     raise ReleaseCliError("release_oci_bundle_image_inventory_invalid")
                 config_name = item.get("Config")
-                if not isinstance(config_name, str) or re.fullmatch(r"[0-9a-f]{64}\.json", config_name) is None:
+                if not isinstance(config_name, str) or re.fullmatch(
+                    r"(?:[0-9a-f]{64}\.json|blobs/sha256/[0-9a-f]{64})",
+                    config_name,
+                ) is None:
                     raise ReleaseCliError("release_oci_bundle_config_invalid")
                 config_member = by_name.get(config_name)
                 if config_member is None:
@@ -1421,7 +1553,12 @@ def _validate_oci_image_bundle(path: Path, identity: Any) -> dict[str, Any]:
                     raise ReleaseCliError("release_oci_bundle_config_invalid")
                 config_bytes = config_handle.read()
                 config_digest = hashlib.sha256(config_bytes).hexdigest()
-                if config_name != f"{config_digest}.json":
+                expected_config_digest = (
+                    config_name.removesuffix(".json")
+                    if config_name.endswith(".json")
+                    else config_name.rsplit("/", 1)[-1]
+                )
+                if expected_config_digest != config_digest:
                     raise ReleaseCliError("release_oci_bundle_config_digest_invalid")
                 try:
                     config = json.loads(config_bytes.decode("utf-8"))
@@ -1570,6 +1707,107 @@ def _conditional_create(path: Path, content: bytes, *, root: Path) -> bool:
     finally:
         os.close(fd)
     return False
+
+
+def _claim_rehearsal_attempt(
+    *,
+    subject: Any,
+    selected_automation_manifest_digest: str | None,
+    selected_automation_attestation_digest: str | None,
+    ledger_alias: str | None,
+    credential_fd: int,
+    ledger_root: Path | None,
+    started_at: datetime | None = None,
+) -> tuple[Any, Path]:
+    """Conditionally create the one-shot rehearsal receipt.
+
+    The ledger alias is a code-owned constant and the root is installed by the
+    protected runner. The descriptor is deliberately only capability-checked;
+    no credential bytes enter the process. Unlike evidence promotion, an
+    existing receipt is never an idempotent replay: any existing subject burns
+    the attempt and fails closed.
+    """
+
+    if ledger_alias != _REHEARSAL_ATTEMPT_LEDGER_ALIAS:
+        raise ReleaseCliError("release_attempt_ledger_alias_invalid")
+    _consume_descriptor(
+        credential_fd,
+        code="release_attempt_ledger_credential_fd_unavailable",
+    )
+    if (
+        ledger_root is None
+        or not ledger_root.is_absolute()
+        or ledger_root.is_symlink()
+        or (ledger_root.exists() and not ledger_root.is_dir())
+        or not ledger_root.parent.is_dir()
+    ):
+        raise ReleaseCliError("release_attempt_ledger_unavailable")
+    try:
+        ledger_root.mkdir(parents=True, mode=0o700, exist_ok=True)
+    except OSError:
+        raise ReleaseCliError("release_attempt_ledger_unavailable") from None
+
+    from app.release.contracts import RehearsalAttemptStartedReceiptV1
+
+    if not isinstance(selected_automation_manifest_digest, str) or re.fullmatch(
+        r"[0-9a-f]{64}", selected_automation_manifest_digest
+    ) is None:
+        raise ReleaseCliError("release_automation_evidence_invalid")
+    if not isinstance(selected_automation_attestation_digest, str) or re.fullmatch(
+        r"[0-9a-f]{64}", selected_automation_attestation_digest
+    ) is None:
+        raise ReleaseCliError("release_automation_evidence_invalid")
+    try:
+        receipt = RehearsalAttemptStartedReceiptV1.build(
+            subject=subject,
+            selected_automation_manifest_digest=selected_automation_manifest_digest,
+            selected_automation_attestation_digest=selected_automation_attestation_digest,
+            started_at=started_at or datetime.now(timezone.utc),
+        )
+    except (TypeError, ValueError):
+        raise ReleaseCliError("release_rehearsal_attempt_subject_invalid") from None
+
+    path = (
+        ledger_root
+        / ledger_alias
+        / "v1"
+        / f"{receipt.subject.subject_digest}.json"
+    )
+    if path.is_symlink():
+        raise ReleaseCliError("release_rehearsal_already_attempted")
+    try:
+        relative = path.relative_to(ledger_root)
+    except ValueError:
+        raise ReleaseCliError("release_attempt_ledger_unavailable") from None
+    current = ledger_root
+    for part in relative.parts[:-1]:
+        current = current / part
+        if current.is_symlink() or (current.exists() and not current.is_dir()):
+            raise ReleaseCliError("release_attempt_ledger_unavailable")
+        try:
+            current.mkdir(exist_ok=True, mode=0o700)
+        except OSError:
+            raise ReleaseCliError("release_attempt_ledger_unavailable") from None
+    encoded = _canonical(receipt.model_dump(mode="json", by_alias=True)) + b"\n"
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o444)
+    except FileExistsError:
+        raise ReleaseCliError("release_rehearsal_already_attempted") from None
+    except OSError:
+        raise ReleaseCliError("release_attempt_ledger_write_failed") from None
+    try:
+        view = memoryview(encoded)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise OSError("short receipt write")
+            view = view[written:]
+        os.fchmod(fd, 0o444)
+    except OSError:
+        raise ReleaseCliError("release_attempt_ledger_write_failed") from None
+    finally:
+        os.close(fd)
+    return receipt, path
 
 
 def _read_bundle_artifacts(bundle_path: Path, manifest: Any) -> dict[str, bytes]:
@@ -1786,14 +2024,29 @@ def run_production_clone(args: argparse.Namespace) -> dict[str, Any]:
         configured = os.environ.get("MINDATLAS_RELEASE_TRUST_SET_FILE", "")
         trust_path = Path(configured) if configured else None
     trust_path = _require_regular_file(trust_path, code="release_trust_set_missing")
+    deployment_identity = getattr(args, "deployment_identity", None)
+    if deployment_identity is None:
+        configured_identity = os.environ.get("MINDATLAS_RELEASE_DEPLOYMENT_IDENTITY_FILE", "")
+        deployment_identity = Path(configured_identity) if configured_identity else None
+    deployment_identity = _require_regular_file(
+        deployment_identity,
+        code="release_deployment_identity_missing",
+    )
     try:
         target = verify_target(target_path)
         target_digest = target["targetDigest"]
         _verified_manifest(automation_path, trust_path)
         _verified_manifest(rehearsal_path, trust_path)
         compare_evidence(automation_path, rehearsal_path, trust_path)
-        archive = _validate_archive_bundle(bundle_path)
-        bundle_digest = archive["bundleDigest"]
+        artifact = verify_artifact(
+            argparse.Namespace(
+                deployment_identity=deployment_identity,
+                oci_bundle=bundle_path,
+                trust_set=trust_path,
+                run_dir=None,
+            )
+        )
+        bundle_digest = artifact["bundleDigest"]
     except ReleaseCliError:
         raise
     except Exception:
@@ -2171,6 +2424,8 @@ def build_parser() -> argparse.ArgumentParser:
     complete.add_argument("--required-e2e-module", type=Path, required=True)
     complete.add_argument("--source-revision", required=True)
     complete.add_argument("--trust-set", type=Path)
+    complete.add_argument("--automation-artifact-bundle", type=Path)
+    complete.add_argument("--rehearsal-artifact-bundle", type=Path)
 
     target = commands.add_parser("target")
     target_commands = target.add_subparsers(dest="target_command", required=True)
@@ -2222,6 +2477,7 @@ def build_parser() -> argparse.ArgumentParser:
     clone_command.add_argument("--automation-evidence", type=Path, required=True)
     clone_command.add_argument("--rehearsal-evidence", type=Path, required=True)
     clone_command.add_argument("--oci-bundle", type=Path, required=True)
+    clone_command.add_argument("--deployment-identity", type=Path)
     clone_command.add_argument("--trust-set", type=Path)
 
     summary = commands.add_parser("evidence-summary")

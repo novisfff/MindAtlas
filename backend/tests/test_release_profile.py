@@ -110,7 +110,12 @@ def test_deployment_identity_prefers_local_image_id_over_registry_repo_digest(
                 {
                     "RepoTags": ["mindatlas-release-scripted-provider:" + "c" * 40],
                     "Id": "sha256:" + "e" * 64,
-                    "Config": {"Labels": {"org.opencontainers.image.revision": "c" * 40}},
+                    "Config": {
+                        "Labels": {
+                            "org.opencontainers.image.revision": "c" * 40,
+                            "io.mindatlas.api-worker-lock-sha256": "d" * 64,
+                        }
+                    },
                 },
                 {
                     "RepoTags": ["mindatlas-release-web:" + "c" * 40],
@@ -626,8 +631,9 @@ def test_production_clone_negative_acceptance_requires_and_verifies_protected_ex
     automation = tmp_path / "automation.json"
     rehearsal = tmp_path / "rehearsal.json"
     bundle = tmp_path / "release.oci.tar"
+    deployment_identity = tmp_path / "deployment-identity.json"
     trust = tmp_path / "trust.json"
-    for path in (target, automation, rehearsal, bundle, trust):
+    for path in (target, automation, rehearsal, bundle, deployment_identity, trust):
         path.write_bytes(b"fixture")
     run_dir = tmp_path / "clone-run"
     target_digest = "d" * 64
@@ -643,6 +649,11 @@ def test_production_clone_negative_acceptance_requires_and_verifies_protected_ex
         run_pre_ga_release,
         "_validate_archive_bundle",
         lambda path: {"bundleDigest": "e" * 64, "memberCount": 3},
+    )
+    monkeypatch.setattr(
+        run_pre_ga_release,
+        "verify_artifact",
+        lambda args: {"bundleDigest": "e" * 64},
     )
 
     calls: list[list[str]] = []
@@ -688,6 +699,7 @@ def test_production_clone_negative_acceptance_requires_and_verifies_protected_ex
                     "automation_evidence": automation,
                     "rehearsal_evidence": rehearsal,
                     "oci_bundle": bundle,
+                    "deployment_identity": deployment_identity,
                     "trust_set": trust,
                 },
             )()
@@ -697,6 +709,399 @@ def test_production_clone_negative_acceptance_requires_and_verifies_protected_ex
     assert result["state"] == "negative-acceptance-passed"
     assert result["qualificationTargetDigest"] == target_digest
     assert calls and "--source-database-url-fd" in calls[0]
+
+
+def test_production_clone_requires_signed_deployment_identity_for_oci_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts import run_pre_ga_release
+
+    source_url = tmp_path / "source-url"
+    source_url.write_bytes(b"descriptor-only")
+    source_fd = os.open(source_url, os.O_RDONLY)
+    target = tmp_path / "qualification-target.json"
+    automation = tmp_path / "automation.json"
+    rehearsal = tmp_path / "rehearsal.json"
+    bundle = tmp_path / "release.oci.tar"
+    trust = tmp_path / "trust.json"
+    for path in (target, automation, rehearsal, bundle, trust):
+        path.write_bytes(b"fixture")
+    monkeypatch.setattr(
+        run_pre_ga_release,
+        "verify_target",
+        lambda path: {"targetDigest": "d" * 64},
+    )
+    monkeypatch.setattr(run_pre_ga_release, "_verified_manifest", lambda path, trust: (object(), object()))
+    monkeypatch.setattr(run_pre_ga_release, "compare_evidence", lambda *args: {"state": "matched"})
+    monkeypatch.setattr(
+        run_pre_ga_release,
+        "_validate_archive_bundle",
+        lambda path: {"bundleDigest": "e" * 64, "memberCount": 3},
+    )
+    try:
+        with pytest.raises(run_pre_ga_release.ReleaseCliError, match="deployment_identity_missing"):
+            run_pre_ga_release.run_production_clone(
+                type(
+                    "Args",
+                    (),
+                    {
+                        "source_url_fd": source_fd,
+                        "run_dir": tmp_path / "clone-run",
+                        "qualification_target": target,
+                        "automation_evidence": automation,
+                        "rehearsal_evidence": rehearsal,
+                        "oci_bundle": bundle,
+                        "trust_set": trust,
+                        "deployment_identity": None,
+                    },
+                )()
+            )
+    finally:
+        os.close(source_fd)
+
+
+def test_verify_complete_run_uses_environment_trust_set_when_flag_is_omitted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from scripts import run_pre_ga_release
+
+    target = tmp_path / "target.json"
+    automation = tmp_path / "automation.json"
+    rehearsal = tmp_path / "rehearsal.json"
+    automation_bundle = tmp_path / "automation-artifacts.tar"
+    rehearsal_bundle = tmp_path / "rehearsal-artifacts.tar"
+    scenario = tmp_path / "scenario.json"
+    e2e = tmp_path / "test_release_qualification_e2e.py"
+    trust = tmp_path / "trust.json"
+    for path in (target, automation, rehearsal, scenario, trust):
+        path.write_bytes(b"fixture")
+    automation_bundle.write_bytes(b"fixture")
+    rehearsal_bundle.write_bytes(b"fixture")
+    e2e.write_text("def test_release_profile():\n    assert True\n", encoding="utf-8")
+
+    scenario_set = SimpleNamespace(
+        digest="s" * 64,
+        required_assertion_set_digest="r" * 64,
+        required_assertion_ids=("assertion",),
+    )
+    manifest = SimpleNamespace(
+        evidence_kind="automated_qualification",
+        build_revision="a" * 40,
+        qualification_target_digest="t" * 64,
+        scenario_set_digest="s" * 64,
+        required_assertion_set_digest="r" * 64,
+        assertion_results=(SimpleNamespace(assertion_id="assertion", passed=True),),
+        artifact_refs=tuple(
+            SimpleNamespace(artifact_kind=kind)
+            for kind in (
+                "junit",
+                "migration_summary",
+                "audit_summary",
+                "metric_summary",
+                "scenario_trace",
+                "test_order_summary",
+                "profile_topology_summary",
+                "secret_scan_summary",
+                "teardown_summary",
+            )
+        ),
+    )
+    rehearsal_values = dict(manifest.__dict__)
+    rehearsal_values["evidence_kind"] = "production_rehearsal"
+    rehearsal_manifest = SimpleNamespace(**rehearsal_values)
+    monkeypatch.setenv("MINDATLAS_RELEASE_TRUST_SET_FILE", str(trust))
+    monkeypatch.setattr(run_pre_ga_release, "verify_target", lambda path: {"targetDigest": "t" * 64})
+    monkeypatch.setattr(run_pre_ga_release, "_verified_manifest", lambda path, trust: (
+        manifest if path == automation else rehearsal_manifest,
+        object(),
+    ))
+    monkeypatch.setattr("app.release.scenarios.load_scenario_set", lambda path: scenario_set)
+    monkeypatch.setattr(run_pre_ga_release, "compare_evidence", lambda *args: {"state": "matched"})
+    from scripts import verify_release_attestation
+
+    monkeypatch.setattr(verify_release_attestation, "verify", lambda *args: ({}, 0))
+    monkeypatch.setenv("MINDATLAS_AUTOMATED_EVIDENCE_ARTIFACT_BUNDLE", str(automation_bundle))
+    monkeypatch.setenv("MINDATLAS_REHEARSAL_EVIDENCE_ARTIFACT_BUNDLE", str(rehearsal_bundle))
+
+    result = run_pre_ga_release.verify_complete_run(
+        type(
+            "Args",
+            (),
+            {
+                "qualification_target": target,
+                "automation_evidence": automation,
+                "rehearsal_evidence": rehearsal,
+                "scenario_set": scenario,
+                "required_e2e_module": e2e,
+                "source_revision": "a" * 40,
+                "trust_set": None,
+            },
+        )()
+    )
+    assert result["state"] == "complete-run-evidence-present"
+
+
+def test_verify_complete_run_rejects_extra_assertions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from scripts import run_pre_ga_release
+
+    target = tmp_path / "target.json"
+    automation = tmp_path / "automation.json"
+    rehearsal = tmp_path / "rehearsal.json"
+    scenario = tmp_path / "scenario.json"
+    e2e = tmp_path / "test_release_qualification_e2e.py"
+    trust = tmp_path / "trust.json"
+    for path in (target, automation, rehearsal, scenario, trust):
+        path.write_bytes(b"fixture")
+    e2e.write_text("def test_release_profile():\n    assert True\n", encoding="utf-8")
+
+    scenario_set = SimpleNamespace(
+        digest="s" * 64,
+        required_assertion_set_digest="r" * 64,
+        required_assertion_ids=("assertion",),
+    )
+    manifest = SimpleNamespace(
+        evidence_kind="automated_qualification",
+        build_revision="a" * 40,
+        qualification_target_digest="t" * 64,
+        scenario_set_digest="s" * 64,
+        required_assertion_set_digest="r" * 64,
+        assertion_results=(
+            SimpleNamespace(assertion_id="assertion", passed=True),
+            SimpleNamespace(assertion_id="unexpected", passed=True),
+        ),
+        artifact_refs=(),
+    )
+    rehearsal_manifest = SimpleNamespace(**{**manifest.__dict__, "evidence_kind": "production_rehearsal"})
+    monkeypatch.setenv("MINDATLAS_RELEASE_TRUST_SET_FILE", str(trust))
+    monkeypatch.setattr(run_pre_ga_release, "verify_target", lambda path: {"targetDigest": "t" * 64})
+    monkeypatch.setattr(
+        run_pre_ga_release,
+        "_verified_manifest",
+        lambda path, trust: (
+            manifest if path == automation else rehearsal_manifest,
+            object(),
+        ),
+    )
+    monkeypatch.setattr("app.release.scenarios.load_scenario_set", lambda path: scenario_set)
+
+    with pytest.raises(run_pre_ga_release.ReleaseCliError, match="assertion_inventory"):
+        run_pre_ga_release.verify_complete_run(
+            type(
+                "Args",
+                (),
+                {
+                    "qualification_target": target,
+                    "automation_evidence": automation,
+                    "rehearsal_evidence": rehearsal,
+                    "scenario_set": scenario,
+                    "required_e2e_module": e2e,
+                    "source_revision": "a" * 40,
+                    "trust_set": None,
+                },
+            )()
+        )
+
+
+def test_verify_complete_run_requires_the_complete_safe_artifact_inventory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from scripts import run_pre_ga_release
+
+    target = tmp_path / "target.json"
+    automation = tmp_path / "automation.json"
+    rehearsal = tmp_path / "rehearsal.json"
+    scenario = tmp_path / "scenario.json"
+    e2e = tmp_path / "test_release_qualification_e2e.py"
+    trust = tmp_path / "trust.json"
+    for path in (target, automation, rehearsal, scenario, trust):
+        path.write_bytes(b"fixture")
+    e2e.write_text("def test_release_profile():\n    assert True\n", encoding="utf-8")
+
+    scenario_set = SimpleNamespace(
+        digest="s" * 64,
+        required_assertion_set_digest="r" * 64,
+        required_assertion_ids=("assertion",),
+    )
+    manifest = SimpleNamespace(
+        evidence_kind="automated_qualification",
+        build_revision="a" * 40,
+        qualification_target_digest="t" * 64,
+        scenario_set_digest="s" * 64,
+        required_assertion_set_digest="r" * 64,
+        assertion_results=(SimpleNamespace(assertion_id="assertion", passed=True),),
+        artifact_refs=(),
+    )
+    rehearsal_manifest = SimpleNamespace(**{**manifest.__dict__, "evidence_kind": "production_rehearsal"})
+    monkeypatch.setenv("MINDATLAS_RELEASE_TRUST_SET_FILE", str(trust))
+    monkeypatch.setattr(run_pre_ga_release, "verify_target", lambda path: {"targetDigest": "t" * 64})
+    monkeypatch.setattr(
+        run_pre_ga_release,
+        "_verified_manifest",
+        lambda path, trust: (
+            manifest if path == automation else rehearsal_manifest,
+            object(),
+        ),
+    )
+    monkeypatch.setattr("app.release.scenarios.load_scenario_set", lambda path: scenario_set)
+
+    with pytest.raises(run_pre_ga_release.ReleaseCliError, match="artifact_inventory"):
+        run_pre_ga_release.verify_complete_run(
+            type(
+                "Args",
+                (),
+                {
+                    "qualification_target": target,
+                    "automation_evidence": automation,
+                    "rehearsal_evidence": rehearsal,
+                    "scenario_set": scenario,
+                    "required_e2e_module": e2e,
+                    "source_revision": "a" * 40,
+                    "trust_set": None,
+                },
+            )()
+        )
+
+
+def test_verify_complete_run_requires_artifact_bundles_for_byte_verification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from scripts import run_pre_ga_release
+
+    target = tmp_path / "target.json"
+    automation = tmp_path / "automation.json"
+    rehearsal = tmp_path / "rehearsal.json"
+    scenario = tmp_path / "scenario.json"
+    e2e = tmp_path / "test_release_qualification_e2e.py"
+    trust = tmp_path / "trust.json"
+    for path in (target, automation, rehearsal, scenario, trust):
+        path.write_bytes(b"fixture")
+    e2e.write_text("def test_release_profile():\n    assert True\n", encoding="utf-8")
+
+    artifact_kinds = (
+        "junit",
+        "migration_summary",
+        "audit_summary",
+        "metric_summary",
+        "scenario_trace",
+        "test_order_summary",
+        "profile_topology_summary",
+        "secret_scan_summary",
+        "teardown_summary",
+    )
+    artifacts = tuple(
+        SimpleNamespace(
+            artifact_kind=kind,
+            artifact_id=kind,
+            sha256_digest=f"{index + 1:064x}",
+            byte_size=1,
+        )
+        for index, kind in enumerate(artifact_kinds)
+    )
+    scenario_set = SimpleNamespace(
+        digest="s" * 64,
+        required_assertion_set_digest="r" * 64,
+        required_assertion_ids=("assertion",),
+    )
+    manifest = SimpleNamespace(
+        evidence_kind="automated_qualification",
+        build_revision="a" * 40,
+        qualification_target_digest="t" * 64,
+        scenario_set_digest="s" * 64,
+        required_assertion_set_digest="r" * 64,
+        assertion_results=(SimpleNamespace(assertion_id="assertion", passed=True),),
+        artifact_refs=artifacts,
+    )
+    rehearsal_manifest = SimpleNamespace(**{**manifest.__dict__, "evidence_kind": "production_rehearsal"})
+    monkeypatch.setenv("MINDATLAS_RELEASE_TRUST_SET_FILE", str(trust))
+    monkeypatch.setattr(run_pre_ga_release, "verify_target", lambda path: {"targetDigest": "t" * 64})
+    monkeypatch.setattr(
+        run_pre_ga_release,
+        "_verified_manifest",
+        lambda path, trust: (
+            manifest if path == automation else rehearsal_manifest,
+            object(),
+        ),
+    )
+    monkeypatch.setattr("app.release.scenarios.load_scenario_set", lambda path: scenario_set)
+    monkeypatch.setattr(run_pre_ga_release, "compare_evidence", lambda *args: {"state": "matched"})
+
+    with pytest.raises(run_pre_ga_release.ReleaseCliError, match="artifact_bundle_missing"):
+        run_pre_ga_release.verify_complete_run(
+            type(
+                "Args",
+                (),
+                {
+                    "qualification_target": target,
+                    "automation_evidence": automation,
+                    "rehearsal_evidence": rehearsal,
+                    "scenario_set": scenario,
+                    "required_e2e_module": e2e,
+                    "source_revision": "a" * 40,
+                    "trust_set": None,
+                    "automation_artifact_bundle": None,
+                    "rehearsal_artifact_bundle": None,
+                },
+            )()
+        )
+
+
+def test_rehearsal_attempt_claim_is_append_only_and_never_replayable(
+    tmp_path: Path,
+) -> None:
+    from datetime import datetime, timezone
+
+    from app.release.contracts import RehearsalAttemptSubjectV1
+    from scripts import run_pre_ga_release
+
+    credential = tmp_path / "attempt-ledger-credential"
+    credential.write_bytes(b"descriptor-only")
+    credential_fd = os.open(credential, os.O_RDONLY)
+    try:
+        subject = RehearsalAttemptSubjectV1.build(
+            qualification_target_digest="a" * 64,
+            build_revision="b" * 40,
+            image_set_digest="c" * 64,
+            deployed_artifact_set_digest="d" * 64,
+            dependency_lock_set_digest="e" * 64,
+            scenario_set_digest="f" * 64,
+            required_assertion_set_digest="1" * 64,
+            runner_contract_version=1,
+            runner_identity_digest="2" * 64,
+            evidence_trust_set_digest="3" * 64,
+        )
+        first, receipt_path = run_pre_ga_release._claim_rehearsal_attempt(
+            subject=subject,
+            selected_automation_manifest_digest="4" * 64,
+            selected_automation_attestation_digest="5" * 64,
+            ledger_alias="production-rehearsal-attempts-v1",
+            credential_fd=credential_fd,
+            ledger_root=tmp_path / "ledger",
+            started_at=datetime(2026, 8, 17, tzinfo=timezone.utc),
+        )
+        assert first.attempt_id
+        assert receipt_path.is_file()
+        with pytest.raises(run_pre_ga_release.ReleaseCliError, match="already_attempted"):
+            run_pre_ga_release._claim_rehearsal_attempt(
+                subject=subject,
+                selected_automation_manifest_digest="4" * 64,
+                selected_automation_attestation_digest="5" * 64,
+                ledger_alias="production-rehearsal-attempts-v1",
+                credential_fd=credential_fd,
+                ledger_root=tmp_path / "ledger",
+                started_at=datetime(2026, 8, 17, 0, 0, 1, tzinfo=timezone.utc),
+            )
+    finally:
+        os.close(credential_fd)
 
 
 def test_launch_verify_accepts_only_safe_passing_summary(tmp_path: Path) -> None:

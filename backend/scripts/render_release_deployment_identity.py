@@ -8,7 +8,12 @@ import json
 import os
 from pathlib import Path
 import re
+import sys
 from typing import Any
+
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
+if str(BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(BACKEND_ROOT))
 
 from app.release.contracts import DeployedArtifactIdentityV1
 from app.release.trust import ReleaseEvidenceSigner
@@ -92,6 +97,17 @@ def _extract_images(raw: Any) -> dict[str, str]:
             role = item.get("role") or item.get("service") or item.get("name")
             labels = item.get("Config", {}).get("Labels", {})
             tags = item.get("RepoTags", [])
+            exact_tag = tags[0] if isinstance(tags, list) and len(tags) == 1 else None
+            if isinstance(exact_tag, str):
+                if exact_tag.startswith("mindatlas-release-web:"):
+                    source["web"] = item
+                    continue
+                if exact_tag.startswith("mindatlas-release-backend:"):
+                    source["api"] = item
+                    source["assistant-worker"] = item
+                    continue
+                if exact_tag.startswith("mindatlas-release-scripted-provider:"):
+                    continue
             marker = " ".join(str(value) for value in (role, labels, tags)).lower()
             if "web" in marker or "frontend" in marker:
                 source["web"] = item

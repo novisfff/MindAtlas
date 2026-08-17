@@ -12,6 +12,10 @@ import sys
 import tarfile
 from typing import Any
 
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
+if str(BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(BACKEND_ROOT))
+
 from app.release.evidence import ReleaseEvidenceIntegrityError, verify_evidence_object
 from app.release.trust import ReleaseEvidenceTrustError, load_trust_set
 from app.schema.canonical import canonical_json_bytes
