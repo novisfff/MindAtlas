@@ -21,6 +21,23 @@ class DeploymentIdentityError(ValueError):
     pass
 
 
+def _write_identity_output(output_path: Path, payload: dict[str, Any]) -> None:
+    if output_path.exists() or output_path.is_symlink():
+        raise DeploymentIdentityError("deployment_identity_output_collision")
+    encoded = (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(output_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o444)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(encoded)
+    except OSError:
+        raise DeploymentIdentityError("deployment_identity_output_write_failed") from None
+    try:
+        output_path.chmod(0o444)
+    except OSError:
+        raise DeploymentIdentityError("deployment_identity_output_write_failed") from None
+
+
 def _read_json(path: Path) -> Any:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -45,9 +62,9 @@ def _image_digest(value: Any, *, role: str) -> str:
         digest = (
             value.get("imageDigest")
             or value.get("digest")
+            or value.get("Id")
             or value.get("RepoDigest")
             or value.get("RepoDigests")
-            or value.get("Id")
         )
         if isinstance(digest, list):
             digest = digest[0] if digest else None
@@ -164,9 +181,7 @@ def render(
     )
     signed = signer.sign_deployed_artifact_identity(identity)
     payload = signed.model_dump(mode="json", by_alias=True)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
-    output_path.chmod(0o444)
+    _write_identity_output(output_path, payload)
     return payload
 
 
@@ -212,9 +227,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             signed = signer.sign_deployed_artifact_identity(identity)
             payload = signed.model_dump(mode="json", by_alias=True)
-            args.output.parent.mkdir(parents=True, exist_ok=True)
-            args.output.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
-            args.output.chmod(0o444)
+            _write_identity_output(args.output, payload)
             print(json.dumps({"domain": payload["domain"], "keyId": payload["keyId"], "imageSetDigest": payload["identity"]["imageSetDigest"], "deployedArtifactSetDigest": payload["identity"]["deployedArtifactSetDigest"]}, separators=(",", ":")))
             return 0
         payload = render(

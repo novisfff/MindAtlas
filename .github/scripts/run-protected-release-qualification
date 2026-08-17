@@ -4,6 +4,11 @@ set -eu
 target_alias=${1:?target alias is required}
 source_revision=${2:?source revision is required}
 
+printf '%s\n' "$source_revision" | grep -Eq '^[0-9a-f]{40}$' || {
+  echo release_source_revision_invalid
+  exit 2
+}
+
 case "$target_alias" in
   *[!A-Za-z0-9_.:-]*|'')
     echo release_target_alias_invalid
@@ -19,6 +24,7 @@ esac
 : "${MINDATLAS_AUTOMATION_SIGNING_KEY_FD:?MINDATLAS_AUTOMATION_SIGNING_KEY_FD is required}"
 : "${MINDATLAS_RELEASE_TRUST_SET_FILE:?MINDATLAS_RELEASE_TRUST_SET_FILE is required}"
 : "${MINDATLAS_RELEASE_OCI_BUNDLE:?MINDATLAS_RELEASE_OCI_BUNDLE is required}"
+: "${MINDATLAS_RELEASE_DEPLOYMENT_IDENTITY_FILE:?MINDATLAS_RELEASE_DEPLOYMENT_IDENTITY_FILE is required}"
 : "${MINDATLAS_RELEASE_PROFILE_EXECUTOR:?MINDATLAS_RELEASE_PROFILE_EXECUTOR is required}"
 
 test -x "$MINDATLAS_RELEASE_PROFILE_EXECUTOR"
@@ -28,6 +34,8 @@ case "$MINDATLAS_RELEASE_PROFILE_EXECUTOR" in
 esac
 test ! -L "$MINDATLAS_RELEASE_PROFILE_EXECUTOR"
 test "$MINDATLAS_RELEASE_PROFILE_EXECUTOR" != "$(pwd)/.github/scripts/run-protected-release-qualification"
+test -f "$MINDATLAS_RELEASE_DEPLOYMENT_IDENTITY_FILE"
+test ! -L "$MINDATLAS_RELEASE_DEPLOYMENT_IDENTITY_FILE"
 export MINDATLAS_RELEASE_PROTECTED_RUNNER="$MINDATLAS_RELEASE_PROFILE_EXECUTOR"
 
 test "$(git rev-parse HEAD)" = "$source_revision"
@@ -40,6 +48,7 @@ cd backend
   --qualification-target "$MINDATLAS_QUALIFICATION_TARGET_FILE" \
   --target-provisioning-bundle "$MINDATLAS_TARGET_PROVISIONING_BUNDLE" \
   --signing-key-fd "$MINDATLAS_AUTOMATION_SIGNING_KEY_FD" \
+  --deployment-identity "$MINDATLAS_RELEASE_DEPLOYMENT_IDENTITY_FILE" \
   --trust-set "$MINDATLAS_RELEASE_TRUST_SET_FILE" \
   --oci-bundle "$MINDATLAS_RELEASE_OCI_BUNDLE" \
   --no-build

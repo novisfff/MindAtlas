@@ -18,8 +18,10 @@ from pathlib import Path
 import re
 import secrets
 import shutil
+import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -89,8 +91,8 @@ def _json_file(path: Path) -> Any:
         raise ReleaseCliError("release_json_input_invalid") from None
 
 
-def _require_fd(fd: int, *, code: str = "release_secret_fd_unavailable") -> None:
-    if fd < 0:
+def _require_fd(fd: int | None, *, code: str = "release_secret_fd_unavailable") -> None:
+    if not isinstance(fd, int) or isinstance(fd, bool) or fd < 0:
         raise ReleaseCliError(code)
     try:
         os.fstat(fd)
@@ -102,6 +104,18 @@ def _require_file(path: Path | None, *, code: str) -> Path:
     if not isinstance(path, Path) or not path.is_file():
         raise ReleaseCliError(code)
     return path
+
+
+def _require_regular_file(path: Path | None, *, code: str) -> Path:
+    required = _require_file(path, code=code)
+    if required.is_symlink():
+        raise ReleaseCliError(code)
+    try:
+        if not stat.S_ISREG(required.stat().st_mode):
+            raise ReleaseCliError(code)
+    except OSError:
+        raise ReleaseCliError(code) from None
+    return required
 
 
 def _require_safe_alias(value: str | None) -> str:
@@ -503,18 +517,27 @@ def prepare_profile(args: argparse.Namespace) -> dict[str, Any]:
         raise ReleaseCliError("release_evidence_kind_invalid")
     if args.run_dir.exists() or args.run_dir.is_symlink():
         raise ReleaseCliError("release_run_dir_must_not_exist")
-    _require_file(args.qualification_target, code="release_qualification_target_missing")
-    _require_file(args.target_provisioning_bundle, code="release_target_provisioning_bundle_missing")
+    _require_regular_file(args.qualification_target, code="release_qualification_target_missing")
+    _require_regular_file(
+        args.target_provisioning_bundle,
+        code="release_target_provisioning_bundle_missing",
+    )
     material = _validate_target_material(args.qualification_target, args.target_provisioning_bundle)
     _require_fd(args.signing_key_fd, code="release_signing_key_fd_unavailable")
-    _require_file(args.trust_set, code="release_trust_set_missing")
+    _require_regular_file(args.trust_set, code="release_trust_set_missing")
     oci_bundle = getattr(args, "oci_bundle", None)
     if oci_bundle is None:
         configured_bundle = os.environ.get("MINDATLAS_RELEASE_OCI_BUNDLE", "")
         oci_bundle = Path(configured_bundle) if configured_bundle else None
-    _require_file(oci_bundle, code="release_oci_bundle_missing")
-    if oci_bundle.is_symlink():
-        raise ReleaseCliError("release_oci_bundle_must_be_regular_file")
+    oci_bundle = _require_regular_file(oci_bundle, code="release_oci_bundle_missing")
+    deployment_identity = getattr(args, "deployment_identity", None)
+    if deployment_identity is None:
+        configured_identity = os.environ.get("MINDATLAS_RELEASE_DEPLOYMENT_IDENTITY_FILE", "")
+        deployment_identity = Path(configured_identity) if configured_identity else None
+    deployment_identity = _require_regular_file(
+        deployment_identity,
+        code="release_deployment_identity_missing",
+    )
     try:
         from app.release.trust import load_trust_set
 
@@ -523,6 +546,14 @@ def prepare_profile(args: argparse.Namespace) -> dict[str, Any]:
         raise ReleaseCliError("release_trust_set_invalid") from None
     if not bool(getattr(args, "no_build", False)):
         raise ReleaseCliError("release_profile_requires_no_build")
+    artifact_verification = verify_artifact(
+        argparse.Namespace(
+            deployment_identity=deployment_identity,
+            oci_bundle=oci_bundle,
+            trust_set=args.trust_set,
+            run_dir=None,
+        )
+    )
     automation_manifest_digest: str | None = None
     automation_attestation_digest: str | None = None
     if args.kind == "production_rehearsal":
@@ -543,10 +574,12 @@ def prepare_profile(args: argparse.Namespace) -> dict[str, Any]:
         automation_manifest_digest = automation_manifest.manifest_digest
         automation_attestation_digest = attestation_object_digest(automation_attestation)
         _require_safe_alias(getattr(args, "attempt_ledger_alias", None))
-        _require_fd(
-            int(getattr(args, "attempt_ledger_credential_fd", -1)),
-            code="release_attempt_ledger_credential_fd_unavailable",
-        )
+        raw_attempt_fd = getattr(args, "attempt_ledger_credential_fd", None)
+        try:
+            attempt_fd = int(raw_attempt_fd) if raw_attempt_fd is not None else -1
+        except (TypeError, ValueError):
+            raise ReleaseCliError("release_attempt_ledger_credential_fd_unavailable") from None
+        _require_fd(attempt_fd, code="release_attempt_ledger_credential_fd_unavailable")
     try:
         from app.release.scenarios import REQUIRED_ASSERTION_SET_DIGEST, SCENARIO_SET_DIGEST
         from scripts.lock_release_images import load_lock
@@ -566,9 +599,16 @@ def prepare_profile(args: argparse.Namespace) -> dict[str, Any]:
     shutil.copyfile(args.qualification_target, args.run_dir / "qualification-target.json")
     shutil.copyfile(args.target_provisioning_bundle, args.run_dir / "target-provisioning.bundle")
     shutil.copyfile(oci_bundle, args.run_dir / "release.oci.tar")
+    shutil.copyfile(deployment_identity, args.run_dir / "deployment-identity.json")
     shutil.copyfile(args.trust_set, args.run_dir / "trust-set.json")
-    for name in ("qualification-target.json", "target-provisioning.bundle", "release.oci.tar"):
+    for name in (
+        "qualification-target.json",
+        "target-provisioning.bundle",
+        "release.oci.tar",
+        "deployment-identity.json",
+    ):
         (args.run_dir / name).chmod(0o600)
+    (args.run_dir / "deployment-identity.json").chmod(0o444)
     (args.run_dir / "trust-set.json").chmod(0o644)
     state = {
         "schemaVersion": 1,
@@ -579,6 +619,7 @@ def prepare_profile(args: argparse.Namespace) -> dict[str, Any]:
         "targetFile": "qualification-target.json",
         "provisioningBundle": "target-provisioning.bundle",
         "trustSet": "trust-set.json",
+        "deploymentIdentity": "deployment-identity.json",
         "noBuild": True,
         "qualificationTargetDigest": material["targetDigest"],
         "initializationFixtureDigest": material["fixtureDigest"],
@@ -590,6 +631,9 @@ def prepare_profile(args: argparse.Namespace) -> dict[str, Any]:
         "trustSetDigest": _file_digest(args.trust_set),
         "ociBundle": "release.oci.tar",
         "ociBundleDigest": _file_digest(oci_bundle),
+        "deploymentIdentityDigest": _file_digest(deployment_identity),
+        "imageSetDigest": artifact_verification["imageSetDigest"],
+        "deployedArtifactSetDigest": artifact_verification["deployedArtifactSetDigest"],
     }
     if args.kind == "production_rehearsal":
         shutil.copyfile(args.automation_evidence, args.run_dir / "automation-evidence.json")
@@ -638,17 +682,38 @@ def run_profile(args: argparse.Namespace) -> dict[str, Any]:
         or trust_digest != state.get("trustSetDigest")
     ):
         raise ReleaseCliError("release_target_material_drift")
+    deployment_identity = _require_regular_file(
+        args.run_dir / str(state.get("deploymentIdentity", "deployment-identity.json")),
+        code="release_deployment_identity_missing",
+    )
+    if _file_digest(deployment_identity) != state.get("deploymentIdentityDigest"):
+        raise ReleaseCliError("release_deployment_identity_drift")
     supplied_oci = getattr(args, "oci_bundle", None)
     if supplied_oci is None:
         configured_bundle = os.environ.get("MINDATLAS_RELEASE_OCI_BUNDLE", "")
         supplied_oci = Path(configured_bundle) if configured_bundle else None
     if supplied_oci is None:
         supplied_oci = args.run_dir / str(state.get("ociBundle", "release.oci.tar"))
-    _require_file(supplied_oci, code="release_oci_bundle_missing")
-    if supplied_oci.is_symlink():
-        raise ReleaseCliError("release_oci_bundle_must_be_regular_file")
+    supplied_oci = _require_regular_file(supplied_oci, code="release_oci_bundle_missing")
     if _file_digest(supplied_oci) != state.get("ociBundleDigest"):
         raise ReleaseCliError("release_oci_bundle_drift")
+    try:
+        artifact_verification = verify_artifact(
+            argparse.Namespace(
+                deployment_identity=deployment_identity,
+                oci_bundle=supplied_oci,
+                trust_set=trust_path,
+                run_dir=None,
+            )
+        )
+    except ReleaseCliError:
+        raise ReleaseCliError("release_deployment_artifact_drift") from None
+    if (
+        artifact_verification["imageSetDigest"] != state.get("imageSetDigest")
+        or artifact_verification["deployedArtifactSetDigest"]
+        != state.get("deployedArtifactSetDigest")
+    ):
+        raise ReleaseCliError("release_deployment_artifact_drift")
     if state.get("kind") == "production_rehearsal":
         evidence_path = getattr(args, "automation_evidence", None)
         if evidence_path is None:
@@ -749,17 +814,42 @@ def verify_profile(args: argparse.Namespace) -> dict[str, Any]:
     # bundles are emitted below the protected `evidence/` directory so the two
     # immutable archives cannot be confused during offline verification.
     bundles = list(args.run_dir.glob("evidence/*.tar"))
-    trust_set = args.run_dir / str(state.get("trustSet", "trust-set.json"))
+    trust_set = _require_regular_file(
+        args.run_dir / str(state.get("trustSet", "trust-set.json")),
+        code="release_evidence_missing",
+    )
+    identity = _require_regular_file(
+        args.run_dir / str(state.get("deploymentIdentity", "deployment-identity.json")),
+        code="release_evidence_missing",
+    )
     oci_bundle = args.run_dir / str(state.get("ociBundle", "release.oci.tar"))
     if (
         len(evidence) != 1
         or len(bundles) != 1
-        or not trust_set.is_file()
+        or evidence[0].is_symlink()
+        or bundles[0].is_symlink()
         or not oci_bundle.is_file()
         or oci_bundle.is_symlink()
         or _file_digest(oci_bundle) != state.get("ociBundleDigest")
     ):
         raise ReleaseCliError("release_evidence_missing")
+    try:
+        artifact_verification = verify_artifact(
+            argparse.Namespace(
+                deployment_identity=identity,
+                oci_bundle=oci_bundle,
+                trust_set=trust_set,
+                run_dir=None,
+            )
+        )
+    except ReleaseCliError:
+        raise ReleaseCliError("release_deployment_artifact_drift") from None
+    if (
+        artifact_verification["imageSetDigest"] != state.get("imageSetDigest")
+        or artifact_verification["deployedArtifactSetDigest"]
+        != state.get("deployedArtifactSetDigest")
+    ):
+        raise ReleaseCliError("release_deployment_artifact_drift")
     try:
         from scripts.verify_release_attestation import verify
 
@@ -1006,6 +1096,802 @@ def compare_evidence(automation_path: Path, rehearsal_path: Path, trust_path: Pa
     }
 
 
+def _run_checked(
+    command: list[str],
+    *,
+    cwd: Path,
+    safe_code: str,
+    env: dict[str, str] | None = None,
+    timeout: int = 3600,
+) -> subprocess.CompletedProcess[str]:
+    """Run a build/inspection command without forwarding its output."""
+
+    try:
+        result = subprocess.run(
+            command,
+            cwd=str(cwd),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        raise ReleaseCliError(safe_code) from None
+    if result.returncode != 0:
+        raise ReleaseCliError(safe_code)
+    return result
+
+
+def _source_revision_is_clean(source_revision: str) -> None:
+    try:
+        revision = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(BACKEND_ROOT.parent),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=False,
+        )
+        status = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=str(BACKEND_ROOT.parent),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        raise ReleaseCliError("release_source_state_unavailable") from None
+    if revision.returncode != 0 or revision.stdout.strip() != source_revision:
+        raise ReleaseCliError("release_source_revision_mismatch")
+    if status.returncode != 0 or status.stdout:
+        raise ReleaseCliError("release_source_tree_dirty")
+
+
+def _frontend_content_digest() -> str:
+    frontend_root = BACKEND_ROOT.parent / "frontend"
+    npm = shutil.which("npm")
+    node = shutil.which("node")
+    digest_script = frontend_root / "scripts" / "compute-build-content-digest.mjs"
+    if npm is None or node is None or not digest_script.is_file():
+        raise ReleaseCliError("release_frontend_build_tool_unavailable")
+    _run_checked([npm, "ci"], cwd=frontend_root, safe_code="release_frontend_build_failed")
+    _run_checked([npm, "run", "build"], cwd=frontend_root, safe_code="release_frontend_build_failed")
+    result = _run_checked(
+        [node, str(digest_script), str(frontend_root / "dist")],
+        cwd=frontend_root,
+        safe_code="release_frontend_digest_failed",
+    )
+    digest = result.stdout.strip()
+    if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        raise ReleaseCliError("release_frontend_digest_invalid")
+    return digest
+
+
+def _deployment_signing_inputs(args: argparse.Namespace) -> tuple[int, str]:
+    raw_fd = getattr(args, "signing_key_fd", None)
+    if raw_fd is None:
+        raw_fd = os.environ.get("MINDATLAS_DEPLOYMENT_SIGNING_KEY_FD", "")
+    try:
+        fd = int(raw_fd)
+    except (TypeError, ValueError):
+        raise ReleaseCliError("release_deployment_signing_fd_unavailable") from None
+    _require_fd(fd, code="release_deployment_signing_fd_unavailable")
+    key_id = getattr(args, "deployment_key_id", None) or os.environ.get(
+        "MINDATLAS_DEPLOYMENT_SIGNING_KEY_ID", ""
+    )
+    if not isinstance(key_id, str) or _SAFE_ID.fullmatch(key_id) is None:
+        raise ReleaseCliError("release_deployment_key_id_invalid")
+    return fd, key_id
+
+
+def _write_private_output(path: Path, data: bytes, *, mode: int = 0o600) -> None:
+    if path.exists() or path.is_symlink():
+        raise ReleaseCliError("release_artifact_output_collision")
+    path.write_bytes(data)
+    path.chmod(mode)
+
+
+def build_artifact(args: argparse.Namespace) -> dict[str, Any]:
+    """Build and seal the exact application image bundle once."""
+
+    source_revision = str(getattr(args, "source_revision", ""))
+    if re.fullmatch(r"[0-9a-f]{40}", source_revision) is None:
+        raise ReleaseCliError("release_source_revision_invalid")
+    if bool(getattr(args, "no_build", False)):
+        raise ReleaseCliError("release_artifact_build_requires_build")
+    output_dir = getattr(args, "output_dir", None)
+    if not isinstance(output_dir, Path) or output_dir.exists():
+        raise ReleaseCliError("release_artifact_output_dir_must_not_exist")
+    docker = shutil.which("docker")
+    if docker is None:
+        raise ReleaseCliError("release_artifact_docker_unavailable")
+    _source_revision_is_clean(source_revision)
+    signing_fd, key_id = _deployment_signing_inputs(args)
+    frontend_digest = _frontend_content_digest()
+    from app.release.generated_lock_digests import (
+        API_WORKER_LOCK_SHA256,
+        DEPENDENCY_LOCK_SET_SHA256,
+        PARSE_WORKER_LOCK_SHA256,
+    )
+
+    output_dir.mkdir(parents=True, mode=0o700)
+    tag_suffix = source_revision
+    backend_tag = f"mindatlas-release-backend:{tag_suffix}"
+    scripted_provider_tag = f"mindatlas-release-scripted-provider:{tag_suffix}"
+    web_tag = f"mindatlas-release-web:{tag_suffix}"
+    common_args = [
+        "--platform",
+        "linux/amd64",
+        "--load",
+        "--build-arg",
+        f"APP_BUILD_REVISION={source_revision}",
+        "--build-arg",
+        f"API_WORKER_LOCK_SHA256={API_WORKER_LOCK_SHA256}",
+        "--build-arg",
+        f"PARSE_WORKER_LOCK_SHA256={PARSE_WORKER_LOCK_SHA256}",
+        "--build-arg",
+        f"DEPENDENCY_LOCK_SET_SHA256={DEPENDENCY_LOCK_SET_SHA256}",
+    ]
+    _run_checked(
+        [docker, "buildx", "build", *common_args, "--target", "runtime", "--tag", backend_tag, str(BACKEND_ROOT)],
+        cwd=BACKEND_ROOT.parent,
+        safe_code="release_backend_image_build_failed",
+    )
+    _run_checked(
+        [docker, "buildx", "build", *common_args, "--target", "scripted-provider", "--tag", scripted_provider_tag, str(BACKEND_ROOT)],
+        cwd=BACKEND_ROOT.parent,
+        safe_code="release_scripted_provider_image_build_failed",
+    )
+    _run_checked(
+        [
+            docker,
+            "buildx",
+            "build",
+            "--platform",
+            "linux/amd64",
+            "--load",
+            "--build-arg",
+            f"APP_BUILD_REVISION={source_revision}",
+            "--build-arg",
+            f"FRONTEND_BUILD_CONTENT_DIGEST={frontend_digest}",
+            "--tag",
+            web_tag,
+            str(BACKEND_ROOT.parent / "frontend"),
+        ],
+        cwd=BACKEND_ROOT.parent,
+        safe_code="release_web_image_build_failed",
+    )
+    bundle_path = output_dir / "release-application-images.tar"
+    inspection_path = output_dir / "release-image-inspection.json"
+    identity_path = output_dir / "deployment-identity.json"
+    _run_checked(
+        [docker, "save", "--output", str(bundle_path), backend_tag, scripted_provider_tag, web_tag],
+        cwd=BACKEND_ROOT.parent,
+        safe_code="release_oci_bundle_export_failed",
+    )
+    inspection = _run_checked(
+        [docker, "image", "inspect", backend_tag, scripted_provider_tag, web_tag],
+        cwd=BACKEND_ROOT.parent,
+        safe_code="release_image_inspection_failed",
+    )
+    try:
+        raw_inspection = json.loads(inspection.stdout)
+    except (UnicodeError, ValueError):
+        raise ReleaseCliError("release_image_inspection_invalid") from None
+    try:
+        from scripts.project_release_image_inspection import project
+
+        normalized_inspection = project(raw_inspection, build_revision=source_revision)
+    except ValueError as exc:
+        raise ReleaseCliError(getattr(exc, "safe_code", "release_image_inspection_invalid")) from None
+    _write_private_output(inspection_path, _canonical(normalized_inspection) + b"\n")
+    provider_entry = next(
+        (
+            item
+            for item in normalized_inspection
+            if item["RepoTags"][0] == scripted_provider_tag
+        ),
+        None,
+    )
+    if not isinstance(provider_entry, dict) or not isinstance(provider_entry.get("imageDigest"), str):
+        raise ReleaseCliError("release_scripted_provider_image_identity_missing")
+    provider_digest = str(provider_entry["imageDigest"]).removeprefix("sha256:")
+    from scripts.render_release_deployment_identity import render
+
+    render(
+        input_path=inspection_path,
+        output_path=identity_path,
+        build_revision=source_revision,
+        dependency_lock_set_digest=DEPENDENCY_LOCK_SET_SHA256,
+        key_id=key_id,
+        signing_key_fd=signing_fd,
+    )
+    bundle_digest = _file_digest(bundle_path)
+    identity_payload = _json_file(identity_path)
+    identity = identity_payload.get("identity") if isinstance(identity_payload, dict) else None
+    if not isinstance(identity, dict):
+        raise ReleaseCliError("release_deployment_identity_invalid")
+    state = {
+        "schemaVersion": 1,
+        "sourceRevision": source_revision,
+        "platform": "linux/amd64",
+        "applicationImages": [backend_tag, scripted_provider_tag, web_tag],
+        "bundleFile": bundle_path.name,
+        "bundleDigest": bundle_digest,
+        "deploymentIdentityFile": identity_path.name,
+        "imageSetDigest": identity.get("imageSetDigest"),
+        "deployedArtifactSetDigest": identity.get("deployedArtifactSetDigest"),
+        "dependencyLockSetDigest": DEPENDENCY_LOCK_SET_SHA256,
+        "frontendBuildContentDigest": frontend_digest,
+        "scriptedProviderImageDigest": provider_digest,
+    }
+    _write_private_output(output_dir / "artifact-state.json", _canonical(state) + b"\n")
+    identity_path.chmod(0o444)
+    return {
+        "state": "artifact-built",
+        "sourceRevision": source_revision,
+        "bundleDigest": bundle_digest,
+        "imageSetDigest": identity.get("imageSetDigest"),
+        "deployedArtifactSetDigest": identity.get("deployedArtifactSetDigest"),
+        "scriptedProviderImageDigest": provider_digest,
+    }
+
+
+def _validate_archive_bundle(path: Path) -> dict[str, Any]:
+    if path.is_symlink():
+        raise ReleaseCliError("release_oci_bundle_must_be_regular_file")
+    members = []
+    try:
+        with tarfile.open(path, mode="r") as archive:
+            for member in archive.getmembers():
+                name = member.name
+                if name.startswith("/") or ".." in Path(name).parts:
+                    raise ReleaseCliError("release_oci_bundle_member_invalid")
+                if member.issym() or member.islnk() or not (member.isfile() or member.isdir()):
+                    raise ReleaseCliError("release_oci_bundle_member_invalid")
+                members.append(name)
+    except ReleaseCliError:
+        raise
+    except (OSError, tarfile.TarError):
+        raise ReleaseCliError("release_oci_bundle_invalid") from None
+    if not members or "manifest.json" not in members:
+        raise ReleaseCliError("release_oci_bundle_manifest_missing")
+    return {"memberCount": len(members), "bundleDigest": _file_digest(path)}
+
+
+def _validate_oci_image_bundle(path: Path, identity: Any) -> dict[str, Any]:
+    """Verify a Docker-save archive is the exact three-image release export."""
+
+    if path.is_symlink():
+        raise ReleaseCliError("release_oci_bundle_must_be_regular_file")
+    try:
+        with tarfile.open(path, mode="r") as archive:
+            members = archive.getmembers()
+            by_name: dict[str, tarfile.TarInfo] = {}
+            for member in members:
+                if (
+                    member.name in by_name
+                    or member.name.startswith("/")
+                    or ".." in Path(member.name).parts
+                    or member.issym()
+                    or member.islnk()
+                    or not (member.isfile() or member.isdir())
+                ):
+                    raise ReleaseCliError("release_oci_bundle_member_invalid")
+                by_name[member.name] = member
+            manifest_member = by_name.get("manifest.json")
+            if manifest_member is None:
+                raise ReleaseCliError("release_oci_bundle_manifest_missing")
+            handle = archive.extractfile(manifest_member)
+            if handle is None:
+                raise ReleaseCliError("release_oci_bundle_manifest_invalid")
+            try:
+                manifest = json.loads(handle.read().decode("utf-8"))
+            except (UnicodeError, ValueError):
+                raise ReleaseCliError("release_oci_bundle_manifest_invalid") from None
+            if not isinstance(manifest, list):
+                raise ReleaseCliError("release_oci_bundle_image_inventory_invalid")
+            expected_tags = {
+                f"mindatlas-release-backend:{identity.build_revision}": "backend",
+                f"mindatlas-release-scripted-provider:{identity.build_revision}": "scripted-provider",
+                f"mindatlas-release-web:{identity.build_revision}": "web",
+            }
+            images: dict[str, dict[str, Any]] = {}
+            for item in manifest:
+                if not isinstance(item, dict):
+                    raise ReleaseCliError("release_oci_bundle_image_inventory_invalid")
+                tags = item.get("RepoTags")
+                if not isinstance(tags, list) or len(tags) != 1 or tags[0] not in expected_tags:
+                    raise ReleaseCliError("release_oci_bundle_image_inventory_invalid")
+                tag = tags[0]
+                role = expected_tags[tag]
+                if role in images:
+                    raise ReleaseCliError("release_oci_bundle_image_inventory_invalid")
+                config_name = item.get("Config")
+                if not isinstance(config_name, str) or re.fullmatch(r"[0-9a-f]{64}\.json", config_name) is None:
+                    raise ReleaseCliError("release_oci_bundle_config_invalid")
+                config_member = by_name.get(config_name)
+                if config_member is None:
+                    raise ReleaseCliError("release_oci_bundle_config_missing")
+                config_handle = archive.extractfile(config_member)
+                if config_handle is None:
+                    raise ReleaseCliError("release_oci_bundle_config_invalid")
+                config_bytes = config_handle.read()
+                config_digest = hashlib.sha256(config_bytes).hexdigest()
+                if config_name != f"{config_digest}.json":
+                    raise ReleaseCliError("release_oci_bundle_config_digest_invalid")
+                try:
+                    config = json.loads(config_bytes.decode("utf-8"))
+                except (UnicodeError, ValueError):
+                    raise ReleaseCliError("release_oci_bundle_config_invalid") from None
+                labels = config.get("config", {}).get("Labels", {}) if isinstance(config, dict) else {}
+                if not isinstance(labels, dict):
+                    raise ReleaseCliError("release_oci_bundle_labels_invalid")
+                if (
+                    labels.get("org.opencontainers.image.revision") != identity.build_revision
+                    or labels.get("io.mindatlas.platform") != "linux/amd64"
+                ):
+                    raise ReleaseCliError("release_oci_bundle_identity_label_mismatch")
+                if role in {"backend", "scripted-provider"} and labels.get(
+                    "io.mindatlas.dependency-lock-set-sha256"
+                ) != identity.dependency_lock_set_digest:
+                    raise ReleaseCliError("release_oci_bundle_lock_label_mismatch")
+                if role == "web" and re.fullmatch(
+                    r"[0-9a-f]{64}",
+                    str(labels.get("io.mindatlas.frontend-build-content-sha256", "")),
+                ) is None:
+                    raise ReleaseCliError("release_oci_bundle_frontend_label_invalid")
+                layers = item.get("Layers")
+                if not isinstance(layers, list) or not layers:
+                    raise ReleaseCliError("release_oci_bundle_layers_invalid")
+                for layer_name in layers:
+                    if (
+                        not isinstance(layer_name, str)
+                        or layer_name not in by_name
+                        or not by_name[layer_name].isfile()
+                    ):
+                        raise ReleaseCliError("release_oci_bundle_layer_missing")
+                images[role] = {
+                    "configDigest": config_digest,
+                    "layerCount": len(layers),
+                }
+            if set(images) != {"backend", "scripted-provider", "web"}:
+                raise ReleaseCliError("release_oci_bundle_image_inventory_invalid")
+            if (
+                identity.api_image_digest != images["backend"]["configDigest"]
+                or identity.assistant_worker_image_digest != images["backend"]["configDigest"]
+                or identity.web_image_digest != images["web"]["configDigest"]
+            ):
+                raise ReleaseCliError("release_oci_bundle_identity_digest_mismatch")
+            return {
+                "memberCount": len(members),
+                "bundleDigest": _file_digest(path),
+                "images": images,
+            }
+    except ReleaseCliError:
+        raise
+    except (OSError, tarfile.TarError):
+        raise ReleaseCliError("release_oci_bundle_invalid") from None
+
+
+def verify_artifact(args: argparse.Namespace) -> dict[str, Any]:
+    deployment_identity = _require_regular_file(
+        args.deployment_identity,
+        code="release_deployment_identity_missing",
+    )
+    oci_bundle = _require_regular_file(args.oci_bundle, code="release_oci_bundle_missing")
+    trust_path = getattr(args, "trust_set", None)
+    if trust_path is None:
+        configured = os.environ.get("MINDATLAS_RELEASE_TRUST_SET_FILE", "")
+        trust_path = Path(configured) if configured else None
+    trust_path = _require_regular_file(trust_path, code="release_trust_set_missing")
+    try:
+        from app.release.trust import load_trust_set, verify_deployed_artifact_identity
+
+        identity_payload = _json_file(deployment_identity)
+        identity = verify_deployed_artifact_identity(identity_payload, load_trust_set(trust_path))
+    except Exception:
+        raise ReleaseCliError("release_deployment_identity_verification_failed") from None
+    archive = _validate_oci_image_bundle(oci_bundle, identity)
+    run_dir = getattr(args, "run_dir", None)
+    if isinstance(run_dir, Path):
+        state_path = run_dir / "artifact-state.json"
+        if state_path.is_file():
+            state = _json_file(state_path)
+            if not isinstance(state, dict) or state.get("bundleDigest") != archive["bundleDigest"]:
+                raise ReleaseCliError("release_artifact_state_mismatch")
+            if state.get("deployedArtifactSetDigest") != identity.deployed_artifact_set_digest:
+                raise ReleaseCliError("release_artifact_state_mismatch")
+            if state.get("scriptedProviderImageDigest") != archive["images"]["scripted-provider"]["configDigest"]:
+                raise ReleaseCliError("release_artifact_state_mismatch")
+    return {
+        "state": "artifact-verified",
+        "bundleDigest": archive["bundleDigest"],
+        "memberCount": archive["memberCount"],
+        "imageSetDigest": identity.image_set_digest,
+        "deployedArtifactSetDigest": identity.deployed_artifact_set_digest,
+        "scriptedProviderImageDigest": archive["images"]["scripted-provider"]["configDigest"],
+    }
+
+
+def _consume_descriptor(fd: int, *, code: str) -> None:
+    """Validate an inherited credential descriptor without reading its secret."""
+
+    _require_fd(fd, code=code)
+    try:
+        os.fstat(fd)
+    except OSError:
+        raise ReleaseCliError(code) from None
+
+
+def _conditional_create(path: Path, content: bytes, *, root: Path) -> bool:
+    """Create an append-only object, accepting only an identical replay."""
+
+    if root.is_symlink() or path.is_symlink():
+        raise ReleaseCliError("release_promotion_object_collision")
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        raise ReleaseCliError("release_promotion_object_collision") from None
+    current = root
+    if current.exists() and not current.is_dir():
+        raise ReleaseCliError("release_promotion_object_collision")
+    current.mkdir(parents=True, exist_ok=True)
+    for part in relative.parts[:-1]:
+        current = current / part
+        if current.is_symlink() or (current.exists() and not current.is_dir()):
+            raise ReleaseCliError("release_promotion_object_collision")
+        current.mkdir(exist_ok=True)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o444)
+    except FileExistsError:
+        try:
+            existing = path.read_bytes()
+        except OSError:
+            raise ReleaseCliError("release_promotion_object_unreadable") from None
+        if existing != content:
+            raise ReleaseCliError("release_promotion_object_collision")
+        return True
+    except OSError:
+        raise ReleaseCliError("release_promotion_object_write_failed") from None
+    try:
+        view = memoryview(content)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise OSError("short object write")
+            view = view[written:]
+        os.fchmod(fd, 0o444)
+    except OSError:
+        raise ReleaseCliError("release_promotion_object_write_failed") from None
+    finally:
+        os.close(fd)
+    return False
+
+
+def _read_bundle_artifacts(bundle_path: Path, manifest: Any) -> dict[str, bytes]:
+    expected = {item.sha256_digest: item for item in manifest.artifact_refs}
+    seen: dict[str, bytes] = {}
+    try:
+        with tarfile.open(bundle_path, mode="r") as archive:
+            for member in archive.getmembers():
+                if (
+                    not member.isfile()
+                    or member.issym()
+                    or member.islnk()
+                    or re.fullmatch(r"artifacts/[0-9a-f]{64}", member.name) is None
+                ):
+                    raise ReleaseCliError("release_artifact_bundle_member_invalid")
+                digest = member.name.split("/", 1)[1]
+                if digest in seen or digest not in expected:
+                    raise ReleaseCliError("release_artifact_bundle_inventory_invalid")
+                handle = archive.extractfile(member)
+                if handle is None:
+                    raise ReleaseCliError("release_artifact_bundle_member_unreadable")
+                content = handle.read()
+                if hashlib.sha256(content).hexdigest() != digest or len(content) != expected[digest].byte_size:
+                    raise ReleaseCliError("release_artifact_bundle_digest_invalid")
+                seen[digest] = content
+    except ReleaseCliError:
+        raise
+    except (OSError, tarfile.TarError):
+        raise ReleaseCliError("release_artifact_bundle_invalid") from None
+    if set(seen) != set(expected):
+        raise ReleaseCliError("release_artifact_bundle_incomplete")
+    return seen
+
+
+def promote_evidence(args: argparse.Namespace) -> dict[str, Any]:
+    """Promote verified evidence into an append-only, code-owned target root.
+
+    Production binds ``MINDATLAS_RELEASE_PROMOTION_ROOT`` to the reviewed
+    release-evidence bucket mount. The CLI accepts only the safe target alias;
+    endpoint, bucket, and object prefixes are not caller inputs.
+    """
+
+    evidence_path = _require_regular_file(args.evidence, code="release_evidence_missing")
+    bundle_path = _require_regular_file(args.artifact_bundle, code="release_artifact_bundle_missing")
+    trust_path = _require_regular_file(args.trust_set, code="release_trust_set_missing")
+    target_alias = _require_safe_alias(args.target_alias)
+    raw_fd = getattr(args, "destination_credential_fd", None)
+    if raw_fd is None:
+        raw_fd = getattr(args, "credential_fd", None)
+    if raw_fd is None:
+        raw_fd = os.environ.get("MINDATLAS_RELEASE_PROMOTION_CREDENTIAL_FD", "")
+    try:
+        credential_fd = int(raw_fd)
+    except (TypeError, ValueError):
+        raise ReleaseCliError("release_promotion_credential_fd_unavailable") from None
+    _consume_descriptor(credential_fd, code="release_promotion_credential_fd_unavailable")
+    root_value = os.environ.get("MINDATLAS_RELEASE_PROMOTION_ROOT", "")
+    root = Path(root_value) if root_value else None
+    if root is None or not root.is_absolute() or root.is_symlink():
+        raise ReleaseCliError("release_promotion_target_unavailable")
+    if root.exists() and not root.is_dir():
+        raise ReleaseCliError("release_promotion_target_unavailable")
+    try:
+        from app.release.evidence import verify_evidence_object
+        from app.release.trust import attestation_object_digest, load_trust_set
+        from scripts.verify_release_attestation import verify
+
+        summary, exit_code = verify(evidence_path, bundle_path, trust_path)
+        payload = _json_file(evidence_path)
+        manifest, attestation = verify_evidence_object(payload, load_trust_set(trust_path))
+    except Exception:
+        raise ReleaseCliError("release_evidence_verification_failed") from None
+    if exit_code != 0 or summary.get("failedAssertions", 1) != 0:
+        raise ReleaseCliError("release_evidence_assertions_failed")
+    requested_kind = getattr(args, "kind", None)
+    if requested_kind is not None and requested_kind != manifest.evidence_kind:
+        raise ReleaseCliError("release_evidence_kind_mismatch")
+    artifact_contents = _read_bundle_artifacts(bundle_path, manifest)
+    target_root = root / target_alias
+    if target_root.exists() and target_root.is_symlink():
+        raise ReleaseCliError("release_promotion_target_unavailable")
+    try:
+        target_root.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        raise ReleaseCliError("release_promotion_target_unavailable") from None
+    artifact_idempotent = True
+    for digest, content in sorted(artifact_contents.items()):
+        replayed = _conditional_create(
+            target_root / "release-evidence-artifacts" / "v1" / digest[:2] / digest,
+            content,
+            root=target_root,
+        )
+        artifact_idempotent = artifact_idempotent and replayed
+    evidence_content = evidence_path.read_bytes()
+    replayed_evidence = _conditional_create(
+        target_root
+        / "release-evidence"
+        / "v1"
+        / manifest.evidence_kind
+        / manifest.manifest_digest[:2]
+        / f"{manifest.manifest_digest}.json",
+        evidence_content,
+        root=target_root,
+    )
+    return {
+        "state": "evidence-promoted",
+        "targetAlias": target_alias,
+        "evidenceKind": manifest.evidence_kind,
+        "manifestDigest": manifest.manifest_digest,
+        "attestationDigest": attestation_object_digest(attestation),
+        "artifactAggregateDigest": manifest.artifact_aggregate_digest,
+        "artifactCount": len(artifact_contents),
+        "idempotent": artifact_idempotent and replayed_evidence,
+    }
+
+
+_CLONE_NEGATIVE_CASES = frozenset(
+    {
+        "fileOutputRefused",
+        "remoteDestinationRefused",
+        "nonemptyDestinationRefused",
+        "launchedSourceRefused",
+        "legacyRevisionRefused",
+    }
+)
+
+
+def _validate_clone_result(path: Path, *, target_digest: str, bundle_digest: str) -> dict[str, Any]:
+    if path.is_symlink() or not path.is_file():
+        raise ReleaseCliError("release_clone_result_missing")
+    try:
+        raw = _json_file(path)
+    except ReleaseCliError:
+        raise ReleaseCliError("release_clone_result_invalid") from None
+    if not isinstance(raw, dict):
+        raise ReleaseCliError("release_clone_result_invalid")
+    required = {
+        "schemaVersion",
+        "state",
+        "sourceDeploymentClass",
+        "sourceSchemaRevision",
+        "sourceControlRevision",
+        "sourceLaunched",
+        "qualificationTargetDigest",
+        "ociBundleDigest",
+        "destroyed",
+        "cases",
+    }
+    if set(raw) != required:
+        raise ReleaseCliError("release_clone_result_invalid")
+    if (
+        raw.get("schemaVersion") != 1
+        or raw.get("state") != "negative-acceptance-passed"
+        or raw.get("sourceDeploymentClass") != "production"
+        or raw.get("sourceSchemaRevision") != "pre_ga_v1_0002"
+        or not isinstance(raw.get("sourceControlRevision"), int)
+        or isinstance(raw.get("sourceControlRevision"), bool)
+        or raw.get("sourceControlRevision") != 0
+        or raw.get("sourceLaunched") is not False
+        or raw.get("qualificationTargetDigest") != target_digest
+        or raw.get("ociBundleDigest") != bundle_digest
+        or raw.get("destroyed") is not True
+    ):
+        raise ReleaseCliError("release_clone_result_invalid")
+    cases = raw.get("cases")
+    if not isinstance(cases, dict) or set(cases) != _CLONE_NEGATIVE_CASES or any(
+        value is not True for value in cases.values()
+    ):
+        raise ReleaseCliError("release_clone_negative_matrix_incomplete")
+    return raw
+
+
+def run_production_clone(args: argparse.Namespace) -> dict[str, Any]:
+    """Run the destructive-looking clone harness only through its protected boundary.
+
+    The host CLI freezes all public inputs and verifies the source/evidence
+    material before delegating database access to a separately installed
+    executor. The executor receives the source URL only through an inherited
+    descriptor and must return a fixed, safe result after destroying its
+    disposable destination. It never receives a destination URL or filename.
+    """
+
+    run_dir = getattr(args, "run_dir", None)
+    if (
+        not isinstance(run_dir, Path)
+        or not run_dir.is_absolute()
+        or run_dir.exists()
+        or run_dir.is_symlink()
+        or not run_dir.parent.is_dir()
+    ):
+        raise ReleaseCliError("release_clone_run_dir_must_not_exist")
+    source_fd = getattr(args, "source_url_fd", None)
+    _require_fd(source_fd, code="release_source_url_fd_unavailable")
+    target_path = _require_regular_file(
+        getattr(args, "qualification_target", None),
+        code="release_qualification_target_missing",
+    )
+    automation_path = _require_regular_file(
+        getattr(args, "automation_evidence", None),
+        code="release_automation_evidence_missing",
+    )
+    rehearsal_path = _require_regular_file(
+        getattr(args, "rehearsal_evidence", None),
+        code="release_rehearsal_evidence_missing",
+    )
+    bundle_path = _require_regular_file(
+        getattr(args, "oci_bundle", None),
+        code="release_oci_bundle_missing",
+    )
+    if any(path.is_symlink() for path in (target_path, automation_path, rehearsal_path, bundle_path)):
+        raise ReleaseCliError("release_clone_input_must_be_regular_file")
+    trust_path = getattr(args, "trust_set", None)
+    if trust_path is None:
+        configured = os.environ.get("MINDATLAS_RELEASE_TRUST_SET_FILE", "")
+        trust_path = Path(configured) if configured else None
+    trust_path = _require_regular_file(trust_path, code="release_trust_set_missing")
+    try:
+        target = verify_target(target_path)
+        target_digest = target["targetDigest"]
+        _verified_manifest(automation_path, trust_path)
+        _verified_manifest(rehearsal_path, trust_path)
+        compare_evidence(automation_path, rehearsal_path, trust_path)
+        archive = _validate_archive_bundle(bundle_path)
+        bundle_digest = archive["bundleDigest"]
+    except ReleaseCliError:
+        raise
+    except Exception:
+        raise ReleaseCliError("release_clone_input_verification_failed") from None
+
+    executor_value = os.environ.get("MINDATLAS_RELEASE_CLONE_EXECUTOR", "")
+    executor = Path(executor_value) if executor_value else None
+    if (
+        executor is None
+        or not executor.is_absolute()
+        or executor.is_symlink()
+        or not executor.is_file()
+        or not os.access(executor, os.X_OK)
+    ):
+        raise ReleaseCliError("release_clone_requires_protected_runner")
+    try:
+        if executor.resolve() == Path(__file__).resolve():
+            raise ReleaseCliError("release_clone_protected_runner_self_reference")
+    except OSError:
+        raise ReleaseCliError("release_clone_requires_protected_runner") from None
+
+    child_env = dict(os.environ)
+    for name in tuple(child_env):
+        upper = name.upper()
+        if name.endswith("_FD") or any(
+            marker in upper
+            for marker in (
+                "PASSWORD",
+                "TOKEN",
+                "SECRET",
+                "PRIVATE_KEY",
+                "API_KEY",
+                "KEY_B64",
+                "CREDENTIAL",
+                "DATABASE_URL",
+            )
+        ):
+            child_env.pop(name, None)
+    child_env.update(
+        {
+            "MINDATLAS_RELEASE_CLONE_RUN_DIR": str(run_dir),
+            "MINDATLAS_RELEASE_CLONE_TARGET_FILE": str(target_path),
+            "MINDATLAS_RELEASE_CLONE_AUTOMATION_EVIDENCE": str(automation_path),
+            "MINDATLAS_RELEASE_CLONE_REHEARSAL_EVIDENCE": str(rehearsal_path),
+            "MINDATLAS_RELEASE_CLONE_OCI_BUNDLE": str(bundle_path),
+            "MINDATLAS_RELEASE_CLONE_TRUST_SET": str(trust_path),
+            "MINDATLAS_RELEASE_CLONE_TARGET_DIGEST": target_digest,
+            "MINDATLAS_RELEASE_CLONE_OCI_BUNDLE_DIGEST": bundle_digest,
+        }
+    )
+    command = [
+        str(executor),
+        "--source-database-url-fd",
+        str(source_fd),
+        "--run-dir",
+        str(run_dir),
+        "--qualification-target",
+        str(target_path),
+        "--automation-evidence",
+        str(automation_path),
+        "--rehearsal-evidence",
+        str(rehearsal_path),
+        "--oci-bundle",
+        str(bundle_path),
+        "--trust-set",
+        str(trust_path),
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            cwd=str(BACKEND_ROOT.parent),
+            env=child_env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=2 * 60 * 60,
+            check=False,
+            pass_fds=(source_fd,),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        raise ReleaseCliError("release_clone_protected_runner_failed") from None
+    if result.returncode != 0:
+        raise ReleaseCliError("release_clone_protected_runner_failed")
+    summary = _validate_clone_result(
+        run_dir / "clone-negative-acceptance.json",
+        target_digest=target_digest,
+        bundle_digest=bundle_digest,
+    )
+    return {
+        "state": summary["state"],
+        "qualificationTargetDigest": target_digest,
+        "ociBundleDigest": bundle_digest,
+        "destroyed": True,
+        "cases": {name: True for name in sorted(_CLONE_NEGATIVE_CASES)},
+    }
+
+
 def verify_evidence_summary(
     *,
     summary_path: Path,
@@ -1022,9 +1908,9 @@ def verify_evidence_summary(
         raise ReleaseCliError("release_evidence_summary_invalid") from None
     if evidence_path is None or artifact_bundle is None or trust_set is None:
         return {"state": "summary-shape-verified", "evidenceKind": summary.evidence_kind}
-    _require_file(evidence_path, code="release_evidence_missing")
-    _require_file(artifact_bundle, code="release_artifact_bundle_missing")
-    _require_file(trust_set, code="release_trust_set_missing")
+    _require_regular_file(evidence_path, code="release_evidence_missing")
+    _require_regular_file(artifact_bundle, code="release_artifact_bundle_missing")
+    _require_regular_file(trust_set, code="release_trust_set_missing")
     try:
         from scripts.verify_release_attestation import verify
         from app.release.trust import attestation_object_digest
@@ -1054,6 +1940,179 @@ def verify_evidence_summary(
         if actual.get(key) != value:
             raise ReleaseCliError("release_evidence_summary_mismatch")
     return {"state": "summary-verified", "evidenceKind": summary.evidence_kind}
+
+
+def verify_launch_summary(summary_path: Path) -> dict[str, Any]:
+    """Validate the repository-safe launch projection without asserting live state."""
+
+    summary_path = _require_regular_file(summary_path, code="release_launch_summary_missing")
+    from app.release.contracts import SafeReleaseEvidenceSummaryV1
+
+    try:
+        summary = SafeReleaseEvidenceSummaryV1.model_validate(_json_file(summary_path))
+    except (ReleaseCliError, ValueError):
+        raise ReleaseCliError("release_launch_summary_invalid") from None
+    if (
+        summary.assertion_failed != 0
+        or summary.offline_verification != "passed"
+        or summary.target_container_verification != "passed"
+        or summary.soak_claimed is not False
+    ):
+        raise ReleaseCliError("release_launch_summary_invalid")
+    return {
+        "state": "launch-summary-verified",
+        "evidenceKind": summary.evidence_kind,
+        "releaseSourceRevision": summary.release_source_revision,
+        "qualificationTargetDigest": summary.qualification_target_digest,
+        "manifestDigest": summary.manifest_digest,
+        "attestationDigest": summary.attestation_digest,
+        "assertionPassed": summary.assertion_passed,
+    }
+
+
+def _validate_live_launch_result(path: Path, *, target_digest: str) -> dict[str, Any]:
+    if path.is_symlink() or not path.is_file():
+        raise ReleaseCliError("release_launch_live_result_missing")
+    try:
+        raw = _json_file(path)
+    except ReleaseCliError:
+        raise ReleaseCliError("release_launch_live_result_invalid") from None
+    if not isinstance(raw, dict):
+        raise ReleaseCliError("release_launch_live_result_invalid")
+    required = {
+        "schemaVersion",
+        "state",
+        "qualificationTargetDigest",
+        "launched",
+        "ready",
+        "controlRevision",
+        "activeRunCount",
+        "unresolvedCallCount",
+        "workerCount",
+    }
+    if set(raw) != required or raw.get("schemaVersion") != 1 or raw.get("state") != "launch-verified":
+        raise ReleaseCliError("release_launch_live_result_invalid")
+    if (
+        raw.get("qualificationTargetDigest") != target_digest
+        or raw.get("launched") is not True
+        or raw.get("ready") is not True
+        or not isinstance(raw.get("controlRevision"), int)
+        or isinstance(raw.get("controlRevision"), bool)
+        or raw.get("controlRevision") < 1
+        or raw.get("activeRunCount") != 0
+        or raw.get("unresolvedCallCount") != 0
+        or not isinstance(raw.get("workerCount"), int)
+        or isinstance(raw.get("workerCount"), bool)
+        or raw.get("workerCount") < 1
+    ):
+        raise ReleaseCliError("release_launch_live_result_invalid")
+    return raw
+
+
+def verify_launch(args: argparse.Namespace) -> dict[str, Any]:
+    summary = verify_launch_summary(args.summary)
+    target_digest = summary["qualificationTargetDigest"]
+    if args.target is not None:
+        target = verify_target(_require_regular_file(args.target, code="release_qualification_target_missing"))
+        if target["targetDigest"] != target_digest:
+            raise ReleaseCliError("release_launch_target_mismatch")
+    if args.candidate is not None:
+        candidate_path = _require_regular_file(args.candidate, code="release_launch_candidate_missing")
+        candidate = _json_file(candidate_path)
+        if not isinstance(candidate, dict):
+            raise ReleaseCliError("release_launch_candidate_invalid")
+        candidate_digest = candidate.get("qualificationTargetDigest") or candidate.get(
+            "qualification_target_digest"
+        )
+        if candidate_digest != target_digest:
+            raise ReleaseCliError("release_launch_candidate_mismatch")
+    if args.base_url is None:
+        return summary
+    parsed = urlparse(args.base_url)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ReleaseCliError("release_target_url_invalid")
+    verifier_value = os.environ.get("MINDATLAS_RELEASE_LAUNCH_VERIFIER", "")
+    verifier = Path(verifier_value) if verifier_value else None
+    if (
+        verifier is None
+        or not verifier.is_absolute()
+        or verifier.is_symlink()
+        or not verifier.is_file()
+        or not os.access(verifier, os.X_OK)
+    ):
+        raise ReleaseCliError("release_launch_requires_protected_verifier")
+    try:
+        if verifier.resolve() == Path(__file__).resolve():
+            raise ReleaseCliError("release_launch_protected_verifier_self_reference")
+    except OSError:
+        raise ReleaseCliError("release_launch_requires_protected_verifier") from None
+    with tempfile.TemporaryDirectory(prefix="mindatlas-launch-verify-") as raw_tmp:
+        result_path = Path(raw_tmp) / "launch-verification.json"
+        child_env = dict(os.environ)
+        for name in tuple(child_env):
+            upper = name.upper()
+            if name.endswith("_FD") or any(
+                marker in upper
+                for marker in (
+                    "PASSWORD",
+                    "TOKEN",
+                    "SECRET",
+                    "PRIVATE_KEY",
+                    "API_KEY",
+                    "KEY_B64",
+                    "CREDENTIAL",
+                    "DATABASE_URL",
+                )
+            ):
+                child_env.pop(name, None)
+        child_env.update(
+            {
+                "MINDATLAS_RELEASE_LAUNCH_SUMMARY": str(args.summary),
+                "MINDATLAS_RELEASE_LAUNCH_TARGET_DIGEST": target_digest,
+                "MINDATLAS_RELEASE_LAUNCH_RESULT": str(result_path),
+            }
+        )
+        command = [
+            str(verifier),
+            "--base-url",
+            args.base_url,
+            "--summary",
+            str(args.summary),
+        ]
+        if args.target is not None:
+            command.extend(("--target", str(args.target)))
+        if args.candidate is not None:
+            command.extend(("--candidate", str(args.candidate)))
+        try:
+            result = subprocess.run(
+                command,
+                cwd=str(BACKEND_ROOT.parent),
+                env=child_env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=30 * 60,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            raise ReleaseCliError("release_launch_protected_verifier_failed") from None
+        if result.returncode != 0:
+            raise ReleaseCliError("release_launch_protected_verifier_failed")
+        live = _validate_live_launch_result(result_path, target_digest=target_digest)
+    return {
+        **summary,
+        "state": "launch-verified",
+        "controlRevision": live["controlRevision"],
+        "workerCount": live["workerCount"],
+    }
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1090,6 +2149,7 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--qualification-target", type=Path, required=True)
     prepare.add_argument("--target-provisioning-bundle", type=Path, required=True)
     prepare.add_argument("--signing-key-fd", type=int, required=True)
+    prepare.add_argument("--deployment-identity", type=Path)
     prepare.add_argument("--trust-set", type=Path, required=True)
     prepare.add_argument("--automation-evidence", type=Path)
     prepare.add_argument("--oci-bundle", type=Path)
@@ -1138,11 +2198,14 @@ def build_parser() -> argparse.ArgumentParser:
     build = artifact_commands.add_parser("build")
     build.add_argument("--source-revision", required=True)
     build.add_argument("--output-dir", type=Path, required=True)
+    build.add_argument("--signing-key-fd", type=int)
+    build.add_argument("--deployment-key-id")
     build.add_argument("--no-build", action="store_true")
     artifact_verify = artifact_commands.add_parser("verify")
     artifact_verify.add_argument("--deployment-identity", type=Path, required=True)
     artifact_verify.add_argument("--oci-bundle", type=Path, required=True)
     artifact_verify.add_argument("--run-dir", type=Path)
+    artifact_verify.add_argument("--trust-set", type=Path)
 
     launch = commands.add_parser("launch")
     launch_command = launch.add_subparsers(dest="launch_command", required=True).add_parser("verify")
@@ -1159,6 +2222,7 @@ def build_parser() -> argparse.ArgumentParser:
     clone_command.add_argument("--automation-evidence", type=Path, required=True)
     clone_command.add_argument("--rehearsal-evidence", type=Path, required=True)
     clone_command.add_argument("--oci-bundle", type=Path, required=True)
+    clone_command.add_argument("--trust-set", type=Path)
 
     summary = commands.add_parser("evidence-summary")
     summary_command = summary.add_subparsers(dest="summary_command", required=True).add_parser("check")
@@ -1175,25 +2239,7 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any]:
         _validate_evidence_run(args)
         raise ReleaseCliError("release_runner_requires_server_profile")
     if args.command == "evidence" and args.evidence_command == "promote":
-        promotion_fd = (
-            args.destination_credential_fd
-            if args.destination_credential_fd is not None
-            else args.credential_fd
-        )
-        _require_fd(promotion_fd, code="release_promotion_credential_fd_unavailable")
-        _require_file(args.evidence, code="release_evidence_missing")
-        _require_file(args.artifact_bundle, code="release_artifact_bundle_missing")
-        _require_file(args.trust_set, code="release_trust_set_missing")
-        _require_safe_alias(args.target_alias)
-        if args.kind is not None:
-            try:
-                payload = _json_file(args.evidence)
-                observed_kind = payload.get("manifest", {}).get("evidenceKind")
-            except (AttributeError, ReleaseCliError):
-                raise ReleaseCliError("release_evidence_invalid") from None
-            if observed_kind != args.kind:
-                raise ReleaseCliError("release_evidence_kind_mismatch")
-        raise ReleaseCliError("release_evidence_promotion_requires_verified_host_runner")
+        return promote_evidence(args)
     if args.command == "profile":
         if args.profile_command == "validate-compose":
             return validate_compose(args.compose, args.image_lock)
@@ -1231,32 +2277,12 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any]:
         return compare_evidence(args.automation_evidence, args.rehearsal_evidence, trust_path)
     if args.command == "artifact":
         if args.artifact_command == "build":
-            if not re.fullmatch(r"[0-9a-f]{40}", args.source_revision):
-                raise ReleaseCliError("release_source_revision_invalid")
-            if args.output_dir.exists() and any(args.output_dir.iterdir()):
-                raise ReleaseCliError("release_artifact_output_dir_must_be_empty")
-            if not args.no_build:
-                raise ReleaseCliError("release_artifact_requires_explicit_no_build_boundary")
-            raise ReleaseCliError("release_artifact_build_requires_protected_runner")
-        _require_file(args.deployment_identity, code="release_deployment_identity_missing")
-        _require_file(args.oci_bundle, code="release_oci_bundle_missing")
-        raise ReleaseCliError("release_artifact_verification_requires_protected_runner")
+            return build_artifact(args)
+        return verify_artifact(args)
     if args.command == "launch":
-        _require_file(args.summary, code="release_launch_summary_missing")
-        if args.base_url is not None:
-            parsed = urlparse(args.base_url)
-            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-                raise ReleaseCliError("release_target_url_invalid")
-        raise ReleaseCliError("release_launch_verification_requires_server_state")
+        return verify_launch(args)
     if args.command == "production-clone":
-        _require_fd(args.source_url_fd, code="release_source_url_fd_unavailable")
-        _require_file(args.qualification_target, code="release_qualification_target_missing")
-        _require_file(args.automation_evidence, code="release_automation_evidence_missing")
-        _require_file(args.rehearsal_evidence, code="release_rehearsal_evidence_missing")
-        _require_file(args.oci_bundle, code="release_oci_bundle_missing")
-        if args.run_dir.exists():
-            raise ReleaseCliError("release_clone_run_dir_must_not_exist")
-        raise ReleaseCliError("production_clone_requires_protected_postgres_runner")
+        return run_production_clone(args)
     if args.command == "evidence-summary":
         supplied = (args.evidence, args.artifact_bundle, args.trust_set)
         if any(item is not None for item in supplied) and not all(item is not None for item in supplied):

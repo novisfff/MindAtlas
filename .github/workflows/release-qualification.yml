@@ -39,9 +39,12 @@ jobs:
           ref: ${{ inputs.source_revision }}
           fetch-depth: 0
       - name: Reject source drift
+        env:
+          RELEASE_SOURCE_REVISION: ${{ inputs.source_revision }}
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "${{ inputs.source_revision }}"
+          printf '%s\n' "$RELEASE_SOURCE_REVISION" | grep -Eq '^[0-9a-f]{40}$'
+          test "$(git rev-parse HEAD)" = "$RELEASE_SOURCE_REVISION"
           test -z "$(git status --porcelain)"
           git diff --check
       - name: Validate reviewed lock identities
@@ -139,20 +142,29 @@ jobs:
             APP_BUILD_REVISION=${{ inputs.source_revision }}
 
       - name: Export the exact application image bundle
+        env:
+          RELEASE_SOURCE_REVISION: ${{ inputs.source_revision }}
         run: |
           set -euo pipefail
           bundle="$RUNNER_TEMP/release-application-images.tar"
+          raw_inspection="$RUNNER_TEMP/raw-release-image-inspection.json"
+          safe_inspection="$RUNNER_TEMP/release-image-inspection.json"
           docker save -o "$bundle" \
-            "mindatlas-release-backend:${{ inputs.source_revision }}" \
-            "mindatlas-release-scripted-provider:${{ inputs.source_revision }}" \
-            "mindatlas-release-web:${{ inputs.source_revision }}"
+            "mindatlas-release-backend:$RELEASE_SOURCE_REVISION" \
+            "mindatlas-release-scripted-provider:$RELEASE_SOURCE_REVISION" \
+            "mindatlas-release-web:$RELEASE_SOURCE_REVISION"
           docker image inspect \
-            "mindatlas-release-backend:${{ inputs.source_revision }}" \
-            "mindatlas-release-scripted-provider:${{ inputs.source_revision }}" \
-            "mindatlas-release-web:${{ inputs.source_revision }}" \
-            > "$RUNNER_TEMP/release-image-inspection.json"
+            "mindatlas-release-backend:$RELEASE_SOURCE_REVISION" \
+            "mindatlas-release-scripted-provider:$RELEASE_SOURCE_REVISION" \
+            "mindatlas-release-web:$RELEASE_SOURCE_REVISION" \
+            > "$raw_inspection"
+          python3 backend/scripts/project_release_image_inspection.py \
+            --input "$raw_inspection" \
+            --output "$safe_inspection" \
+            --build-revision "${{ inputs.source_revision }}"
+          rm -f "$raw_inspection"
           test -s "$bundle"
-          test -s "$RUNNER_TEMP/release-image-inspection.json"
+          test -s "$safe_inspection"
 
       - name: Upload the immutable application bundle
         uses: actions/upload-artifact@v4
@@ -184,15 +196,41 @@ jobs:
           test -s "$RUNNER_TEMP/release-application-bundle/release-application-images.tar"
           test -s "$RUNNER_TEMP/release-application-bundle/release-image-inspection.json"
       - name: Reject untrusted signing context
+        env:
+          RELEASE_SOURCE_REVISION: ${{ inputs.source_revision }}
         run: |
           set -euo pipefail
           # The self-hosted installation opens the signing key before the job
           # starts. Only its descriptor number crosses this workflow boundary.
           test -n "${MINDATLAS_AUTOMATION_SIGNING_KEY_FD:-}"
           test "$MINDATLAS_AUTOMATION_SIGNING_KEY_FD" -ge 0
+          test -n "${MINDATLAS_DEPLOYMENT_SIGNING_KEY_FD:-}"
+          test "$MINDATLAS_DEPLOYMENT_SIGNING_KEY_FD" -ge 0
+          test -n "${MINDATLAS_DEPLOYMENT_SIGNING_KEY_ID:-}"
+          test -n "${MINDATLAS_RELEASE_TRUST_SET_FILE:-}"
           test "${{ inputs.target_alias }}" != ""
-          test "$(git rev-parse HEAD)" = "${{ inputs.source_revision }}"
+          printf '%s\n' "$RELEASE_SOURCE_REVISION" | grep -Eq '^[0-9a-f]{40}$'
+          test "$(git rev-parse HEAD)" = "$RELEASE_SOURCE_REVISION"
           test -z "$(git status --porcelain)"
+      - name: Generate and verify signed deployment identity
+        env:
+          RELEASE_SOURCE_REVISION: ${{ inputs.source_revision }}
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          identity="$RUNNER_TEMP/release-application-bundle/deployment-identity.json"
+          dependency_lock_set_digest="$(python -c 'from app.release.generated_lock_digests import DEPENDENCY_LOCK_SET_SHA256; print(DEPENDENCY_LOCK_SET_SHA256)')"
+          python scripts/render_release_deployment_identity.py \
+            --input "$RUNNER_TEMP/release-application-bundle/release-image-inspection.json" \
+            --output "$identity" \
+            --build-revision "$RELEASE_SOURCE_REVISION" \
+            --dependency-lock-set-digest "$dependency_lock_set_digest" \
+            --key-id "$MINDATLAS_DEPLOYMENT_SIGNING_KEY_ID" \
+            --signing-key-fd "$MINDATLAS_DEPLOYMENT_SIGNING_KEY_FD"
+          python scripts/run_pre_ga_release.py artifact verify \
+            --deployment-identity "$identity" \
+            --oci-bundle "$RUNNER_TEMP/release-application-bundle/release-application-images.tar" \
+            --trust-set "$MINDATLAS_RELEASE_TRUST_SET_FILE"
       - name: Validate release topology
         working-directory: backend
         run: |
@@ -203,7 +241,7 @@ jobs:
             --image-lock ../deploy/release-images.lock
       - name: Run protected qualification wrapper
         env:
-          AUTOMATED_EVIDENCE_SIGNING_KEY_B64: ${{ secrets.AUTOMATED_EVIDENCE_SIGNING_KEY_B64 }}
+          RELEASE_SOURCE_REVISION: ${{ inputs.source_revision }}
           RELEASE_TARGET_ALIAS: ${{ inputs.target_alias }}
         run: |
           set -euo pipefail
@@ -215,7 +253,21 @@ jobs:
             exit 2
           }
           MINDATLAS_RELEASE_OCI_BUNDLE="$RUNNER_TEMP/release-application-bundle/release-application-images.tar" \
-            .github/scripts/run-protected-release-qualification "$RELEASE_TARGET_ALIAS" "${{ inputs.source_revision }}"
+          MINDATLAS_RELEASE_DEPLOYMENT_IDENTITY_FILE="$RUNNER_TEMP/release-application-bundle/deployment-identity.json" \
+            .github/scripts/run-protected-release-qualification "$RELEASE_TARGET_ALIAS" "$RELEASE_SOURCE_REVISION"
+
+      - name: Preserve signed deployment handoff
+        if: success()
+        run: |
+          set -euo pipefail
+          evidence_dir="$RUNNER_TEMP/mindatlas-release-evidence"
+          test -d "$evidence_dir"
+          test ! -e "$evidence_dir/deployment-identity.json"
+          test ! -e "$evidence_dir/release-application-images.tar"
+          test ! -e "$evidence_dir/release-image-inspection.json"
+          cp "$RUNNER_TEMP/release-application-bundle/deployment-identity.json" "$evidence_dir/deployment-identity.json"
+          cp "$RUNNER_TEMP/release-application-bundle/release-application-images.tar" "$evidence_dir/release-application-images.tar"
+          cp "$RUNNER_TEMP/release-application-bundle/release-image-inspection.json" "$evidence_dir/release-image-inspection.json"
 
       - name: Upload protected profile evidence
         if: success()

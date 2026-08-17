@@ -449,3 +449,24 @@ is a release failure. The host wrapper never turns a missing service into a
 skip or a passing evidence object. Raw passwords, cookies, Provider material,
 Entry bodies, prompts, and Compose-expanded environment files are not release
 evidence.
+
+The application bundle handoff is immutable: the build job exports the three
+images and retains only a label/ID projection of `docker image inspect`. The
+protected release runner signs `deployment-identity.json`, then runs
+`artifact verify` against the Docker-save archive before `profile prepare` can
+mount it. Profile runs reverify that same identity and archive digest; a rebuild
+or image-label drift is a hard failure.
+
+Evidence promotion is host-only and append-only. It accepts a verified evidence
+object, its sealed Artifact archive, a code-owned alias, and an already-open
+credential descriptor; it does not accept a bucket, endpoint, object key,
+outcome, or overwrite option. The destination root is supplied through
+`MINDATLAS_RELEASE_PROMOTION_ROOT`, and the conditional-create descriptor is
+`MINDATLAS_RELEASE_PROMOTION_CREDENTIAL_FD`.
+
+The production-class negative clone and final launch check also require
+separately installed protected executors (`MINDATLAS_RELEASE_CLONE_EXECUTOR`
+and `MINDATLAS_RELEASE_LAUNCH_VERIFIER`). The repository CLI validates their
+fixed safe result contracts, while database streams, authenticated target
+reads, teardown, and live service observations remain inside those protected
+boundaries.
