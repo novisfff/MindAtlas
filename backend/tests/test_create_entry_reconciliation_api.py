@@ -58,6 +58,7 @@ def test_reconciliation_list_is_viewer_safe_and_mutation_requires_operator_csrf(
         assert item["callId"] == str(call.id)
         assert item["status"] == "needs_reconciliation"
         assert item["evidenceRequired"] is True
+        assert item["evidenceArtifactIds"] == [str(evidence.id)]
         assert "inputDigest" not in item
         assert "idempotencyKey" not in item
         assert "title" not in item

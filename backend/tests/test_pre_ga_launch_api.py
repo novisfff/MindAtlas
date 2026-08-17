@@ -73,6 +73,9 @@ def test_launch_api_has_safe_reads_and_rejects_client_decision_fields(launch_api
     assert status.status_code == 200, status.text
     assert status.json()["data"]["launched"] is False
     assert status.json()["data"]["reasonCode"] == "launch_control_missing"
+    assert status.json()["data"]["activeCandidateId"] is None
+    assert status.json()["data"]["activeGateUseId"] is None
+    assert status.json()["data"]["launchedAt"] is None
 
     target = client.get("/api/pre-ga-launch/qualification-target")
     assert target.status_code == 200, target.text
@@ -129,3 +132,7 @@ def test_launch_api_candidate_create_list_consume_and_replay(launch_api) -> None
     status = client.get("/api/pre-ga-launch/status")
     assert status.status_code == 200, status.text
     assert status.json()["data"]["launched"] is True
+    assert status.json()["data"]["activeCandidateId"] == candidate["candidateId"]
+    assert status.json()["data"]["activeGateUseId"] == consumed.json()["data"]["gateUseId"]
+    assert status.json()["data"]["launchedAt"] is not None
+    assert status.json()["data"]["updatedAt"] is not None

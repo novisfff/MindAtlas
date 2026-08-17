@@ -15,6 +15,7 @@ export interface ReconciliationCall {
   updatedAt: string | null
   attemptCount: number
   evidenceRequired: boolean
+  evidenceArtifactIds: string[]
 }
 
 export interface ReconciliationPage {
@@ -72,6 +73,11 @@ function time(value: unknown): string | null {
   return value
 }
 
+function evidenceIds(value: unknown): string[] {
+  if (!Array.isArray(value) || value.length > 8) throw new ReconciliationResponseError()
+  return value.map(id)
+}
+
 export function parseReconciliationPage(value: unknown): ReconciliationPage {
   const raw = object(value)
   if (!Array.isArray(raw.items)) throw new ReconciliationResponseError()
@@ -93,6 +99,7 @@ export function parseReconciliationPage(value: unknown): ReconciliationPage {
         updatedAt: time(row.updatedAt),
         attemptCount: nonNegative(row.attemptCount),
         evidenceRequired: row.evidenceRequired === true,
+        evidenceArtifactIds: evidenceIds(row.evidenceArtifactIds),
       }
     }),
     total: nonNegative(raw.total),

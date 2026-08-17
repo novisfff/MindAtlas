@@ -8,8 +8,12 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 from starlette.requests import Request
 
-from app.assistant.capability_calls.models import AssistantCapabilityCall
+from app.assistant.capability_calls.models import (
+    AssistantCapabilityCall,
+    AssistantCapabilityCallAttempt,
+)
 from app.assistant.models import AssistantChatRun
+from app.assistant.durable.models import AssistantRunArtifact
 from app.assistant.capability_calls.reconciliation import (
     CapabilityReconciliationService,
     HmacReconciliationEvidenceVerifier,
@@ -52,7 +56,12 @@ def _evidence_secret(settings: Settings) -> str:
     return secret
 
 
-def _safe_call_summary(call: AssistantCapabilityCall, *, run_revision: int) -> dict[str, object]:
+def _safe_call_summary(
+    call: AssistantCapabilityCall,
+    *,
+    run_revision: int,
+    evidence_artifact_ids: tuple[str, ...] = (),
+) -> dict[str, object]:
     return {
         "callId": str(call.id),
         "runId": str(call.run_id),
@@ -70,7 +79,45 @@ def _safe_call_summary(call: AssistantCapabilityCall, *, run_revision: int) -> d
         "updatedAt": call.updated_at.isoformat() if call.updated_at is not None else None,
         "attemptCount": int(call.attempt_count or 0),
         "evidenceRequired": True,
+        "evidenceArtifactIds": list(evidence_artifact_ids),
     }
+
+
+def _safe_evidence_artifact_ids(db: Session, call: AssistantCapabilityCall) -> tuple[str, ...]:
+    """Return only Artifact identities already bound to this Call.
+
+    The projection intentionally inspects metadata/foreign-key identity only;
+    it never reads or serializes Artifact bytes, object keys, or evidence JSON.
+    """
+
+    ids: list[str] = []
+    diagnostic_ids = (
+        db.query(AssistantCapabilityCallAttempt.diagnostic_artifact_id)
+        .filter(
+            AssistantCapabilityCallAttempt.call_id == call.id,
+            AssistantCapabilityCallAttempt.diagnostic_artifact_id.is_not(None),
+        )
+        .order_by(AssistantCapabilityCallAttempt.attempt_number.desc())
+        .all()
+    )
+    ids.extend(str(row[0]) for row in diagnostic_ids if row[0] is not None)
+
+    artifacts = (
+        db.query(AssistantRunArtifact)
+        .filter(
+            AssistantRunArtifact.run_id == call.run_id,
+            AssistantRunArtifact.kind == "capability_call_evidence",
+        )
+        .order_by(AssistantRunArtifact.created_at.desc(), AssistantRunArtifact.id.desc())
+        .limit(32)
+        .all()
+    )
+    for artifact in artifacts:
+        metadata = artifact.metadata_json
+        if isinstance(metadata, dict) and str(metadata.get("callId") or "") == str(call.id):
+            ids.append(str(artifact.id))
+
+    return tuple(dict.fromkeys(ids))[:8]
 
 
 def _map_reconciliation_error(exc: Exception) -> ApiException:
@@ -121,6 +168,7 @@ def list_reconciliation_calls(
                     run_revision=int(
                         getattr(db.get(AssistantChatRun, row.run_id), "state_revision", 0)
                     ),
+                    evidence_artifact_ids=_safe_evidence_artifact_ids(db, row),
                 )
                 for row in rows
             ],

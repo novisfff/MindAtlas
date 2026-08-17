@@ -2571,6 +2571,7 @@
     "loading": "Loading launch control…",
     "operatorOnly": "Operator authorization required",
     "defaultConsumeReason": "Approved pre-GA launch candidate consumed by operator.",
+    "requestIdPending": "Generated when submitted; retained for retry if the result is ambiguous.",
     "errors": {
       "sessionExpired": "Your operator session expired. Sign in again.",
       "forbidden": "This action requires operator authorization.",
@@ -2583,20 +2584,57 @@
       "title": "Launch status",
       "description": "The active subject and control revision are server-authoritative.",
       "unapprovedHelp": "Launch remains unapproved until the protected server-side candidate is consumed.",
+      "staleHelp": "The consumed subject is stale. Review the current target and evidence before changing launch control.",
+      "evidence_unavailableHelp": "The consumed subject's protected evidence is unavailable. Launch remains blocked until it is restored.",
       "currentHelp": "The current launch subject is active. Review drift and audit evidence before any change."
+    },
+    "target": {
+      "title": "Qualification target",
+      "description": "This safe summary is owned by the server and identifies the exact production-marked target under review.",
+      "fields": {
+        "buildRevision": "Build revision",
+        "deploymentClass": "Deployment class",
+        "schemaRevision": "Schema revision",
+        "runtimeIdentity": "Schema runtime identity",
+        "imageSet": "Image set",
+        "deployedArtifacts": "Deployed artifacts",
+        "rollout": "Rollout revision",
+        "profile": "Profile version",
+        "model": "Model",
+        "runtimeClosure": "Runtime closure",
+        "dependencyLocks": "Dependency locks",
+        "scenarioSet": "Scenario set",
+        "requiredAssertions": "Required assertions",
+        "runner": "Runner identity",
+        "trustSet": "Evidence trust set",
+        "qualificationTarget": "Target digest"
+      }
     },
     "states": {
       "current": "Current subject",
-      "unapproved": "Not approved"
+      "unapproved": "Not approved",
+      "stale": "Stale subject",
+      "evidence_unavailable": "Evidence unavailable"
     },
     "fields": {
       "state": "State",
       "controlRevision": "Control revision",
       "subject": "Active subject",
       "reason": "Reason",
+      "activeCandidate": "Active candidate",
+      "activeUse": "Active gate use",
+      "launchedAt": "Launched at",
+      "updatedAt": "Updated at",
+      "requestId": "Request ID",
       "candidate": "Candidate",
       "target": "Qualification target",
       "evidence": "Automated evidence",
+      "rehearsalEvidence": "Rehearsal evidence",
+      "runtimeClosure": "Runtime closure",
+      "issuedAt": "Issued at",
+      "expiresAt": "Expires at",
+      "usedAt": "Consumed at",
+      "matchesCurrent": "Matches current subject",
       "unknownCalls": "Unknown calls",
       "reconciliation": "Reconciliation queue",
       "activeRuns": "Active runs",
@@ -2618,7 +2656,8 @@
     "history": {
       "title": "Candidate history",
       "description": "Only digest prefixes, bounded statuses, and fixed failure codes are displayed.",
-      "empty": "No qualification candidates are available."
+      "empty": "No qualification candidates are available.",
+      "loadMore": "Load more candidates"
     },
     "candidateStates": {
       "passing_unused": "Passing · unused",
@@ -2656,7 +2695,8 @@
       "callRevision": "Call revision",
       "runRevision": "Run revision",
       "attempts": "Attempts",
-      "failure": "Failure"
+      "failure": "Failure",
+      "evidence": "Server-provided evidence Artifacts"
     },
     "localCreateEntry": "This legacy local create-entry call cannot be retried from the UI; reconcile it with evidence and an explicit decision.",
     "form": {

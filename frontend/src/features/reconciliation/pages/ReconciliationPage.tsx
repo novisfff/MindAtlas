@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { AlertCircle, CheckCircle2, Loader2, ShieldAlert } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useNavigate } from 'react-router-dom'
@@ -21,6 +21,8 @@ import {
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
+type PendingRequest = { requestId: string; fingerprint: string }
+
 function requestId(): string {
   if (typeof globalThis.crypto?.randomUUID === 'function') return globalThis.crypto.randomUUID()
   return '00000000-0000-4000-8000-000000000001'
@@ -31,6 +33,7 @@ function errorCopy(error: unknown, t: (key: string) => string): string {
     if (error.status === 401) return t('reconciliation.errors.sessionExpired')
     if (error.status === 403) return t('reconciliation.errors.forbidden')
     if (error.status === 409) return t('reconciliation.errors.conflict')
+    if (error.status === 422) return t('reconciliation.errors.invalid')
     if (error.status === 503) return t('reconciliation.errors.unavailable')
   }
   return t('reconciliation.errors.generic')
@@ -46,7 +49,14 @@ export function ReconciliationPage() {
   const [artifactIds, setArtifactIds] = useState('')
   const [reason, setReason] = useState('')
   const [error, setError] = useState<string | null>(null)
+  const requestIds = useRef<Record<string, PendingRequest>>({})
   const isOperator = session.data?.role === 'operator'
+
+  function handleMutationFailure(mutationError: unknown) {
+    if (isApiError(mutationError) && mutationError.status === 401) navigate('/login')
+    if (isApiError(mutationError) && mutationError.status === 409) void queue.refetch?.()
+    setError(errorCopy(mutationError, t))
+  }
 
   async function reconcile(callId: string, callRevision: number, runRevision: number) {
     if (!isOperator || mutation.isPending) return
@@ -56,6 +66,10 @@ export function ReconciliationPage() {
       return
     }
     setError(null)
+    const bodyFingerprint = JSON.stringify({ callRevision, runRevision, decision, evidenceArtifactIds: ids, reason: reason.trim() })
+    const pending = requestIds.current[callId]
+    const currentRequestId = pending?.fingerprint === bodyFingerprint ? pending.requestId : requestId()
+    requestIds.current[callId] = { requestId: currentRequestId, fingerprint: bodyFingerprint }
     try {
       await mutation.mutateAsync({
         callId,
@@ -64,14 +78,15 @@ export function ReconciliationPage() {
           expectedRunRevision: runRevision,
           decision,
           evidenceArtifactIds: ids,
-          requestId: requestId(),
+          requestId: currentRequestId,
           reason: reason.trim(),
         },
       })
+      delete requestIds.current[callId]
       setReason('')
       setArtifactIds('')
     } catch (mutationError) {
-      setError(errorCopy(mutationError, t))
+      handleMutationFailure(mutationError)
     }
   }
 
@@ -104,6 +119,14 @@ export function ReconciliationPage() {
                 <span>{t('reconciliation.fields.attempts')}: {call.attemptCount}</span>
                 <span>{t('reconciliation.fields.failure')}: {call.failureCode ?? '—'}</span>
               </div>
+              {call.evidenceArtifactIds.length > 0 ? (
+                <div className="mt-3 rounded-xl border border-border/60 bg-background/60 p-3 text-xs">
+                  <p className="font-medium text-foreground">{t('reconciliation.fields.evidence')}</p>
+                  <ul className="mt-1 space-y-1 font-mono text-muted-foreground">
+                    {call.evidenceArtifactIds.map((artifactId) => <li key={artifactId}>{artifactId}</li>)}
+                  </ul>
+                </div>
+              ) : null}
               {call.executionMode === 'local_create_entry' ? <p className="mt-3 flex items-start gap-2 text-xs text-amber-700"><ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" />{t('reconciliation.localCreateEntry')}</p> : null}
               {isOperator ? (
                 <div className="mt-4 grid gap-3 border-t border-border/60 pt-4 md:grid-cols-[180px_1fr_auto]">

@@ -56,6 +56,7 @@ class ReconciliationCallSummary(CamelModel):
     side_effect_started_at: str | None = None
     attempt_count: int
     evidence_required: bool = True
+    evidence_artifact_ids: list[UUID] = Field(default_factory=list, max_length=8)
 
 
 __all__ = [

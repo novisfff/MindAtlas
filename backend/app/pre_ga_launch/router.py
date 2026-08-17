@@ -209,6 +209,18 @@ def get_status(
             "reasonCode": authorization.reason_code,
             "controlRevision": int(authorization.control_revision),
             "activeSubjectDigest": authorization.active_subject_digest,
+            "activeCandidateId": (
+                str(control.active_candidate_id)
+                if control is not None and control.active_candidate_id is not None
+                else None
+            ),
+            "activeGateUseId": (
+                str(control.active_gate_use_id)
+                if control is not None and control.active_gate_use_id is not None
+                else None
+            ),
+            "launchedAt": _iso(control.launched_at) if control is not None else None,
+            "updatedAt": _iso(control.updated_at) if control is not None else None,
             "candidate": (
                 candidate_projection(db, candidate, control=control)
                 if candidate is not None

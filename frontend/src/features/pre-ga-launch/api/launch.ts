@@ -39,8 +39,8 @@ export interface LaunchCandidate {
   buildRevision: string
   imageSetDigest: string
   deployedArtifactSetDigest: string
-  schemaFamily: string
-  schemaRevision: string
+  schemaFamily: 'pre_ga_v1'
+  schemaRevision: 'pre_ga_v1_0002'
   schemaRuntimeIdentityDigest: string
   rolloutRevisionId: string
   profileVersionId: string
@@ -64,12 +64,42 @@ export interface LaunchStatus {
   reasonCode: string | null
   controlRevision: number
   activeSubjectDigest: string | null
+  activeCandidateId: string | null
+  activeGateUseId: string | null
+  launchedAt: string | null
+  updatedAt: string | null
   candidate: LaunchCandidate | null
+}
+
+export interface QualificationTargetSummary {
+  schemaVersion: 1
+  buildRevision: string
+  imageSetDigest: string
+  deployedArtifactSetDigest: string
+  schemaFamily: 'pre_ga_v1'
+  schemaRevision: 'pre_ga_v1_0002'
+  productionSchemaDeploymentClass: 'production'
+  productionSchemaRuntimeIdentityDigest: string
+  rolloutRevisionId: string
+  profileVersionId: string
+  modelId: string
+  runtimeClosureDigest: string
+  dependencyLockSetDigest: string
+  scenarioSetDigest: string
+  requiredAssertionSetDigest: string
+  runnerIdentityDigest: string
+  evidenceTrustSetDigest: string
+  qualificationTargetDigest: string
 }
 
 export interface LaunchCandidatesPage {
   items: LaunchCandidate[]
   nextCursor: { issuedAt: string; id: string } | null
+}
+
+export interface LaunchCandidatesCursor {
+  issuedAt: string
+  id: string
 }
 
 export interface LaunchConsumptionResult {
@@ -118,6 +148,12 @@ function timestamp(value: unknown): string | null {
   return result
 }
 
+function requiredTimestamp(value: unknown): string {
+  const result = timestamp(value)
+  if (result === null) throw new ControlPlaneResponseError()
+  return result
+}
+
 function candidateState(candidate: LaunchCandidate): CandidateState {
   if (!candidate.passed) return 'failed'
   if (candidate.usedAt) return candidate.active ? 'consumed_current' : 'consumed_stale'
@@ -131,6 +167,9 @@ export function classifyLaunchCandidate(candidate: LaunchCandidate): CandidateSt
 
 export function parseLaunchCandidate(value: unknown): LaunchCandidate {
   const raw = object(value)
+  if (raw.schemaFamily !== 'pre_ga_v1' || raw.schemaRevision !== 'pre_ga_v1_0002') {
+    throw new ControlPlaneResponseError()
+  }
   const failureCodes = raw.failureCodes
   if (!Array.isArray(failureCodes) || failureCodes.length > 32 || failureCodes.some((item) => typeof item !== 'string' || !SAFE_CODE.test(item))) {
     throw new ControlPlaneResponseError()
@@ -144,8 +183,8 @@ export function parseLaunchCandidate(value: unknown): LaunchCandidate {
     buildRevision: string(raw.buildRevision),
     imageSetDigest: string(raw.imageSetDigest, DIGEST),
     deployedArtifactSetDigest: string(raw.deployedArtifactSetDigest, DIGEST),
-    schemaFamily: string(raw.schemaFamily),
-    schemaRevision: string(raw.schemaRevision),
+    schemaFamily: 'pre_ga_v1',
+    schemaRevision: 'pre_ga_v1_0002',
     schemaRuntimeIdentityDigest: string(raw.schemaRuntimeIdentityDigest, DIGEST),
     rolloutRevisionId: string(raw.rolloutRevisionId, UUID),
     profileVersionId: string(raw.profileVersionId, UUID),
@@ -161,7 +200,7 @@ export function parseLaunchCandidate(value: unknown): LaunchCandidate {
     expiresAt: timestamp(raw.expiresAt),
     usedAt: timestamp(raw.usedAt),
     resultingControlRevision: raw.resultingControlRevision == null ? null : nonNegative(raw.resultingControlRevision),
-    active: raw.active === true,
+    active: typeof raw.active === 'boolean' ? raw.active : (() => { throw new ControlPlaneResponseError() })(),
   }
 }
 
@@ -174,7 +213,49 @@ export function parseLaunchStatus(value: unknown): LaunchStatus {
     reasonCode: nullableString(raw.reasonCode, SAFE_CODE),
     controlRevision: nonNegative(raw.controlRevision),
     activeSubjectDigest: nullableString(raw.activeSubjectDigest, DIGEST),
+    activeCandidateId: nullableString(raw.activeCandidateId, UUID),
+    activeGateUseId: nullableString(raw.activeGateUseId, UUID),
+    launchedAt: timestamp(raw.launchedAt),
+    updatedAt: timestamp(raw.updatedAt),
     candidate,
+  }
+}
+
+export function classifyLaunchStatus(status: LaunchStatus): LaunchState {
+  if (status.launched) return 'current'
+  if (status.reasonCode === 'launch_subject_stale' || status.reasonCode === 'launch_subject_unavailable') return 'stale'
+  if (status.reasonCode === 'launch_evidence_unavailable') return 'evidence_unavailable'
+  return 'unapproved'
+}
+
+export function parseQualificationTarget(value: unknown): QualificationTargetSummary {
+  const raw = object(value)
+  if (raw.schemaVersion !== 1) throw new ControlPlaneResponseError()
+  if (raw.schemaFamily !== 'pre_ga_v1' || raw.schemaRevision !== 'pre_ga_v1_0002') {
+    throw new ControlPlaneResponseError()
+  }
+  if (raw.productionSchemaDeploymentClass !== 'production') {
+    throw new ControlPlaneResponseError()
+  }
+  return {
+    schemaVersion: 1,
+    buildRevision: string(raw.buildRevision),
+    imageSetDigest: string(raw.imageSetDigest, DIGEST),
+    deployedArtifactSetDigest: string(raw.deployedArtifactSetDigest, DIGEST),
+    schemaFamily: 'pre_ga_v1',
+    schemaRevision: 'pre_ga_v1_0002',
+    productionSchemaDeploymentClass: 'production',
+    productionSchemaRuntimeIdentityDigest: string(raw.productionSchemaRuntimeIdentityDigest, DIGEST),
+    rolloutRevisionId: string(raw.rolloutRevisionId, UUID),
+    profileVersionId: string(raw.profileVersionId, UUID),
+    modelId: string(raw.modelId, UUID),
+    runtimeClosureDigest: string(raw.runtimeClosureDigest, DIGEST),
+    dependencyLockSetDigest: string(raw.dependencyLockSetDigest, DIGEST),
+    scenarioSetDigest: string(raw.scenarioSetDigest, DIGEST),
+    requiredAssertionSetDigest: string(raw.requiredAssertionSetDigest, DIGEST),
+    runnerIdentityDigest: string(raw.runnerIdentityDigest, DIGEST),
+    evidenceTrustSetDigest: string(raw.evidenceTrustSetDigest, DIGEST),
+    qualificationTargetDigest: string(raw.qualificationTargetDigest, DIGEST),
   }
 }
 
@@ -185,7 +266,7 @@ function parseCandidatesPage(value: unknown): LaunchCandidatesPage {
   return {
     items: raw.items.map(parseLaunchCandidate),
     nextCursor: cursor
-      ? { issuedAt: string(cursor.issuedAt), id: string(cursor.id, UUID) }
+      ? { issuedAt: requiredTimestamp(cursor.issuedAt), id: string(cursor.id, UUID) }
       : null,
   }
 }
@@ -194,8 +275,22 @@ export function getLaunchStatus(): Promise<LaunchStatus> {
   return apiClient.get<unknown>('/api/pre-ga-launch/status').then(parseLaunchStatus)
 }
 
-export function listLaunchCandidates(): Promise<LaunchCandidatesPage> {
-  return apiClient.get<unknown>('/api/pre-ga-launch/candidates').then(parseCandidatesPage)
+export function getQualificationTarget(): Promise<QualificationTargetSummary> {
+  return apiClient
+    .get<unknown>('/api/pre-ga-launch/qualification-target')
+    .then(parseQualificationTarget)
+}
+
+export function listLaunchCandidates(
+  cursor?: LaunchCandidatesCursor,
+  limit = 50,
+): Promise<LaunchCandidatesPage> {
+  const query: Record<string, string | number> = { limit }
+  if (cursor) {
+    query.cursorIssuedAt = cursor.issuedAt
+    query.cursorId = cursor.id
+  }
+  return apiClient.get<unknown>('/api/pre-ga-launch/candidates', { query }).then(parseCandidatesPage)
 }
 
 export function createLaunchCandidate(input: CreateLaunchCandidateInput): Promise<LaunchCandidate> {

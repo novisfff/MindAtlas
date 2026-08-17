@@ -1,6 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { consumeLaunchCandidate, createLaunchCandidate } from './launch'
+import {
+  consumeLaunchCandidate,
+  createLaunchCandidate,
+  listLaunchCandidates,
+  parseLaunchCandidate,
+  parseQualificationTarget,
+  parseLaunchStatus,
+} from './launch'
 
 const api = vi.hoisted(() => ({
   get: vi.fn(),
@@ -18,7 +25,7 @@ const candidate = {
   buildRevision: 'build-safe',
   imageSetDigest: '3'.repeat(64),
   deployedArtifactSetDigest: '4'.repeat(64),
-  schemaFamily: 'pre_ga',
+  schemaFamily: 'pre_ga_v1',
   schemaRevision: 'pre_ga_v1_0002',
   schemaRuntimeIdentityDigest: '5'.repeat(64),
   rolloutRevisionId: '00000000-0000-4000-8000-000000000002',
@@ -102,6 +109,72 @@ describe('pre-GA launch typed client', () => {
           reason: 'consume reviewed candidate',
         },
       },
+    )
+  })
+
+  it('serializes the server cursor when loading the next candidate page', async () => {
+    api.get.mockResolvedValue({ items: [candidate], nextCursor: null })
+    await listLaunchCandidates({ issuedAt: '2026-08-14T00:00:00Z', id: candidate.candidateId }, 25)
+
+    expect(api.get).toHaveBeenCalledWith('/api/pre-ga-launch/candidates', {
+      query: {
+        limit: 25,
+        cursorIssuedAt: '2026-08-14T00:00:00Z',
+        cursorId: candidate.candidateId,
+      },
+    })
+  })
+
+  it('parses safe launch control identity and timing fields', () => {
+    const parsed = parseLaunchStatus({
+      launched: true,
+      reasonCode: null,
+      controlRevision: 5,
+      activeSubjectDigest: 'a'.repeat(64),
+      activeCandidateId: candidate.candidateId,
+      activeGateUseId: '00000000-0000-4000-8000-000000000006',
+      launchedAt: '2026-08-14T00:00:00Z',
+      updatedAt: '2026-08-14T00:01:00Z',
+      candidate,
+    })
+
+    expect(parsed.activeCandidateId).toBe(candidate.candidateId)
+    expect(parsed.activeGateUseId).toBe('00000000-0000-4000-8000-000000000006')
+    expect(parsed.launchedAt).toBe('2026-08-14T00:00:00Z')
+  })
+
+  it('parses the server-owned qualification target summary and rejects drifted shapes', () => {
+    const target = parseQualificationTarget({
+      schemaVersion: 1,
+      buildRevision: 'build-safe',
+      imageSetDigest: '1'.repeat(64),
+      deployedArtifactSetDigest: '2'.repeat(64),
+      schemaFamily: 'pre_ga_v1',
+      schemaRevision: 'pre_ga_v1_0002',
+      productionSchemaDeploymentClass: 'production',
+      productionSchemaRuntimeIdentityDigest: '3'.repeat(64),
+      rolloutRevisionId: '00000000-0000-4000-8000-000000000001',
+      profileVersionId: '00000000-0000-4000-8000-000000000002',
+      modelId: '00000000-0000-4000-8000-000000000003',
+      runtimeClosureDigest: '4'.repeat(64),
+      dependencyLockSetDigest: '5'.repeat(64),
+      scenarioSetDigest: '6'.repeat(64),
+      requiredAssertionSetDigest: '7'.repeat(64),
+      runnerIdentityDigest: '8'.repeat(64),
+      evidenceTrustSetDigest: '9'.repeat(64),
+      qualificationTargetDigest: 'a'.repeat(64),
+    })
+
+    expect(target.schemaRevision).toBe('pre_ga_v1_0002')
+    expect(target.qualificationTargetDigest).toBe('a'.repeat(64))
+    expect(() => parseQualificationTarget({ ...target, imageSetDigest: 'sentinel' })).toThrow(
+      'invalid_control_plane_response',
+    )
+  })
+
+  it('rejects a candidate with a drifted production schema identity', () => {
+    expect(() => parseLaunchCandidate({ ...candidate, schemaFamily: 'pre_ga' })).toThrow(
+      'invalid_control_plane_response',
     )
   })
 })
