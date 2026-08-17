@@ -147,3 +147,47 @@ def test_order_regression_uses_the_plan3_tombstone_test() -> None:
     )
     assert "test_legacy_runtime_package_is_tombstoned" in source
     assert "cleanup_legacy" not in source
+
+
+def test_authenticated_skill_client_overrides_settings_dependency_captured_by_old_callable() -> None:
+    """A router imported under a temporary settings callable must still see the pin."""
+    from fastapi import APIRouter, Depends
+
+    from app.config import Settings
+    from tests._bootstrap import reset_caches
+    from tests._db import make_session
+    from tests.operator_session_helpers import (
+        build_authenticated_skill_client,
+        operator_test_settings,
+        restore_operator_settings,
+    )
+
+    reset_caches()
+    stale_settings = operator_test_settings(APP_BUILD_REVISION="stale-settings")
+    pinned_settings = operator_test_settings(APP_BUILD_REVISION="pinned-settings")
+
+    def stale_get_settings() -> Settings:
+        return stale_settings
+
+    router = APIRouter(prefix="/test-order-settings")
+
+    @router.get("/value")
+    def settings_value(settings: Settings = Depends(stale_get_settings)) -> dict[str, str]:
+        return {"buildRevision": settings.app_build_revision}
+
+    db = make_session()
+    client = None
+    try:
+        client, headers, _ = build_authenticated_skill_client(
+            db=db,
+            include_routers=[router],
+            settings=pinned_settings,
+        )
+        response = client.get("/test-order-settings/value", headers=headers)
+        assert response.status_code == 200, response.text
+        assert response.json()["buildRevision"] == "pinned-settings"
+    finally:
+        if client is not None:
+            client.close()
+        restore_operator_settings()
+        db.close()

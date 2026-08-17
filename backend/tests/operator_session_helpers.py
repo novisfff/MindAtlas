@@ -132,6 +132,47 @@ def _clear_settings_derived_caches() -> None:
         pass
 
 
+def _iter_settings_dependency_calls(app: FastAPI) -> list[Any]:
+    """Find every callable used for a route parameter named ``settings``.
+
+    FastAPI stores a dependency callable by identity in each ``Dependant``.
+    A test can import a router while ``app.config.get_settings`` is temporarily
+    monkeypatched, leaving a route closed over that old callable even after the
+    module-level symbol is restored. Walking the dependency tree lets the
+    isolated test app override that captured identity as well.
+    """
+    calls: list[Any] = []
+    seen: set[int] = set()
+    seen_routes: set[int] = set()
+    pending_routes = list(getattr(app, "routes", ()))
+    while pending_routes:
+        route = pending_routes.pop()
+        if id(route) in seen_routes:
+            continue
+        seen_routes.add(id(route))
+        original_router = getattr(route, "original_router", None)
+        if original_router is not None:
+            pending_routes.extend(getattr(original_router, "routes", ()) or ())
+        pending_routes.extend(getattr(route, "routes", ()) or ())
+        root = getattr(route, "dependant", None)
+        if root is None:
+            continue
+        pending = [root]
+        while pending:
+            dependant = pending.pop()
+            for dependency in getattr(dependant, "dependencies", ()):
+                call = getattr(dependency, "call", None)
+                if (
+                    getattr(dependency, "name", None) == "settings"
+                    and callable(call)
+                    and id(call) not in seen
+                ):
+                    seen.add(id(call))
+                    calls.append(call)
+                pending.append(dependency)
+    return calls
+
+
 def _capture_original_get_settings(candidate: Any) -> Any:
     """Remember the process-wide real lru_cache get_settings (stable identity)."""
     global _ORIGINAL_GET_SETTINGS
@@ -309,7 +350,8 @@ def build_authenticated_skill_client(
             pass
 
     app.dependency_overrides[get_db] = _override_db
-    app.dependency_overrides[get_settings] = lambda: resolved
+    settings_override = lambda: resolved
+    app.dependency_overrides[get_settings] = settings_override
 
     cred = credential_exchange_router()
     cred.include_router(login_router)
@@ -323,6 +365,12 @@ def build_authenticated_skill_client(
     else:
         for router in include_routers:
             app.include_router(router)
+
+    # Route dependencies are captured by identity when a router is declared.
+    # Include any stale ``settings`` callable captured before a test fixture
+    # restored/re-pinned ``app.config.get_settings``.
+    for settings_dependency in _iter_settings_dependency_calls(app):
+        app.dependency_overrides[settings_dependency] = settings_override
 
     client = TestClient(app)
     headers = login_operator_session(client, password=password)
