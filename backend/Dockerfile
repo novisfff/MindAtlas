@@ -6,6 +6,11 @@
 # Stage 1: Builder - Install dependencies
 FROM python:3.11-slim AS builder
 
+ARG APP_BUILD_REVISION=development
+ARG API_WORKER_LOCK_SHA256=73f02c14059e0e40994822451b23c94ff15ac3aba95f20251bf1ada6f6c930d9
+ARG PARSE_WORKER_LOCK_SHA256=d1846fca87b2242d38782b04f84515b2a9553dd33b7f3e740708397d3bf14419
+ARG DEPENDENCY_LOCK_SET_SHA256=4f55315dba8826009556ce50a207e6776a0bca7449aa0fd900dfa521dab5eb35
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
@@ -15,20 +20,33 @@ WORKDIR /app
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-# Install dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Install only the reviewed, hash-verified API/Assistant lock.
+COPY requirements/api-worker.lock /tmp/requirements/api-worker.lock
+RUN python -m pip install --disable-pip-version-check \
+      --no-cache-dir --require-hashes \
+      -r /tmp/requirements/api-worker.lock \
+    && python -m pip check
 
 # Stage 2: Base - Common runtime configuration
 FROM python:3.11-slim AS base
 
 # Immutable image/git revision for skill capability publication (override at build).
 ARG APP_BUILD_REVISION=development
+ARG API_WORKER_LOCK_SHA256=73f02c14059e0e40994822451b23c94ff15ac3aba95f20251bf1ada6f6c930d9
+ARG PARSE_WORKER_LOCK_SHA256=d1846fca87b2242d38782b04f84515b2a9553dd33b7f3e740708397d3bf14419
+ARG DEPENDENCY_LOCK_SET_SHA256=4f55315dba8826009556ce50a207e6776a0bca7449aa0fd900dfa521dab5eb35
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PATH="/opt/venv/bin:$PATH" \
     APP_BUILD_REVISION=${APP_BUILD_REVISION}
+
+LABEL org.opencontainers.image.revision=${APP_BUILD_REVISION} \
+      io.mindatlas.python-version="3.11" \
+      io.mindatlas.platform="linux/amd64" \
+      io.mindatlas.api-worker-lock-sha256=${API_WORKER_LOCK_SHA256} \
+      io.mindatlas.parse-worker-lock-sha256=${PARSE_WORKER_LOCK_SHA256} \
+      io.mindatlas.dependency-lock-set-sha256=${DEPENDENCY_LOCK_SET_SHA256}
 
 WORKDIR /app
 
@@ -81,32 +99,49 @@ HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=3 \
   CMD ["python", "-m", "app.assistant.worker", "--healthcheck"]
 CMD ["python", "-m", "app.assistant.worker"]
 
+# Release-only targets.  They share the reviewed runtime layer so the API and
+# both workers are always built from one immutable application image.
+FROM base AS scripted-provider
+ENV SCRIPTED_PROVIDER_BIND=0.0.0.0:8081
+EXPOSE 8081
+CMD ["python", "-m", "app.release.scripted_provider"]
+
+FROM base AS release-migrate
+CMD ["alembic", "upgrade", "head"]
+
 # Stage 6: Parse Worker target (Docling document parsing)
 FROM python:3.11-slim AS parse-worker-builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-ARG TORCH_CPU_VERSION=2.7.0
-ARG TORCHVISION_CPU_VERSION=0.22.0
-
 WORKDIR /app
 
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-COPY requirements-docling.txt requirements-parse-worker.txt ./
-RUN pip install --no-cache-dir \
-        "torch==${TORCH_CPU_VERSION}" \
-        "torchvision==${TORCHVISION_CPU_VERSION}" \
-        --index-url https://download.pytorch.org/whl/cpu && \
-    pip install --no-cache-dir -r requirements-parse-worker.txt
+COPY requirements/parse-worker.lock /tmp/requirements/parse-worker.lock
+RUN python -m pip install --disable-pip-version-check \
+      --no-cache-dir --require-hashes \
+      --extra-index-url https://download.pytorch.org/whl/cpu \
+      -r /tmp/requirements/parse-worker.lock \
+    && python -m pip check
 
 FROM python:3.11-slim AS parse-worker
+
+ARG APP_BUILD_REVISION=development
+ARG PARSE_WORKER_LOCK_SHA256=d1846fca87b2242d38782b04f84515b2a9553dd33b7f3e740708397d3bf14419
+ARG DEPENDENCY_LOCK_SET_SHA256=4f55315dba8826009556ce50a207e6776a0bca7449aa0fd900dfa521dab5eb35
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PATH="/opt/venv/bin:$PATH"
+
+LABEL org.opencontainers.image.revision=${APP_BUILD_REVISION} \
+      io.mindatlas.python-version="3.11" \
+      io.mindatlas.platform="linux/amd64" \
+      io.mindatlas.parse-worker-lock-sha256=${PARSE_WORKER_LOCK_SHA256} \
+      io.mindatlas.dependency-lock-set-sha256=${DEPENDENCY_LOCK_SET_SHA256}
 
 WORKDIR /app
 

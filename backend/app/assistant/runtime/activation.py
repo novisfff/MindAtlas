@@ -182,6 +182,12 @@ class AssistantRuntimeActivationService:
         *,
         principal: OperatorPrincipal,
     ) -> ActivatedRolloutResult:
+        # Active-rollout changes and launch-target reads use one serialization
+        # point. Preparing an inactive revision deliberately does not acquire
+        # this lock because it cannot change the active target.
+        from app.pre_ga_launch.repository import LaunchRepository
+
+        LaunchRepository(self.db).lock_launch()
         request_digest = digest_activation_request(revision_id, request)
         self.repo.lock_request_id(request.request_id)
         replay = self.repo.replay_or_conflict(

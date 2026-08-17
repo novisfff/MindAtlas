@@ -32,6 +32,7 @@ from app.assistant.capabilities.contracts import (  # noqa: E402
     CapabilityResult,
     CapabilityTimeoutPolicy,
     ClassificationContractRef,
+    ContinuationRef,
     FrozenBindingProvenance,
     completed_result,
     project_frozen_capability_binding,
@@ -85,6 +86,7 @@ from app.assistant.provider_loop.contracts import (  # noqa: E402
     ProviderGenerationOptions,
     ProviderLoopPorts,
     ProviderLoopRequest,
+    ProviderLoopResumeRequest,
     ProviderRoundBudgetDeniedError,
     ProviderRoundRequest,
     ProviderRoundResult,
@@ -93,9 +95,13 @@ from app.assistant.provider_loop.contracts import (  # noqa: E402
     ProviderToolChoice,
     ProviderUsage,
     ProviderUsageSnapshot,
+    ProviderWaitingResolution,
     create_execution_scope,
 )
-from app.assistant.provider_loop.loop import run_provider_agent_loop  # noqa: E402
+from app.assistant.provider_loop.loop import (  # noqa: E402
+    resume_provider_agent_loop,
+    run_provider_agent_loop,
+)
 from app.assistant.provider_loop.messages import (  # noqa: E402
     ProviderAssistantMessage,
     ProviderToolCall,
@@ -455,6 +461,48 @@ def test_ledger_release_unstarted_before_start() -> None:
     res = next(r for r in ledger.snapshot().reservations if r.call_id == "c1")
     assert res.state == "released"
     assert ledger.snapshot().capability_calls_started == 0
+
+
+def test_reuse_reserved_requires_exact_reserved_state_and_arguments_digest() -> None:
+    ledger = _ledger()
+    port = BudgetLedgerReservationPort(ledger=ledger)
+    item = _reserve_item("approval-call", arguments_digest=_ARGS_ONE)
+    assert port.reserve_one(item).allowed
+
+    mismatch = port.reuse_reserved(
+        _reserve_item("approval-call", arguments_digest=_ARGS_TWO)
+    )
+    assert mismatch.allowed is False
+    assert mismatch.reason_code == "reservation_identity_mismatch"
+
+    for mismatch_item in (
+        _reserve_item(
+            "approval-call",
+            owner_version_id=SKILL_VERSION_A,
+            arguments_digest=_ARGS_ONE,
+        ),
+        _reserve_item(
+            "approval-call",
+            domain_key="other.domain",
+            arguments_digest=_ARGS_ONE,
+        ),
+        _reserve_item(
+            "approval-call",
+            side_effect="compute",
+            arguments_digest=_ARGS_ONE,
+        ),
+    ):
+        decision = port.reuse_reserved(mismatch_item)
+        assert decision.allowed is False
+        assert decision.reason_code == "reservation_identity_mismatch"
+
+    assert port.reuse_reserved(item).allowed
+    BudgetLedgerDispatchGuard(ledger=ledger).mark_started(
+        call_id="approval-call", validated_arguments_digest=_ARGS_ONE
+    )
+    started = port.reuse_reserved(item)
+    assert started.allowed is False
+    assert started.reason_code == "reservation_state_invalid"
 
 
 def test_reserve_batch_all_or_none_partial_capacity() -> None:
@@ -1056,6 +1104,24 @@ class _RecDispatcher:
         return self.results_by_call_id[call_id]
 
 
+@dataclass
+class _TrackingReservationPort:
+    inner: BudgetLedgerReservationPort
+    calls: list[tuple[str, str]] = field(default_factory=list)
+
+    def reserve_one(self, item):
+        self.calls.append(("reserve_one", item.call_id))
+        return self.inner.reserve_one(item)
+
+    def reserve_batch(self, items):
+        self.calls.extend(("reserve_batch", item.call_id) for item in items)
+        return self.inner.reserve_batch(items)
+
+    def reuse_reserved(self, item):
+        self.calls.append(("reuse_reserved", item.call_id))
+        return self.inner.reuse_reserved(item)
+
+
 def _completed_dispatch(manifest: ResolvedRunManifestRevision) -> ProviderDispatchResult:
     return ProviderDispatchResult(
         capability_result=completed_result(
@@ -1375,6 +1441,198 @@ def test_loop_budget_denial_blocks_and_cancels_suffix() -> None:
     assert c1_records[0].status in {"blocked", "cancelled_before_start"}
     assert ledger.snapshot().capability_calls_started == 1
     assert [r.call.call_id for r in dispatcher.requests] == ["c0"]
+
+
+def test_call_owned_approval_resume_reuses_budget_reservation_across_restart() -> None:
+    limits = normalize_run_budget_limits(
+        operator_limits={
+            "max_total_capability_calls": 2,
+            "max_parallel_calls": 1,
+            "max_provider_rounds": 4,
+            "max_completion_followup_rounds": 1,
+            "max_same_read_signature": 2,
+        }
+    )
+    ledger = _ledger(limits=limits, owners=[_main_owner(limits)])
+    manifest = _manifest()
+    scope = _scope()
+    model = _model()
+    binding, descriptor = _pair(
+        "create_entry",
+        parallel_safe=False,
+        side_effect="write_local",
+        interrupt_mode="durable",
+    )
+    resolution = build_provider_tool_surface(
+        manifest=manifest,
+        provider_protocol=P,
+        visible=((binding, descriptor),),
+        scope=scope,
+    )
+    tool = resolution.surface.tools[0]
+    continuation_ref = ContinuationRef(
+        continuation_type="capability_call",
+        contract_version=1,
+        reference_id="approval-1",
+        payload_digest=DIGEST_A,
+    )
+    waiting_result = ProviderDispatchResult(
+        capability_result=CapabilityResult(
+            status="waiting",
+            user_text=None,
+            structured_output=None,
+            artifact_refs=(),
+            continuation=continuation_ref,
+            terminal_output=False,
+            needs_followup=True,
+            error=None,
+            metrics=CapabilityMetrics(duration_ms=1.0, input_bytes=0, output_bytes=0),
+        ),
+        next_manifest=resolution.manifest,
+    )
+
+    @dataclass
+    class _PauseSnapshotLedger:
+        snapshots: list[dict[str, Any]] = field(default_factory=list)
+        reserved_call_ids: list[tuple[str, ...]] = field(default_factory=list)
+
+        def reserve_siblings(self, requests, provider_messages=()):
+            del provider_messages
+            self.reserved_call_ids.append(
+                tuple(request.call.call_id for request in requests)
+            )
+
+        def commit_pause(self, continuation, provider_messages=()):
+            del continuation, provider_messages
+            self.snapshots.append(ledger.serialize())
+
+        def commit_progress(self, provider_messages=(), **_kwargs):
+            del provider_messages
+
+        def commit_recovery_drift(self, provider_messages, *, stale_call_id):
+            del provider_messages, stale_call_id
+
+    pause_ledger = _PauseSnapshotLedger()
+    initial_dispatcher = _RecDispatcher(
+        results_by_call_id={"approval-call": waiting_result},
+    )
+    initial = run_provider_agent_loop(
+        ProviderLoopRequest(
+            execution_scope=scope,
+            model_ref=model,
+            locale="en",
+            max_rounds=4,
+            generation=ProviderGenerationOptions(
+                max_output_tokens=64,
+                tool_choice=ProviderToolChoice(mode="auto"),
+            ),
+            initial_messages=(ProviderUserMessage(content="create"),),
+            manifest=manifest,
+        ),
+        ProviderLoopPorts(
+            provider=_FlexProvider(
+                provider_protocol=P,
+                adapter_key=ADAPTER_KEY,
+                adapter_revision=ADAPTER_REVISION,
+                model_config_digest=MODEL_CONFIG,
+                expected_model_ref=model,
+                round_scripts=[
+                    _tool_events(
+                        [("approval-call", tool.provider_alias, {"query": "create"})]
+                    ),
+                ],
+            ),
+            tools_provider=_RecTools(resolutions=[resolution]),
+            current_descriptors=_RecVerifier(),
+            authorization_evidence=_RecAuth(),
+            tool_dispatcher=initial_dispatcher,
+            sibling_executor=SequentialSiblingExecutor(),
+            cancellation=_RecCancellation(),
+            events=_RecEvents(),
+            call_reservation=BudgetLedgerReservationPort(ledger=ledger),
+            call_owner_resolver=FixedOwnerResolver(
+                owner_kind="main_agent",
+                owner_version_id=PROFILE_VERSION_ID,
+            ),
+            dispatch_guard=BudgetLedgerDispatchGuard(ledger=ledger),
+            capability_ledger=pause_ledger,
+        ),
+    )
+    assert initial.status == "waiting"
+    assert initial.continuation is not None
+    assert [request.call.call_id for request in initial_dispatcher.requests] == [
+        "approval-call"
+    ]
+    assert len(pause_ledger.snapshots) == 1
+    assert pause_ledger.reserved_call_ids == [("approval-call",)]
+    paused_state = BudgetLedger.deserialize(pause_ledger.snapshots[0], clock=_clock())
+    assert [item.state for item in paused_state.snapshot().reservations] == ["reserved"]
+
+    restarted = BudgetLedger.deserialize(pause_ledger.snapshots[0], clock=_clock())
+    resumed_dispatcher = _RecDispatcher(
+        results_by_call_id={"approval-call": _completed_dispatch(resolution.manifest)},
+        dispatch_guard=BudgetLedgerDispatchGuard(ledger=restarted),
+    )
+    restarted_reservations = _TrackingReservationPort(
+        inner=BudgetLedgerReservationPort(ledger=restarted)
+    )
+    resumed = resume_provider_agent_loop(
+        ProviderLoopResumeRequest(
+            manifest=initial.manifest,
+            messages=initial.messages,
+            continuation=initial.continuation,
+            resolved_waiting=ProviderWaitingResolution(
+                call_id="approval-call",
+                capability_continuation=continuation_ref,
+                capability_result=completed_result(
+                    user_text="approved",
+                    metrics=CapabilityMetrics(
+                        duration_ms=1.0, input_bytes=0, output_bytes=0
+                    ),
+                ),
+            ),
+        ),
+        ProviderLoopPorts(
+            provider=_FlexProvider(
+                provider_protocol=P,
+                adapter_key=ADAPTER_KEY,
+                adapter_revision=ADAPTER_REVISION,
+                model_config_digest=MODEL_CONFIG,
+                expected_model_ref=model,
+                round_scripts=[text_then_terminal("done")],
+            ),
+            tools_provider=_RecTools(resolutions=[resolution]),
+            current_descriptors=_RecVerifier(),
+            authorization_evidence=_RecAuth(),
+            tool_dispatcher=resumed_dispatcher,
+            sibling_executor=SequentialSiblingExecutor(),
+            cancellation=_RecCancellation(),
+            events=_RecEvents(),
+            call_reservation=restarted_reservations,  # type: ignore[arg-type]
+            call_owner_resolver=FixedOwnerResolver(
+                owner_kind="main_agent",
+                owner_version_id=PROFILE_VERSION_ID,
+            ),
+            dispatch_guard=BudgetLedgerDispatchGuard(ledger=restarted),
+            capability_ledger=pause_ledger,
+        ),
+    )
+    assert resumed.status == "completed", (
+        None if resumed.error is None else resumed.error.semantic_code
+    )
+    assert resumed.final_text == "done"
+    assert [request.call.call_id for request in resumed_dispatcher.requests] == [
+        "approval-call"
+    ]
+    assert pause_ledger.reserved_call_ids == [
+        ("approval-call",),
+        ("approval-call",),
+    ]
+    assert ("reuse_reserved", "approval-call") in restarted_reservations.calls
+    assert ("reserve_one", "approval-call") not in restarted_reservations.calls
+    snapshot = restarted.snapshot()
+    assert snapshot.capability_calls_started == 1
+    assert [item.state for item in snapshot.reservations] == ["finished"]
 
 
 def test_plan_sibling_execution_still_groups_parallel_eligible() -> None:

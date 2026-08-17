@@ -26,7 +26,12 @@ ALLOWED_CALL_TRANSITIONS: dict[tuple[str, str], str] = {
     ("awaiting_approval", "cancelled"): "cancel_unstarted",
     ("awaiting_approval", "expired"): "approval_expired",
     ("authorized", "executing"): "claim_attempt",
+    ("authorized", "failed"): "fail_before_side_effect",
     ("authorized", "cancelled"): "cancel_unstarted",
+    # A local transaction may lose the connection after the commit boundary
+    # without leaving a durable Attempt/Entry observation.  It must be
+    # quarantined, never retried as a fresh authorized write.
+    ("authorized", "unknown"): "local_commit_outcome_unknown",
     ("executing", "succeeded"): "commit_success",
     ("executing", "failed"): "commit_failure",
     ("executing", "cancelled"): "cancel_before_effect",
@@ -115,6 +120,12 @@ def validate_call_transition(
                 "retry_same_key_unauthorized",
                 "external_reconcilable retry requires authoritative not_accepted proof",
             )
+
+    if rule == "local_commit_outcome_unknown" and execution_mode != "local_transactional":
+        raise CallTransitionError(
+            "invalid_call_transition",
+            "only local_transactional calls may enter commit-outcome quarantine",
+        )
 
     if (
         execution_mode == "local_transactional"

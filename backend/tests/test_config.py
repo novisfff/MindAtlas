@@ -51,7 +51,8 @@ def test_main_agent_defaults_are_production_safe() -> None:
     assert s.assistant_main_agent_artifact_run_max_bytes == 5242880
     assert s.assistant_main_agent_inline_result_bytes == 16384
     assert s.assistant_capability_reconciliation_enabled is False
-    assert s.assistant_capability_reconciliation_operator_id is None
+    assert not hasattr(s, "assistant_capability_reconciliation_operator_id")
+    assert not hasattr(s, "assistant_main_agent_write_cohort_digest")
     assert s.assistant_capability_reconciliation_evidence_secret == ""
 
 
@@ -63,22 +64,24 @@ def test_reconciliation_requires_evidence_secret_when_enabled() -> None:
     assert "evidence_secret" in text
     assert "reconciliation_operator_id" not in text
 
-    # Evidence secret alone is sufficient; operator_id is never required for enablement.
+    # Evidence secret alone is sufficient; no configured Operator identity exists.
     settings = _settings(
         ASSISTANT_CAPABILITY_RECONCILIATION_ENABLED=True,
         ASSISTANT_CAPABILITY_RECONCILIATION_EVIDENCE_SECRET="e" * 32,
     )
     assert settings.assistant_capability_reconciliation_enabled is True
-    assert settings.assistant_capability_reconciliation_operator_id is None
+    assert not hasattr(settings, "assistant_capability_reconciliation_operator_id")
     assert settings.assistant_capability_reconciliation_evidence_secret == "e" * 32
 
 
-def test_golden_write_requires_usable_reconciliation_path() -> None:
-    """Golden write requires reconciliation enabled + evidence secret; not operator_id."""
+def test_create_entry_write_requires_all_process_safety_controls() -> None:
+    """Create entry requires reconciliation, Interrupt, and idempotency controls."""
     common = {
-        "ASSISTANT_MAIN_AGENT_WRITE_MODE": "golden",
+        "ASSISTANT_MAIN_AGENT_WRITE_MODE": "create_entry",
         "ASSISTANT_CAPABILITY_LEDGER_MODE": "enforced",
         "ASSISTANT_CAPABILITY_CALL_IDEMPOTENCY_SECRET": "i" * 32,
+        "ASSISTANT_DURABLE_INTERRUPTS_ENABLED": True,
+        "ASSISTANT_INTERRUPT_TOKEN_PEPPER": "stable-pepper",
     }
     with pytest.raises(ValidationError, match="reconciliation"):
         _settings(**common)
@@ -88,9 +91,9 @@ def test_golden_write_requires_usable_reconciliation_path() -> None:
         ASSISTANT_CAPABILITY_RECONCILIATION_ENABLED=True,
         ASSISTANT_CAPABILITY_RECONCILIATION_EVIDENCE_SECRET="e" * 32,
     )
-    assert settings.assistant_main_agent_write_mode == "golden"
+    assert settings.assistant_main_agent_write_mode == "create_entry"
     assert settings.assistant_capability_reconciliation_enabled is True
-    assert settings.assistant_capability_reconciliation_operator_id is None
+    assert not hasattr(settings, "assistant_capability_reconciliation_operator_id")
 
 
 @pytest.mark.parametrize("mode", ["off", "shadow", "read_only", "legacy", ""])

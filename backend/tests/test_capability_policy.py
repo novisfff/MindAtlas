@@ -894,15 +894,13 @@ def test_concurrent_permit_consume_admits_once() -> None:
     assert sum(errors) == 7
 
 
-def test_openclaw_system_ceilings_cover_six_items() -> None:
+def test_openclaw_system_ceilings_cover_read_only_items() -> None:
     from app.assistant.capabilities.policy import OPENCLAW_SYSTEM_ITEM_EFFECT_CEILINGS
 
     expected = {
         "search_entries",
         "get_entry",
-        "create_relation",
         "query_knowledge_graph",
-        "submit_context_capture",
         "generate_periodic_review",
     }
     assert set(OPENCLAW_SYSTEM_ITEM_EFFECT_CEILINGS) == expected

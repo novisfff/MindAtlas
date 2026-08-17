@@ -7,7 +7,9 @@ import {
   Settings,
   ChevronLeft,
 
-  Sparkles
+  Sparkles,
+  ShieldCheck,
+  ListChecks,
 } from 'lucide-react'
 import { Logo } from '@/components/Logo'
 import { useTranslation } from 'react-i18next'
@@ -22,6 +24,8 @@ const navItems = [
   { icon: Network, labelKey: 'navigation.graph', href: '/graph' },
   { icon: Calendar, labelKey: 'navigation.calendar', href: '/calendar' },
   { icon: Settings, labelKey: 'navigation.settings', href: '/settings' },
+  { icon: ShieldCheck, labelKey: 'navigation.preGaLaunch', href: '/settings/pre-ga-launch' },
+  { icon: ListChecks, labelKey: 'navigation.reconciliation', href: '/settings/reconciliation' },
 ]
 
 export function Sidebar() {

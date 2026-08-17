@@ -279,7 +279,7 @@ class IsolationDeltaTests(unittest.TestCase):
         self.assertTrue(outcome.gate_eligible)
         self.assertTrue(all(v == 0 for v in delta.values()), msg=delta)
 
-    def test_write_simulation_zero_production_delta_off_and_golden(self) -> None:
+    def test_write_simulation_zero_production_delta_off_and_create_entry(self) -> None:
         from app.assistant.evaluation.runner import InteractiveScriptStep
 
         steps = [
@@ -300,23 +300,30 @@ class IsolationDeltaTests(unittest.TestCase):
             ),
         ]
         out_off, delta_off = self._run_script(steps, write_mode="off")
-        out_golden, delta_golden = self._run_script(steps, write_mode="golden")
+        out_create_entry, delta_create_entry = self._run_script(
+            steps, write_mode="create_entry"
+        )
         self.assertEqual(out_off.terminal, "completed")
-        self.assertEqual(out_golden.terminal, "completed")
+        self.assertEqual(out_create_entry.terminal, "completed")
         self.assertEqual(
             [r.outcome for r in out_off.call_records],
-            [r.outcome for r in out_golden.call_records],
+            [r.outcome for r in out_create_entry.call_records],
         )
         self.assertEqual(
             [r.outcome for r in out_off.call_records],
             ["simulated", "simulated", "simulated"],
         )
         self.assertTrue(all(v == 0 for v in delta_off.values()), msg=delta_off)
-        self.assertTrue(all(v == 0 for v in delta_golden.values()), msg=delta_golden)
+        self.assertTrue(
+            all(v == 0 for v in delta_create_entry.values()),
+            msg=delta_create_entry,
+        )
         # Metrics record write mode was seen but must not affect result.
         self.assertFalse(out_off.aggregate_metrics["production_write_mode_affects_result"])
         self.assertFalse(
-            out_golden.aggregate_metrics["production_write_mode_affects_result"]
+            out_create_entry.aggregate_metrics[
+                "production_write_mode_affects_result"
+            ]
         )
 
     def test_unknown_side_effect_denied_not_simulated(self) -> None:

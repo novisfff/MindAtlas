@@ -5,6 +5,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
+from starlette.requests import Request
 
 from app.assistant.schemas import (
     AssistantRunResponse,
@@ -14,6 +15,7 @@ from app.assistant.schemas import (
     ConversationResponse,
     ConversationSummaryResponse,
     DurableInterruptResolveRequest,
+    DurableCallOwnedDecisionRequest,
     DurableInterruptTokenRequest,
     HumanApprovalDecisionRequest,
 )
@@ -21,6 +23,14 @@ from app.assistant.service import AssistantService
 from app.assistant.workflow.durable import interrupt_api as durable_interrupt_api
 from app.common.responses import ApiResponse
 from app.database import get_db
+from app.operator_auth.contracts import OperatorPrincipal
+from app.operator_auth.audit import OperatorAuditRepository
+from app.operator_auth.dependencies import (
+    request_security_context,
+    require_csrf,
+    require_operator_principal,
+)
+from app.config import Settings, get_settings
 
 
 router = APIRouter(prefix="/api/assistant", tags=["assistant"])
@@ -244,4 +254,59 @@ def resolve_durable_interrupt(
         values=request.values,
         comment=request.comment,
     )
+    return ApiResponse.ok(payload)
+
+
+@router.post(
+    "/conversations/{id}/runs/{run_id}/interrupts/{interrupt_id}/decision",
+    response_model=ApiResponse,
+)
+@router.post(
+    "/conversations/{id}/runs/{run_id}/capability-calls/{call_id}/interrupts/{interrupt_id}/decision",
+    response_model=ApiResponse,
+)
+def decide_call_owned_interrupt(
+    id: UUID,
+    run_id: UUID,
+    interrupt_id: UUID,
+    request: DurableCallOwnedDecisionRequest,
+    http_request: Request,
+    db: Session = Depends(get_db),
+    principal: OperatorPrincipal = Depends(require_operator_principal),
+    _csrf: None = Depends(require_csrf),
+    settings: Settings = Depends(get_settings),
+    call_id: UUID | None = None,
+) -> ApiResponse:
+    """Authenticated operator boundary for capability-call approval decisions."""
+    service = AssistantService(db)
+    service.get_conversation_basic(id)
+    payload = durable_interrupt_api.service_decide_call_owned(
+        db,
+        conversation_id=id,
+        run_id=run_id,
+        interrupt_id=interrupt_id,
+        call_id=call_id,
+        resolution_request_id=request.resolution_request_id,
+        expected_request_revision=request.expected_request_revision,
+        expected_run_revision=request.expected_run_revision,
+        outcome=request.outcome,
+        comment=request.comment,
+        actor=principal,
+        commit=False,
+    )
+    OperatorAuditRepository(db).append(
+        event_type="control_plane_mutation_committed",
+        outcome="succeeded",
+        context=request_security_context(http_request, settings),
+        operator_id=principal.operator_id,
+        session_id=principal.session_id,
+        metadata={
+            "mutation": "capability_call_approval",
+            "callId": str(call_id) if call_id is not None else None,
+            "interruptId": str(interrupt_id),
+            "outcome": request.outcome,
+            "resolutionRequestId": str(request.resolution_request_id),
+        },
+    )
+    db.commit()
     return ApiResponse.ok(payload)

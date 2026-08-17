@@ -1,8 +1,9 @@
 """Capability call reconciliation operations (Plan 08 Task 7).
 
 No production external write is enabled. This module provides the complete
-backend contract for operator decisions with mode-matrix enforcement.
-HTTP mutation routes remain unmounted; CLI is the guarded transport.
+backend contract for operator decisions with mode-matrix enforcement. The
+authenticated HTTP transport lives in ``reconciliation_router``; the legacy
+CLI remains inspection-only for mutations.
 """
 
 from __future__ import annotations
@@ -60,6 +61,7 @@ from app.assistant.durable.repository import (
     EventSpec,
     STATUS_COMPLETED,
     STATUS_FAILED,
+    STATUS_NEEDS_RECONCILIATION,
     STATUS_QUEUED,
 )
 from app.assistant.policy.obligations import (
@@ -86,6 +88,21 @@ MODES_FORBIDDING_RETRY = frozenset(
         "read_replayable",
     }
 )
+
+
+def _is_exact_call_reconciliation_obligation(item: Any, call_id: UUID) -> bool:
+    """Match the immutable Call owner and source identity together.
+
+    Either field alone is insufficient: accepting an OR match lets an
+    obligation created for one Call be satisfied by another Call that happens
+    to share an owner or source pointer.
+    """
+    return (
+        str(getattr(item, "obligation_type", "")) == "reconciliation"
+        and str(getattr(item, "owner_kind", "")) == "capability_call"
+        and str(getattr(item, "owner_id", "")) == str(call_id)
+        and str(getattr(item, "source_call_id", "")) == str(call_id)
+    )
 
 
 def validate_retry_authorization_for_dispatch(
@@ -220,6 +237,7 @@ class AuthorizedReconciliationActor:
 
     actor_admin_id: UUID
     authorization_method: str
+    session_id: UUID | None = None
 
 
 OperatorAuthorizer = Callable[
@@ -293,11 +311,16 @@ class CapabilityReconciliationService:
         *,
         operator_authorizer: OperatorAuthorizer | None = None,
         evidence_verifier: HmacReconciliationEvidenceVerifier | None = None,
+        write_safety_lock: Any | None = None,
     ) -> None:
         self.db = db
-        self.calls = CapabilityCallRepository(db)
+        self.calls = CapabilityCallRepository(
+            db,
+            write_safety_lock=write_safety_lock,
+        )
         self.operator_authorizer = operator_authorizer
         self.evidence_verifier = evidence_verifier
+        self.write_safety_lock = self.calls.write_safety_lock
 
     def get_call(self, call_id: UUID) -> AssistantCapabilityCall | None:
         return self.calls.get_call(call_id)
@@ -315,6 +338,8 @@ class CapabilityReconciliationService:
         request: ReconciliationDecisionRequest,
         *,
         now: datetime | None = None,
+        actor: Any | None = None,
+        commit: bool = True,
     ) -> ReconciliationResult:
         ts = now or utcnow()
         if not (request.reason or "").strip():
@@ -326,12 +351,29 @@ class CapabilityReconciliationService:
                 CODE_INVALID_TRANSITION,
                 "reconciliation requires at least one evidence artifact id",
             )
-        if self.operator_authorizer is None:
-            raise CapabilityCallConflict(
-                CODE_INVALID_TRANSITION,
-                "reconciliation requires a trusted operator authorization boundary",
-            )
-        actor = self.operator_authorizer(request)
+        if actor is None:
+            if self.operator_authorizer is None:
+                raise CapabilityCallConflict(
+                    CODE_INVALID_TRANSITION,
+                    "reconciliation requires a trusted operator authorization boundary",
+                )
+            actor = self.operator_authorizer(request)
+        else:
+            # HTTP production callers pass the authenticated OperatorPrincipal;
+            # request JSON never supplies either identity field.
+            try:
+                from app.operator_auth.contracts import OperatorPrincipal
+
+                if not isinstance(actor, OperatorPrincipal) or actor.role != "operator":
+                    actor = None
+                else:
+                    actor = AuthorizedReconciliationActor(
+                        actor_admin_id=actor.operator_id,
+                        authorization_method=actor.authentication_method,
+                        session_id=actor.session_id,
+                    )
+            except Exception:
+                actor = None
         if (
             actor is None
             or not isinstance(actor.actor_admin_id, UUID)
@@ -347,8 +389,17 @@ class CapabilityReconciliationService:
                 "reconciliation requires a trusted evidence authenticity verifier",
             )
 
-        # Resolve the parent without a row lock, then obey the global lock order:
-        # Run -> Interrupt (none here) -> CapabilityCall.
+        from app.assistant.capability_calls.write_guard import (
+            acquire_write_safety_advisory_lock,
+        )
+
+        if self.write_safety_lock is None:
+            acquire_write_safety_advisory_lock(self.db)
+        else:
+            self.write_safety_lock.acquire(self.db)
+
+        # Advisory lock is already held; resolve the parent without a row lock,
+        # then continue Run -> Interrupt (none here) -> CapabilityCall.
         call_probe = self.calls.get_call(request.call_id)
         if call_probe is None:
             raise CapabilityCallConflict(
@@ -372,15 +423,31 @@ class CapabilityReconciliationService:
                     CODE_INVALID_TRANSITION,
                     "resolution_request_id was already used for another Call in this Run",
                 )
+            stored_evidence = existing.authorization_evidence or {}
+            stored_operator_id = str(stored_evidence.get("operatorId") or "")
+            stored_session_id = str(stored_evidence.get("sessionId") or "")
+            stored_authentication_method = str(
+                stored_evidence.get("authorizationMethod") or ""
+            )
+            actor_session_id = getattr(actor, "session_id", None)
             if (
                 str(existing.decision) != request.decision
                 or str(existing.reason) != request.reason.strip()
+                or int(existing.expected_call_revision)
+                != int(request.expected_call_revision)
+                or int(existing.expected_run_revision)
+                != int(request.expected_run_revision)
                 or list(existing.evidence_artifact_ids or [])
                 != [str(value) for value in request.evidence_artifact_ids]
+                or stored_operator_id != str(actor.actor_admin_id)
+                or stored_session_id
+                != (str(actor_session_id) if actor_session_id is not None else "")
+                or stored_authentication_method
+                != str(actor.authorization_method)
             ):
                 raise CapabilityCallConflict(
                     CODE_INVALID_TRANSITION,
-                    "resolution_request_id was already used for a different decision",
+                    "resolution_request_id was already used for a different decision or actor",
                 )
             persisted_status = {
                 "mark_succeeded": "succeeded",
@@ -547,6 +614,10 @@ class CapabilityReconciliationService:
             authorization_evidence={
                 "mode": mode,
                 "authorizationMethod": actor.authorization_method,
+                "operatorId": str(actor.actor_admin_id),
+                "sessionId": (
+                    str(actor.session_id) if actor.session_id is not None else None
+                ),
                 "evidence": evidence_summary,
                 "verifiedClaims": verified_claims,
             },
@@ -584,7 +655,7 @@ class CapabilityReconciliationService:
             tool_message=(tool_message if decision != "retry_same_key" else None),
             now=ts,
         )
-        commit = DurableRunRepository(self.db).commit_reconciliation_resolution(
+        commit_result = DurableRunRepository(self.db).commit_reconciliation_resolution(
             run_id=run.id,
             expected_revision=int(run.state_revision),
             target_status=target_run_status,
@@ -611,13 +682,14 @@ class CapabilityReconciliationService:
                 ),
             ),
             children=aggregate_children,
+            commit=commit,
         )
         return ReconciliationResult(
             call_id=call.id,
             decision=decision,
             resulting_call_status=str(call.status),
             resulting_call_revision=int(call.state_revision),
-            resulting_run_revision=int(commit.run.state_revision),
+            resulting_run_revision=int(commit_result.run.state_revision),
             reconciliation_id=row.id,
             created=True,
         )
@@ -734,14 +806,7 @@ class CapabilityReconciliationService:
         matching = [
             item
             for item in pending
-            if item.obligation_type == "reconciliation"
-            and (
-                item.source_call_id == str(call.id)
-                or (
-                    item.owner_kind == "capability_call"
-                    and item.owner_id == str(call.id)
-                )
-            )
+            if _is_exact_call_reconciliation_obligation(item, call.id)
         ]
         if len(matching) != 1:
             raise CapabilityCallConflict(
@@ -750,13 +815,9 @@ class CapabilityReconciliationService:
                 call=call,
                 run=run,
             )
-        if len(pending) != 1:
-            raise CapabilityCallConflict(
-                CODE_INVALID_TRANSITION,
-                "another pending obligation prevents reconciliation wake-up",
-                call=call,
-                run=run,
-            )
+        # Other pending obligations belong to other durable owners.  Resolving
+        # this exact Call remains valid; the Run stays unresolved until those
+        # obligations are also handled.
         return checkpoint, current
 
     def _build_terminal_projection(
@@ -908,14 +969,7 @@ class CapabilityReconciliationService:
                 item
                 for item in state.obligations
                 if item.status == "pending"
-                and item.obligation_type == "reconciliation"
-                and (
-                    item.source_call_id == str(call.id)
-                    or (
-                        item.owner_kind == "capability_call"
-                        and item.owner_id == str(call.id)
-                    )
-                )
+                and _is_exact_call_reconciliation_obligation(item, call.id)
             ),
             None,
         )
@@ -1267,7 +1321,42 @@ class CapabilityReconciliationService:
             obligation_children.current_obligation_revision_id
             or current.obligation_revision_id
         )
-        if decision == "retry_same_key":
+        resolved_obligation_row = next(
+            (
+                row
+                for row in obligation_children.rows
+                if isinstance(row, AssistantRunObligationRevision)
+            ),
+            None,
+        )
+        remaining_pending = False
+        if resolved_obligation_row is not None:
+            resolved_state = ObligationLedgerState.model_validate(
+                resolved_obligation_row.payload
+            )
+            remaining_pending = any(
+                item.status == "pending" for item in resolved_state.obligations
+            )
+
+        if remaining_pending:
+            # Do not mark a Run terminal while a sibling obligation remains.
+            # A Tool result seals the open Provider suffix (including every
+            # unstarted sibling), so the old continuation would point back to
+            # the already-resolved waiting Call.  Only a retry-without-result
+            # may preserve that continuation for a future dispatch.
+            continuation_after = (
+                current.provider_loop_continuation
+                if tool_message is None
+                else None
+            )
+            if continuation_after is not None:
+                phase = "waiting"
+                next_action = DurableNextActionV2(kind="wait")
+            else:
+                phase = "terminal"
+                next_action = DurableNextActionV2(kind="reconcile")
+            target_run_status = STATUS_NEEDS_RECONCILIATION
+        elif decision == "retry_same_key":
             phase = "ready_for_provider"
             next_action = DurableNextActionV2(kind="dispatch_calls")
             target_run_status = STATUS_QUEUED
@@ -1286,7 +1375,9 @@ class CapabilityReconciliationService:
                 "phase": phase,
                 "obligation_revision_id": obligation_id,
                 "next_action": next_action,
-                "provider_loop_continuation": None,
+                "provider_loop_continuation": (
+                    continuation_after if remaining_pending else None
+                ),
                 "provider_message_ordinal": final_ordinal,
                 "provider_transcript_digest": final_transcript_digest,
                 "artifact_ids": tuple(
@@ -1447,6 +1538,11 @@ class CapabilityReconciliationService:
                 ),
                 "attempt": expected_attempt,
             }
+            if (
+                str(call.execution_mode) == "local_transactional"
+                and decision != "retry_same_key"
+            ):
+                expected_base["entryObservation"] = self._local_entry_observation(call)
             if not evidence_type or any(
                 claims.get(key) != value for key, value in expected_base.items()
             ):
@@ -1495,6 +1591,15 @@ class CapabilityReconciliationService:
                     "mark_succeeded requires signed result attestation",
                     call=call,
                 )
+            if (
+                str(call.execution_mode) == "local_transactional"
+                and self._local_entry_observation(call).get("kind") != "present"
+            ):
+                raise CapabilityCallConflict(
+                    CODE_INVALID_TRANSITION,
+                    "local mark_succeeded requires an observed durable Entry",
+                    call=call,
+                )
         if decision == "mark_failed" and not any(
             claim.get("failureDisposition")
             in {"proven_not_occurred", "explicit_product_acceptance_unresolved"}
@@ -1504,6 +1609,16 @@ class CapabilityReconciliationService:
             raise CapabilityCallConflict(
                 CODE_INVALID_TRANSITION,
                 "mark_failed requires a signed failure disposition",
+                call=call,
+            )
+        if (
+            decision == "mark_failed"
+            and str(call.execution_mode) == "local_transactional"
+            and self._local_entry_observation(call).get("kind") != "proven_absent"
+        ):
+            raise CapabilityCallConflict(
+                CODE_INVALID_TRANSITION,
+                "local mark_failed requires proven absence of the Entry",
                 call=call,
             )
         if decision == "mark_compensated" and not any(
@@ -1578,6 +1693,7 @@ class CapabilityReconciliationService:
             "deadlineAt",
             "diagnosticArtifactId",
             "diagnosticArtifactDigest",
+            "entryObservation",
         }
         sanitized = {key: value for key, value in claims.items() if key in allowed}
         attempt = sanitized.get("attempt")
@@ -1593,6 +1709,23 @@ class CapabilityReconciliationService:
                 )
             }
         return sanitized
+
+    def _local_entry_observation(self, call: AssistantCapabilityCall) -> dict[str, Any]:
+        """Return the durable truth for a local ``create_entry`` settlement."""
+        if str(call.execution_mode) != "local_transactional":
+            return {"kind": "not_applicable", "entryId": None}
+        from app.entry.models import Entry
+
+        entry = (
+            self.db.query(Entry)
+            .filter(Entry.source_capability_call_id == call.id)
+            .with_for_update()
+            .one_or_none()
+        )
+        return {
+            "kind": "present" if entry is not None else "proven_absent",
+            "entryId": str(entry.id) if entry is not None else None,
+        }
 
     @staticmethod
     def _attempt_claim(attempt: AssistantCapabilityCallAttempt | None) -> dict[str, Any] | None:
@@ -1774,10 +1907,32 @@ class ReconciliationEvidenceIssuer:
         *,
         call_id: UUID,
         result_artifact_id: UUID,
+        expected_call_revision: int | None = None,
+        expected_run_revision: int | None = None,
         now: datetime | None = None,
     ) -> AssistantRunArtifact:
         ts = now or utcnow()
         run, call, attempt = self._locked_call_attempt(call_id)
+        if (
+            expected_call_revision is not None
+            and int(call.state_revision) != int(expected_call_revision)
+        ):
+            raise CapabilityCallConflict(
+                CODE_STALE_CALL_REVISION,
+                "success evidence issuance call revision is stale",
+                call=call,
+                run=run,
+            )
+        if (
+            expected_run_revision is not None
+            and int(run.state_revision) != int(expected_run_revision)
+        ):
+            raise CapabilityCallConflict(
+                CODE_STALE_RUN_REVISION,
+                "success evidence issuance Run revision is stale",
+                call=call,
+                run=run,
+            )
         artifact = (
             self.db.query(AssistantRunArtifact)
             .filter(AssistantRunArtifact.id == result_artifact_id)
@@ -1820,6 +1975,8 @@ class ReconciliationEvidenceIssuer:
         *,
         call_id: UUID,
         reason: str,
+        expected_call_revision: int | None = None,
+        expected_run_revision: int | None = None,
         now: datetime | None = None,
     ) -> AssistantRunArtifact:
         ts = now or utcnow()
@@ -1830,6 +1987,26 @@ class ReconciliationEvidenceIssuer:
                 "product failure acceptance reason is required",
             )
         run, call, attempt = self._locked_call_attempt(call_id)
+        if (
+            expected_call_revision is not None
+            and int(call.state_revision) != int(expected_call_revision)
+        ):
+            raise CapabilityCallConflict(
+                CODE_STALE_CALL_REVISION,
+                "failure evidence issuance call revision is stale",
+                call=call,
+                run=run,
+            )
+        if (
+            expected_run_revision is not None
+            and int(run.state_revision) != int(expected_run_revision)
+        ):
+            raise CapabilityCallConflict(
+                CODE_STALE_RUN_REVISION,
+                "failure evidence issuance Run revision is stale",
+                call=call,
+                run=run,
+            )
         if self.operator_authorizer is None:
             raise CapabilityCallConflict(
                 CODE_INVALID_TRANSITION,
@@ -1963,14 +2140,14 @@ class ReconciliationEvidenceIssuer:
         )
         return run, call, attempt
 
-    @staticmethod
     def _base_claims(
+        self,
         call: AssistantCapabilityCall,
         attempt: AssistantCapabilityCallAttempt | None,
         decision: ReconciliationDecision,
         now: datetime,
     ) -> dict[str, Any]:
-        return {
+        claims = {
             "callId": str(call.id),
             "runId": str(call.run_id),
             "decision": decision,
@@ -1980,6 +2157,27 @@ class ReconciliationEvidenceIssuer:
             ),
             "attempt": CapabilityReconciliationService._attempt_claim(attempt),
             "issuedAt": now.astimezone(timezone.utc).isoformat(),
+        }
+        claims["entryObservation"] = self._local_entry_observation(call)
+        return claims
+
+    def _local_entry_observation(
+        self, call: AssistantCapabilityCall
+    ) -> dict[str, Any]:
+        """Read the durable local Entry truth while issuing a claim."""
+        if str(call.execution_mode) != "local_transactional":
+            return {"kind": "not_applicable", "entryId": None}
+        from app.entry.models import Entry
+
+        entry = (
+            self.db.query(Entry)
+            .filter(Entry.source_capability_call_id == call.id)
+            .with_for_update()
+            .one_or_none()
+        )
+        return {
+            "kind": "present" if entry is not None else "proven_absent",
+            "entryId": str(entry.id) if entry is not None else None,
         }
 
     def _persist(

@@ -1,1 +1,1 @@
-"""Backend operator scripts package (verification runners, rollout CLIs)."""
+"""Repository maintenance scripts importable by policy tests."""

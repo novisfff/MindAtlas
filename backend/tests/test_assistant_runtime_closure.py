@@ -168,6 +168,12 @@ def test_identity_excludes_secrets_and_probe_fields(db, bound_model):
 
 
 def test_closure_digest_covers_every_identity(db, bound_model):
+    from app.assistant.capability_calls.write_guard import (
+        CREATE_ENTRY_CONTRACT_DIGEST,
+        RECONCILIATION_CONTRACT_VERSION,
+        WRITE_COHORT_DIGEST,
+        WRITE_POLICY_DIGEST,
+    )
     from app.assistant.domain.digests import sha256_canonical_json
     from app.assistant.runtime.closure import AssistantRuntimeClosureBuilder
     from app.assistant.runtime.models import AssistantMainAgentRolloutRevision
@@ -186,6 +192,17 @@ def test_closure_digest_covers_every_identity(db, bound_model):
     assert len(closure.closure_digest) == 64
     assert closure.rollout_revision_id == rollout.id
     assert closure.model_id == bound_model.model.id
+    assert closure.create_entry_contract_digest == CREATE_ENTRY_CONTRACT_DIGEST
+    assert closure.write_policy_digest == WRITE_POLICY_DIGEST
+    assert closure.write_cohort_digest == WRITE_COHORT_DIGEST
+    assert closure.reconciliation_contract_version == RECONCILIATION_CONTRACT_VERSION
+    assert rollout.required_create_entry_contract_digest == CREATE_ENTRY_CONTRACT_DIGEST
+    assert rollout.required_write_policy_digest == WRITE_POLICY_DIGEST
+    assert rollout.required_write_cohort_digest == WRITE_COHORT_DIGEST
+    assert (
+        rollout.required_reconciliation_contract_version
+        == RECONCILIATION_CONTRACT_VERSION
+    )
 
 
 @pytest.mark.parametrize(
@@ -200,6 +217,10 @@ def test_closure_digest_covers_every_identity(db, bound_model):
         "runtime_contract",
         "checkpoint_codec",
         "feature_digest",
+        "create_entry_contract_digest",
+        "write_policy_digest",
+        "write_cohort_digest",
+        "reconciliation_contract_version",
     ],
 )
 def test_revalidation_rejects_any_closure_drift(db, bound_model, mutation):
@@ -225,6 +246,10 @@ def test_revalidation_rejects_any_closure_drift(db, bound_model, mutation):
         "RUNTIME_CONTRACT_VERSION": closure_mod.RUNTIME_CONTRACT_VERSION,
         "CURRENT_CHECKPOINT_CODEC_VERSION": closure_mod.CURRENT_CHECKPOINT_CODEC_VERSION,
         "default_capability_feature_digest": closure_mod.default_capability_feature_digest,
+        "CREATE_ENTRY_CONTRACT_DIGEST": closure_mod.CREATE_ENTRY_CONTRACT_DIGEST,
+        "WRITE_POLICY_DIGEST": closure_mod.WRITE_POLICY_DIGEST,
+        "WRITE_COHORT_DIGEST": closure_mod.WRITE_COHORT_DIGEST,
+        "RECONCILIATION_CONTRACT_VERSION": closure_mod.RECONCILIATION_CONTRACT_VERSION,
         "get_settings": closure_mod.get_settings,
     }
     try:
@@ -349,6 +374,30 @@ def _mutate_runtime_subject(db, mutation: str, *, rollout, model) -> None:
         import app.assistant.runtime.closure as closure_mod
 
         closure_mod.default_capability_feature_digest = lambda: "d" * 64  # type: ignore[assignment]
+        return
+
+    if mutation == "create_entry_contract_digest":
+        import app.assistant.runtime.closure as closure_mod
+
+        closure_mod.CREATE_ENTRY_CONTRACT_DIGEST = "1" * 64
+        return
+
+    if mutation == "write_policy_digest":
+        import app.assistant.runtime.closure as closure_mod
+
+        closure_mod.WRITE_POLICY_DIGEST = "2" * 64
+        return
+
+    if mutation == "write_cohort_digest":
+        import app.assistant.runtime.closure as closure_mod
+
+        closure_mod.WRITE_COHORT_DIGEST = "3" * 64
+        return
+
+    if mutation == "reconciliation_contract_version":
+        import app.assistant.runtime.closure as closure_mod
+
+        closure_mod.RECONCILIATION_CONTRACT_VERSION += 1
         return
 
     raise AssertionError(f"unknown mutation: {mutation}")

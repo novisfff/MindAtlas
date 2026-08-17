@@ -15,6 +15,7 @@ export type AssistantReadinessReason =
   | 'runtime_closure_drift'
   | 'worker_unavailable'
   | 'schema_incompatible'
+  | 'pre_ga_launch_unapproved'
   | 'new_runs_disabled'
 
 export interface PublicAssistantReadiness {

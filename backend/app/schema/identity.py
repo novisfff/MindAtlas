@@ -15,6 +15,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.schema.canonical import sha256_canonical_json
 from app.schema.contracts import (
     CLEAN_ROOT_REVISION,
+    NEXT_RESERVED_REVISION,
     SCHEMA_FAMILY,
     SCHEMA_IDENTITY_CONTRACT_VERSION,
     SCHEMA_IDENTITY_SINGLETON_KEY,
@@ -28,6 +29,20 @@ DEFAULT_EXPECTED_SCHEMA_CONTRACT_PATH = (
     Path(__file__).resolve().parent
     / "manifests"
     / "pre_ga_v1-expected.json"
+)
+DEFAULT_EXPECTED_SCHEMA_CONTRACT_V2_PATH = (
+    Path(__file__).resolve().parent
+    / "manifests"
+    / "pre_ga_v1_0002-expected.json"
+)
+# ``pre_ga_v1_0001`` is a sealed historical root. Its marker was generated
+# before the current runtime seed/Capability contracts were introduced; the
+# additive ``pre_ga_v1_0002`` manifest owns those current values.
+CLEAN_ROOT_SEED_CONTRACT_DIGEST = (
+    "a728d696b086b0ced78a37de80a7831cd788e22f7668f083a7245706b13334ba"
+)
+CLEAN_ROOT_CAPABILITY_FEATURE_DIGEST = (
+    "11af8408a0d3a6ff93a5170a9bb6758f430773d1e1343ee3982396f0ed9cd3b4"
 )
 SCHEMA_IDENTITY_CONTROL_FINGERPRINT = (
     "6bf3db9018a22c66055ade8d16a98dac2fdcf4fd0d97b03077da3bc5641dade7"
@@ -127,6 +142,40 @@ class ExpectedSchemaContract:
         }
 
 
+@dataclass(frozen=True)
+class ExpectedSchemaContractV2:
+    schema_family: str
+    schema_revision: str
+    application_structural_fingerprint: str
+    schema_identity_control_fingerprint: str
+    seed_contract_digest: str
+    runtime_contract_version: int
+    checkpoint_codec_version: int
+    capability_feature_digest: str
+    operator_auth_contract_version: str
+    identity_contract_version: int
+    schema_contract_material_digest: str
+    runtime_identity_digests: dict[str, str]
+    manifest_digest: str
+
+    def to_payload(self) -> dict[str, JsonValue]:
+        return {
+            "schemaVersion": 1,
+            "schemaFamily": self.schema_family,
+            "schemaRevision": self.schema_revision,
+            "applicationStructuralFingerprint": self.application_structural_fingerprint,
+            "schemaIdentityControlFingerprint": self.schema_identity_control_fingerprint,
+            "schemaSeedContractDigest": self.seed_contract_digest,
+            "runtimeContractVersion": self.runtime_contract_version,
+            "checkpointCodecVersion": self.checkpoint_codec_version,
+            "capabilityFeatureDigest": self.capability_feature_digest,
+            "operatorAuthContractVersion": self.operator_auth_contract_version,
+            "identityContractVersion": self.identity_contract_version,
+            "schemaContractMaterialDigest": self.schema_contract_material_digest,
+            "runtimeIdentityDigests": self.runtime_identity_digests,
+        }
+
+
 class _DuplicateJsonMember(ValueError):
     pass
 
@@ -195,12 +244,6 @@ def load_expected_schema_contract(
             "expected_schema_manifest_digest_mismatch"
         )
 
-    from app.assistant.durable.codec import CURRENT_CHECKPOINT_CODEC_VERSION
-    from app.assistant.durable.worker_registry import (
-        RUNTIME_CONTRACT_VERSION,
-        default_capability_feature_digest,
-    )
-    from app.assistant.runtime.system_seed.expected import SEED_CONTRACT_DIGEST
     from app.operator_auth.constants import OPERATOR_AUTH_CONTRACT_VERSION
     from app.schema.application_contract import load_logical_application_contract
 
@@ -210,12 +253,11 @@ def load_expected_schema_contract(
         != logical.logical_application_fingerprint
         or raw["schemaIdentityControlFingerprint"]
         != SCHEMA_IDENTITY_CONTROL_FINGERPRINT
-        or raw["seedContractDigest"] != SEED_CONTRACT_DIGEST
-        or raw["runtimeContractVersion"] != RUNTIME_CONTRACT_VERSION
-        or raw["checkpointCodecVersion"]
-        != CURRENT_CHECKPOINT_CODEC_VERSION
+        or raw["seedContractDigest"] != CLEAN_ROOT_SEED_CONTRACT_DIGEST
+        or raw["runtimeContractVersion"] != 1
+        or raw["checkpointCodecVersion"] != 3
         or raw["capabilityFeatureDigest"]
-        != default_capability_feature_digest()
+        != CLEAN_ROOT_CAPABILITY_FEATURE_DIGEST
         or raw["operatorAuthContractVersion"]
         != OPERATOR_AUTH_CONTRACT_VERSION
     ):
@@ -239,6 +281,133 @@ def load_expected_schema_contract(
             "operatorAuthContractVersion"
         ],
         canonicalization_version=raw["canonicalizationVersion"],
+        manifest_digest=raw["manifestDigest"],
+    )
+
+
+_EXPECTED_V2_MANIFEST_KEYS = frozenset(
+    {
+        "schemaVersion",
+        "schemaFamily",
+        "schemaRevision",
+        "applicationStructuralFingerprint",
+        "schemaIdentityControlFingerprint",
+        "schemaSeedContractDigest",
+        "runtimeContractVersion",
+        "checkpointCodecVersion",
+        "capabilityFeatureDigest",
+        "operatorAuthContractVersion",
+        "identityContractVersion",
+        "schemaContractMaterialDigest",
+        "runtimeIdentityDigests",
+        "manifestDigest",
+    }
+)
+
+
+def load_expected_schema_contract_v2(
+    path: Path = DEFAULT_EXPECTED_SCHEMA_CONTRACT_V2_PATH,
+) -> ExpectedSchemaContractV2:
+    """Load the exact Plan 4 ``pre_ga_v1_0002`` identity contract."""
+    try:
+        raw = json.loads(
+            path.read_text(encoding="utf-8"),
+            object_pairs_hook=_reject_duplicate_json_members,
+        )
+    except (OSError, UnicodeError, ValueError, RecursionError):
+        raise SchemaIdentityError("expected_schema_manifest_v2_invalid") from None
+    if not isinstance(raw, dict) or set(raw) != _EXPECTED_V2_MANIFEST_KEYS:
+        raise SchemaIdentityError("expected_schema_manifest_v2_invalid")
+    digest_fields = (
+        "applicationStructuralFingerprint",
+        "schemaIdentityControlFingerprint",
+        "schemaSeedContractDigest",
+        "capabilityFeatureDigest",
+        "schemaContractMaterialDigest",
+        "manifestDigest",
+    )
+    if any(not _valid_sha256(raw.get(field)) for field in digest_fields):
+        raise SchemaIdentityError("expected_schema_manifest_v2_invalid")
+    runtime_identities = raw.get("runtimeIdentityDigests")
+    if not isinstance(runtime_identities, dict) or set(runtime_identities) != {
+        "development",
+        "rehearsal",
+        "production",
+    } or any(not _valid_sha256(value) for value in runtime_identities.values()):
+        raise SchemaIdentityError("expected_schema_manifest_v2_invalid")
+    if (
+        raw.get("schemaVersion") != 1
+        or raw.get("schemaFamily") != SCHEMA_FAMILY
+        or raw.get("schemaRevision") != NEXT_RESERVED_REVISION
+        or raw.get("identityContractVersion") != SCHEMA_IDENTITY_CONTRACT_VERSION
+        or type(raw.get("runtimeContractVersion")) is not int
+        or raw["runtimeContractVersion"] <= 0
+        or type(raw.get("checkpointCodecVersion")) is not int
+        or raw["checkpointCodecVersion"] <= 0
+        or not isinstance(raw.get("operatorAuthContractVersion"), str)
+        or not raw["operatorAuthContractVersion"]
+    ):
+        raise SchemaIdentityError("expected_schema_manifest_v2_invalid")
+    digest_payload = {key: value for key, value in raw.items() if key != "manifestDigest"}
+    if sha256_canonical_json(digest_payload) != raw["manifestDigest"]:
+        raise SchemaIdentityError("expected_schema_manifest_v2_digest_mismatch")
+    from app.assistant.durable.codec import CURRENT_CHECKPOINT_CODEC_VERSION
+    from app.assistant.durable.worker_registry import (
+        RUNTIME_CONTRACT_VERSION,
+        default_capability_feature_digest,
+    )
+    from app.assistant.runtime.system_seed.expected import SEED_CONTRACT_DIGEST
+    from app.operator_auth.constants import OPERATOR_AUTH_CONTRACT_VERSION
+    from app.release.contracts import schema_contract_material_digest
+
+    expected_material = schema_contract_material_digest(
+        schema_family=raw["schemaFamily"],
+        schema_revision=raw["schemaRevision"],
+        schema_application_fingerprint=raw["applicationStructuralFingerprint"],
+        schema_control_fingerprint=raw["schemaIdentityControlFingerprint"],
+        schema_identity_contract_version=raw["identityContractVersion"],
+        schema_seed_contract_digest=raw["schemaSeedContractDigest"],
+        schema_runtime_contract_version=raw["runtimeContractVersion"],
+        schema_checkpoint_codec_version=raw["checkpointCodecVersion"],
+        schema_capability_feature_digest=raw["capabilityFeatureDigest"],
+        operator_auth_contract_version=raw["operatorAuthContractVersion"],
+    )
+    if (
+        raw["schemaSeedContractDigest"] != SEED_CONTRACT_DIGEST
+        or raw["runtimeContractVersion"] != RUNTIME_CONTRACT_VERSION
+        or raw["checkpointCodecVersion"] != CURRENT_CHECKPOINT_CODEC_VERSION
+        or raw["capabilityFeatureDigest"] != default_capability_feature_digest()
+        or raw["operatorAuthContractVersion"] != OPERATOR_AUTH_CONTRACT_VERSION
+        or raw["schemaContractMaterialDigest"] != expected_material
+    ):
+        raise SchemaIdentityError("expected_schema_manifest_v2_cross_reference_mismatch")
+    for deployment_class in DeploymentClass:
+        material = SchemaRuntimeIdentityMaterial(
+            schema_family=raw["schemaFamily"],
+            schema_revision=raw["schemaRevision"],
+            structural_fingerprint=raw["applicationStructuralFingerprint"],
+            seed_contract_digest=raw["schemaSeedContractDigest"],
+            deployment_class=deployment_class,
+            runtime_contract_version=raw["runtimeContractVersion"],
+            checkpoint_codec_version=raw["checkpointCodecVersion"],
+            capability_feature_digest=raw["capabilityFeatureDigest"],
+            operator_auth_contract_version=raw["operatorAuthContractVersion"],
+        )
+        if raw["runtimeIdentityDigests"][deployment_class.value] != schema_runtime_identity_digest(material):
+            raise SchemaIdentityError("expected_schema_manifest_v2_runtime_identity_mismatch")
+    return ExpectedSchemaContractV2(
+        schema_family=raw["schemaFamily"],
+        schema_revision=raw["schemaRevision"],
+        application_structural_fingerprint=raw["applicationStructuralFingerprint"],
+        schema_identity_control_fingerprint=raw["schemaIdentityControlFingerprint"],
+        seed_contract_digest=raw["schemaSeedContractDigest"],
+        runtime_contract_version=raw["runtimeContractVersion"],
+        checkpoint_codec_version=raw["checkpointCodecVersion"],
+        capability_feature_digest=raw["capabilityFeatureDigest"],
+        operator_auth_contract_version=raw["operatorAuthContractVersion"],
+        identity_contract_version=raw["identityContractVersion"],
+        schema_contract_material_digest=raw["schemaContractMaterialDigest"],
+        runtime_identity_digests={str(key): str(value) for key, value in runtime_identities.items()},
         manifest_digest=raw["manifestDigest"],
     )
 

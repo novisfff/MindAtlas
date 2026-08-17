@@ -11,7 +11,6 @@ import threading
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any, Iterator
 
 import pytest
@@ -21,7 +20,6 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from tests._bootstrap import bootstrap_backend_imports, reset_caches
 from tests.postgres_destructive_guard import reset_disposable_public_schema
-from tests.schema_baseline_support import upgrade_clean_root_checked
 
 bootstrap_backend_imports()
 reset_caches()
@@ -59,9 +57,6 @@ pytestmark = pytest.mark.skipif(
         "instead of skip."
     ),
 )
-
-_BACKEND_DIR = Path(__file__).resolve().parents[1]
-
 
 def _as_sqlalchemy_url(url: str) -> str:
     if url.startswith("postgresql://") and "+psycopg2" not in url:
@@ -107,14 +102,14 @@ def _session(engine: Engine) -> Iterator[Session]:
 
 
 def _ensure_schema(engine: Engine, *, build: str) -> None:
-    """Install the clean root instead of synthesizing schema via ORM metadata."""
+    """Use current metadata until Task 7 owns the physical migration."""
+    from app.database import Base
+    from app.model_registry import load_all_live_models
+
+    del build
     reset_disposable_public_schema(engine)
-    upgrade_clean_root_checked(
-        _POSTGRES_URL,
-        deployment_class="rehearsal",
-        app_env="test",
-        build_revision=build,
-    )
+    load_all_live_models()
+    Base.metadata.create_all(engine)
 
 
 def _seed_profile_version(db: Session, *, content_digest: str = DIGEST_A):
@@ -159,6 +154,12 @@ def _prepared_revision(db: Session, **overrides: Any):
         PreparedRolloutRevision,
     )
     from app.assistant.runtime.repository import AssistantRuntimeRepository
+    from app.assistant.capability_calls.write_guard import (
+        CREATE_ENTRY_CONTRACT_DIGEST,
+        RECONCILIATION_CONTRACT_VERSION,
+        WRITE_COHORT_DIGEST,
+        WRITE_POLICY_DIGEST,
+    )
 
     _, profile_version = _seed_profile_version(db)
     model = _seed_model(db)
@@ -182,6 +183,14 @@ def _prepared_revision(db: Session, **overrides: Any):
         checkpoint_codec_version=overrides.get("checkpoint_codec_version", 3),
         capability_feature_digest=overrides.get(
             "capability_feature_digest", FEATURE
+        ),
+        create_entry_contract_digest=overrides.get(
+            "create_entry_contract_digest", CREATE_ENTRY_CONTRACT_DIGEST
+        ),
+        write_policy_digest=overrides.get("write_policy_digest", WRITE_POLICY_DIGEST),
+        write_cohort_digest=overrides.get("write_cohort_digest", WRITE_COHORT_DIGEST),
+        reconciliation_contract_version=overrides.get(
+            "reconciliation_contract_version", RECONCILIATION_CONTRACT_VERSION
         ),
     )
     prepared = PreparedRolloutRevision.from_subject(
@@ -243,6 +252,10 @@ class _PostgresRuntime:
                 "required_app_build_revision": str(
                     overrides.get("required_app_build_revision", self.build)
                 ),
+                "required_create_entry_contract_digest": prepared.required_create_entry_contract_digest,
+                "required_write_policy_digest": prepared.required_write_policy_digest,
+                "required_write_cohort_digest": prepared.required_write_cohort_digest,
+                "required_reconciliation_contract_version": prepared.required_reconciliation_contract_version,
                 "capability_ledger_mode": "enforced",
                 "memory_commit_status": "pending",
                 "state_revision": 0,

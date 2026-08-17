@@ -409,3 +409,64 @@ before GA is database recreation or restoration of a backup already identified
 as the same clean family/revision; the clean root is not an operational
 rollback to Legacy. API/Worker incompatibility remains fail-closed until a
 compatible clean-family binary/schema/backup is deployed.
+
+### Pre-GA release qualification profile
+
+The release gate uses the standalone `compose.release-qualification.yml`. It is
+independent from the ordinary development Compose file and contains exactly
+PostgreSQL, MinIO, the fixed Scripted Provider, API, two separately identified
+Assistant Workers, schema migration, and Web. The internal network is isolated;
+the only published ports are loopback ports allocated by the host runner.
+
+Infrastructure image references are reviewed and content-addressed in
+`release-images.lock`; changing a tag is not an accepted release update.
+`release.env.example` is a name-only contract and must never be copied into a
+secret-bearing deployment. The protected runner generates the private run
+directory and descriptor-backed secret files, then mounts the signed deployment
+identity, trust set, and rehearsal authorization read-only.
+
+`profile run` also requires the self-hosted runner to install an absolute,
+non-symlink profile executor in `MINDATLAS_RELEASE_PROFILE_EXECUTOR`. The
+repository wrapper uses that executor as the inner
+`MINDATLAS_RELEASE_PROTECTED_RUNNER`; the host CLI passes only the private
+run-directory path and profile kind to it, scrubs secret-like environment
+variables, captures its output, and verifies the signed evidence object before
+returning success. Docker being installed alone is never treated as
+qualification evidence.
+
+Validate the topology before a protected run:
+
+```bash
+cd backend
+python scripts/lock_release_images.py --check
+python scripts/run_pre_ga_release.py profile validate-compose \
+  --compose ../deploy/compose.release-qualification.yml \
+  --image-lock ../deploy/release-images.lock
+```
+
+Missing Docker, PostgreSQL, MinIO, either Worker, the Scripted Provider, or Web
+is a release failure. The host wrapper never turns a missing service into a
+skip or a passing evidence object. Raw passwords, cookies, Provider material,
+Entry bodies, prompts, and Compose-expanded environment files are not release
+evidence.
+
+The application bundle handoff is immutable: the build job exports the three
+images and retains only a label/ID projection of `docker image inspect`. The
+protected release runner signs `deployment-identity.json`, then runs
+`artifact verify` against the Docker-save archive before `profile prepare` can
+mount it. Profile runs reverify that same identity and archive digest; a rebuild
+or image-label drift is a hard failure.
+
+Evidence promotion is host-only and append-only. It accepts a verified evidence
+object, its sealed Artifact archive, a code-owned alias, and an already-open
+credential descriptor; it does not accept a bucket, endpoint, object key,
+outcome, or overwrite option. The destination root is supplied through
+`MINDATLAS_RELEASE_PROMOTION_ROOT`, and the conditional-create descriptor is
+`MINDATLAS_RELEASE_PROMOTION_CREDENTIAL_FD`.
+
+The production-class negative clone and final launch check also require
+separately installed protected executors (`MINDATLAS_RELEASE_CLONE_EXECUTOR`
+and `MINDATLAS_RELEASE_LAUNCH_VERIFIER`). The repository CLI validates their
+fixed safe result contracts, while database streams, authenticated target
+reads, teardown, and live service observations remain inside those protected
+boundaries.

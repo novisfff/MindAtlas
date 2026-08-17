@@ -12,7 +12,7 @@ import hashlib
 import hmac
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Literal, NoReturn
+from typing import Any, Literal, NoReturn
 from uuid import UUID, uuid4
 
 from sqlalchemy.orm import Session
@@ -54,6 +54,7 @@ from app.assistant.durable.contracts import (
 )
 from app.assistant.durable.models import (
     AssistantRunArtifact,
+    AssistantRunBudgetRevision,
     AssistantRunCheckpoint,
     AssistantRunObligationRevision,
     AssistantRunProviderMessage,
@@ -61,6 +62,8 @@ from app.assistant.durable.models import (
 from app.assistant.models import AssistantChatRun
 from app.assistant.durable.repository import (
     ALLOWED_TRANSITIONS,
+    STATUS_RECOVERING,
+    STATUS_RUNNING,
     STATUS_CANCELLING,
     STATUS_NEEDS_RECONCILIATION,
     DurableChildBundle,
@@ -99,6 +102,16 @@ Outcome = Literal["succeeded", "failed", "unknown"]
 
 CODE_SETTLEMENT_EVIDENCE_INVALID = "settlement_evidence_invalid"
 SETTLEMENT_OUTCOME_UNKNOWN = "settlement_outcome_unknown"
+
+
+def _is_exact_call_reconciliation_obligation(item: Any, call_id: UUID) -> bool:
+    """Require the reconciliation obligation's owner and source to agree."""
+    return (
+        str(getattr(item, "obligation_type", "")) == "reconciliation"
+        and str(getattr(item, "owner_kind", "")) == "capability_call"
+        and str(getattr(item, "owner_id", "")) == str(call_id)
+        and str(getattr(item, "source_call_id", "")) == str(call_id)
+    )
 
 
 def _timestamp(value: datetime | None) -> str | None:
@@ -196,9 +209,12 @@ class SettlementRequest:
 class CapabilityCallSettlementRepository:
     """Settle already-started call evidence under Run ``cancelling``."""
 
-    def __init__(self, db: Session) -> None:
+    def __init__(self, db: Session, *, write_safety_lock: Any | None = None) -> None:
         self.db = db
-        self.calls = CapabilityCallRepository(db)
+        self.calls = CapabilityCallRepository(
+            db,
+            write_safety_lock=write_safety_lock,
+        )
 
     def settle_while_cancelling(
         self,
@@ -217,6 +233,15 @@ class CapabilityCallSettlementRepository:
                 CODE_SETTLEMENT_EVIDENCE_INVALID,
                 f"unsupported settlement outcome {request.outcome!r}",
             )
+        if request.outcome == "unknown":
+            from app.assistant.capability_calls.write_guard import (
+                acquire_write_safety_advisory_lock,
+            )
+
+            if self.calls.write_safety_lock is None:
+                acquire_write_safety_advisory_lock(self.db)
+            else:
+                self.calls.write_safety_lock.acquire(self.db)
         ts = now or utcnow()
         probe = self.calls.get_call(request.call_id)
         if probe is None:
@@ -347,6 +372,366 @@ class CapabilityCallSettlementRepository:
             attempt=attempt,
             now=ts,
         )
+
+    def mark_local_commit_outcome_unknown(
+        self,
+        *,
+        call_id: UUID,
+        failure_code: str = "local_commit_outcome_unknown",
+        budget_snapshot: Any | None = None,
+        now: datetime | None = None,
+    ) -> AssistantChatRun:
+        """Quarantine a local write after an indeterminate commit boundary.
+
+        This path performs no adapter I/O and never retries.  It is deliberately
+        Run-first and uses the same write-safety advisory lock as new write
+        admission and ordinary unknown settlement.
+        """
+        from app.assistant.capability_calls.write_guard import (
+            acquire_write_safety_advisory_lock,
+        )
+
+        if self.calls.write_safety_lock is None:
+            acquire_write_safety_advisory_lock(self.db)
+        else:
+            self.calls.write_safety_lock.acquire(self.db)
+        ts = now or utcnow()
+        try:
+            probe = self.calls.get_call(call_id)
+            if probe is None:
+                raise CapabilityCallConflict(
+                    CODE_CALL_NOT_FOUND, f"call {call_id} not found"
+                )
+            run = self.calls.get_run(probe.run_id, for_update=True)
+            call = self.calls.get_call(call_id, for_update=True)
+            if call is None:
+                raise CapabilityCallConflict(
+                    CODE_CALL_NOT_FOUND, f"call {call_id} not found"
+                )
+            if str(call.execution_mode) != "local_transactional":
+                raise CapabilityCallConflict(
+                    CODE_INVALID_TRANSITION,
+                    "local commit quarantine requires local_transactional mode",
+                    call=call,
+                    run=run,
+                )
+            if str(run.status) not in {
+                STATUS_RUNNING,
+                STATUS_RECOVERING,
+                STATUS_CANCELLING,
+            }:
+                raise CapabilityCallConflict(
+                    CODE_INVALID_TRANSITION,
+                    f"local commit quarantine cannot run from {run.status!r}",
+                    call=call,
+                    run=run,
+                )
+            if str(call.status) in {"authorized", "executing"}:
+                call = self.calls.transition_call(
+                    call_id=call.id,
+                    expected_call_revision=int(call.state_revision),
+                    expected_run_revision=int(run.state_revision),
+                    to_status="unknown",
+                    lease=None,
+                    allow_while_cancelling=True,
+                    failure_code=failure_code,
+                    now=ts,
+                )
+            if str(call.status) == "unknown":
+                call = self.calls.transition_call(
+                    call_id=call.id,
+                    expected_call_revision=int(call.state_revision),
+                    expected_run_revision=int(run.state_revision),
+                    to_status="needs_reconciliation",
+                    lease=None,
+                    allow_while_cancelling=True,
+                    failure_code=failure_code,
+                    now=ts,
+                )
+            if str(call.status) != "needs_reconciliation":
+                raise CapabilityCallConflict(
+                    CODE_INVALID_TRANSITION,
+                    "local commit ambiguity cannot terminalize the Call",
+                    call=call,
+                    run=run,
+                )
+            checkpoint, obligation = self._prepare_unknown_context(
+                run=run,
+                call=call,
+                attempt=None,
+                now=ts,
+                reason=failure_code,
+            )
+            budget_revision = self._prepare_unknown_budget_revision(
+                run=run,
+                snapshot=budget_snapshot,
+                now=ts,
+            )
+            return self._commit_unknown_run_context(
+                run=run,
+                call=call,
+                checkpoint=checkpoint,
+                obligation=obligation,
+                budget_revision=budget_revision,
+                now=ts,
+                failure_code=failure_code,
+            )
+        except Exception:
+            self.db.rollback()
+            raise
+
+    def _prepare_unknown_context(
+        self,
+        *,
+        run: AssistantChatRun,
+        call: AssistantCapabilityCall,
+        attempt: AssistantCapabilityCallAttempt | None,
+        now: datetime,
+        reason: str,
+    ) -> tuple[Any, AssistantRunObligationRevision]:
+        """Build a v3 reconcile checkpoint and exact pending obligation."""
+        if run.current_checkpoint_id is None:
+            self._invalid_evidence(
+                "unknown local settlement requires a current Checkpoint",
+                call=call,
+                run=run,
+            )
+        row = (
+            self.db.query(AssistantRunCheckpoint)
+            .filter(AssistantRunCheckpoint.id == run.current_checkpoint_id)
+            .with_for_update()
+            .one_or_none()
+        )
+        if row is None or row.run_id != run.id:
+            self._invalid_evidence(
+                "unknown local settlement Checkpoint pointer is invalid",
+                call=call,
+                run=run,
+            )
+        checkpoint = decode_checkpoint(row.state_payload)
+        if int(getattr(checkpoint, "schema_version", 0)) != 3:
+            self._invalid_evidence(
+                "unknown local settlement requires Checkpoint schema v3",
+                call=call,
+                run=run,
+            )
+        states = []
+        replaced = False
+        for state in checkpoint.capability_calls:
+            if state.call_id != call.id:
+                states.append(state)
+                continue
+            states.append(
+                DurableCapabilityCallStateV1(
+                    call_id=state.call_id,
+                    logical_call_key=state.logical_call_key,
+                    provider_tool_call_id=state.provider_tool_call_id,
+                    provider_order=state.provider_order,
+                    status="needs_reconciliation",
+                    attempt_id=attempt.id if attempt is not None else None,
+                    output_artifact_id=None,
+                    interrupt_id=call.interrupt_id,
+                    approval_binding_digest=call.approval_binding_digest,
+                    result_message_digest=None,
+                )
+            )
+            replaced = True
+        if not replaced:
+            self._invalid_evidence(
+                "unknown local settlement Checkpoint lacks the Call",
+                call=call,
+                run=run,
+            )
+        if run.current_obligation_revision_id is None:
+            self._invalid_evidence(
+                "unknown local settlement requires an obligation ledger",
+                call=call,
+                run=run,
+            )
+        current = (
+            self.db.query(AssistantRunObligationRevision)
+            .filter(
+                AssistantRunObligationRevision.id
+                == run.current_obligation_revision_id
+            )
+            .with_for_update()
+            .one_or_none()
+        )
+        if current is None or current.run_id != run.id:
+            self._invalid_evidence(
+                "unknown local settlement obligation pointer is invalid",
+                call=call,
+                run=run,
+            )
+        ledger = ObligationLedgerState.model_validate(current.payload)
+        pending = [item for item in ledger.obligations if item.status == "pending"]
+        matching = [
+            item
+            for item in pending
+            if _is_exact_call_reconciliation_obligation(item, call.id)
+        ]
+        # Preserve unrelated pending obligations.  An ambiguous local commit
+        # must remain quarantined even when another owner already has work
+        # pending; only duplicate Call-owned reconciliation obligations are a
+        # malformed state.
+        if len(matching) > 1:
+            self._invalid_evidence(
+                "unknown local settlement has duplicate reconciliation obligations",
+                call=call,
+                run=run,
+            )
+        if not matching:
+            ledger, created = pure_create_obligation(
+                ledger,
+                build_reserved_obligation(
+                    run_id=run.id,
+                    obligation_type="reconciliation",
+                    owner_kind="capability_call",
+                    owner_id=str(call.id),
+                    source_call_id=str(call.id),
+                    revision=int(current.revision) + 1,
+                ),
+            )
+            if not created.allowed:
+                self._invalid_evidence(
+                    "unknown local settlement obligation creation failed",
+                    call=call,
+                    run=run,
+                )
+            obligation = AssistantRunObligationRevision(
+                id=uuid4(),
+                run_id=run.id,
+                revision=int(current.revision) + 1,
+                parent_revision_id=current.id,
+                parent_digest=current.obligation_digest,
+                obligation_digest=ledger.ledger_digest,
+                payload=ledger.model_dump(mode="json", by_alias=True),
+                created_at=now,
+            )
+            self.db.add(obligation)
+            self.db.flush()
+        else:
+            obligation = current
+        updated = checkpoint.model_copy(
+            update={
+                "phase": (
+                    "waiting"
+                    if checkpoint.provider_loop_continuation is not None
+                    else "ready_for_provider"
+                ),
+                "obligation_revision_id": obligation.id,
+                "next_action": DurableNextActionV2(
+                    kind=(
+                        "wait"
+                        if checkpoint.provider_loop_continuation is not None
+                        else "reconcile"
+                    )
+                ),
+                "capability_calls": tuple(states),
+            }
+        )
+        return updated, obligation
+
+    def _commit_unknown_run_context(
+        self,
+        *,
+        run: AssistantChatRun,
+        call: AssistantCapabilityCall,
+        checkpoint: Any,
+        obligation: AssistantRunObligationRevision,
+        budget_revision: AssistantRunBudgetRevision | None = None,
+        now: datetime,
+        failure_code: str,
+    ) -> AssistantChatRun:
+        phase = str(checkpoint.phase)
+        checkpoint_id = uuid4()
+        budget_id = budget_revision.id if budget_revision is not None else run.current_budget_revision_id
+        checkpoint = checkpoint.model_copy(update={"budget_revision_id": budget_id})
+        checkpoint_row = AssistantRunCheckpoint(
+            id=checkpoint_id,
+            run_id=run.id,
+            sequence=_next_checkpoint_sequence(self.db, run.id),
+            expected_state_revision=int(run.state_revision),
+            committed_state_revision=int(run.state_revision) + 1,
+            schema_version=3,
+            manifest_revision_id=checkpoint.manifest_revision_id,
+            policy_revision_id=checkpoint.policy_revision_id,
+            budget_revision_id=budget_id,
+            obligation_revision_id=obligation.id,
+            provider_message_ordinal=checkpoint.provider_message_ordinal,
+            provider_transcript_digest=checkpoint.provider_transcript_digest,
+            phase=phase,
+            logical_unit_id=str(call.logical_call_key),
+            reason=failure_code,
+            state_payload=encode_checkpoint_v3(checkpoint),
+            state_digest=checkpoint_state_digest(checkpoint),
+            created_at=now,
+        )
+        rows: list[Any] = [checkpoint_row]
+        if budget_revision is not None:
+            rows.insert(0, budget_revision)
+        if obligation.id != run.current_obligation_revision_id:
+            rows.insert(0, obligation)
+        commit = DurableRunRepository(self.db).commit_local_commit_outcome_unknown(
+            run_id=run.id,
+            expected_revision=int(run.state_revision),
+            events=(
+                EventSpec(
+                    event_key=f"capability_call.local_commit_unknown:{call.id}:{int(call.state_revision)}",
+                    event_name="capability_call.local_commit_unknown",
+                    payload={
+                        "callId": str(call.id),
+                        "failureCode": failure_code,
+                    },
+                    visibility="internal",
+                ),
+            ),
+            children=DurableChildBundle(
+                rows=rows,
+                current_checkpoint_id=checkpoint_id,
+                current_budget_revision_id=budget_id,
+                current_obligation_revision_id=obligation.id,
+            ),
+        )
+        return commit.run
+
+    def _prepare_unknown_budget_revision(
+        self,
+        *,
+        run: AssistantChatRun,
+        snapshot: Any | None,
+        now: datetime,
+    ) -> AssistantRunBudgetRevision | None:
+        """Persist the in-memory reservation lifecycle at the quarantine edge."""
+        if snapshot is None or run.current_budget_revision_id is None:
+            return None
+        digest = str(getattr(snapshot, "ledger_digest", ""))
+        if len(digest) != 64:
+            return None
+        current = self.db.get(AssistantRunBudgetRevision, run.current_budget_revision_id)
+        if current is None or digest == str(current.budget_digest):
+            return None
+        payload = snapshot.model_dump(mode="json", by_alias=True)
+        latest = (
+            self.db.query(AssistantRunBudgetRevision.revision)
+            .filter(AssistantRunBudgetRevision.run_id == run.id)
+            .order_by(AssistantRunBudgetRevision.revision.desc())
+            .limit(1)
+            .scalar()
+        )
+        row = AssistantRunBudgetRevision(
+            id=uuid4(),
+            run_id=run.id,
+            revision=int(latest or 0) + 1,
+            parent_revision_id=current.id,
+            parent_digest=current.budget_digest,
+            budget_digest=digest,
+            payload=payload,
+            created_at=now,
+        )
+        self.db.add(row)
+        self.db.flush()
+        return row
 
     def _load_checkpoint_context(
         self,
@@ -791,16 +1176,9 @@ class CapabilityCallSettlementRepository:
         matching = [
             item
             for item in pending
-            if item.obligation_type == "reconciliation"
-            and item.source_call_id == str(call.id)
+            if _is_exact_call_reconciliation_obligation(item, call.id)
         ]
         if not matching:
-            if pending:
-                self._invalid_evidence(
-                    "another pending obligation prevents unknown settlement",
-                    call=call,
-                    run=run,
-                )
             ledger, created = pure_create_obligation(
                 ledger,
                 build_reserved_obligation(
@@ -831,7 +1209,7 @@ class CapabilityCallSettlementRepository:
             self.db.add(obligation_row)
             self.db.flush()
         else:
-            if len(pending) != 1 or len(matching) != 1:
+            if len(matching) != 1:
                 self._invalid_evidence(
                     "unknown settlement requires one exact reconciliation obligation",
                     call=call,

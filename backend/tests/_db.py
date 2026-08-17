@@ -44,6 +44,41 @@ _ORIGINAL_APP_DATABASE: dict[str, Any] | None = None
 _CREATION_SEQ = 0
 
 
+class _InjectedSqliteWriteSafetyLock:
+    """Explicit non-production lock port for isolated current-metadata tests."""
+
+    def acquire(self, _db: Session) -> None:
+        return None
+
+
+class _AllowingTestWriteGuard:
+    """Explicit unit-test guard; production composition never uses this port."""
+
+    def __init__(self, lock_port: _InjectedSqliteWriteSafetyLock) -> None:
+        self.lock_port = lock_port
+        self.runtime_closure_provider = lambda _run: object()
+
+    @staticmethod
+    def _allowed():  # noqa: ANN205
+        from types import SimpleNamespace
+
+        return SimpleNamespace(allowed=True, reason_code=None)
+
+    def evaluate_new_proposal_locked(self, **_kwargs):  # noqa: ANN201
+        return self._allowed()
+
+    def evaluate_post_approval_locked(self, **_kwargs):  # noqa: ANN201
+        return self._allowed()
+
+
+def allowing_test_write_guard(db: Session) -> _AllowingTestWriteGuard:
+    """Build the explicit guard double required by aggregate unit tests."""
+    lock_port = db.info.get("write_safety_lock")
+    if not isinstance(lock_port, _InjectedSqliteWriteSafetyLock):
+        raise RuntimeError("isolated SQLite write-safety lock is unavailable")
+    return _AllowingTestWriteGuard(lock_port)
+
+
 def _cleanup_temp_dbs() -> None:
     for path in list(_TEMP_DB_PATHS):
         try:
@@ -85,6 +120,15 @@ def _compile_check_constraint_for_sqlite(
     **kwargs,
 ):  # noqa: ANN201
     rendered = compiler.visit_check_constraint(constraint, **kwargs)
+    rendered = rendered.replace(
+        "expires_at = issued_at + INTERVAL '24 hours'",
+        "abs(julianday(expires_at) - julianday(issued_at) - 1.0) < 0.000001",
+    )
+    rendered = rendered.replace(
+        "safe_failure_codes = '[]'::jsonb",
+        "safe_failure_codes = '[]'",
+    )
+    rendered = rendered.replace("jsonb_array_length(", "json_array_length(")
     rendered = _SHA256_REGEX_SQL.sub(
         lambda match: f"length({match.group('column')}) = 64",
         rendered,
@@ -305,6 +349,7 @@ def make_session() -> Session:
     _apply_global_factory(test_session_factory, engine)
 
     session = test_session_factory()
+    session.info["write_safety_lock"] = _InjectedSqliteWriteSafetyLock()
     restored = {"done": False}
 
     def _release_binding() -> None:

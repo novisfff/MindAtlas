@@ -1,27 +1,31 @@
 {
   "buildCompatibility": {
-    "capabilityFeatureDigest": "11af8408a0d3a6ff93a5170a9bb6758f430773d1e1343ee3982396f0ed9cd3b4",
+    "capabilityFeatureDigest": "c4050ef9aa836f418bb90ad772beeb4734fbb7815cf533926c0eb011710ad8aa",
     "checkpointCodecVersion": 3,
-    "runtimeContractVersion": 1
+    "createEntryContractDigest": "3d00bf1191e2fbd210c9e1bb4410f906494bb8ec27c67ac20edbbc9cd0c7d18a",
+    "reconciliationContractVersion": 1,
+    "runtimeContractVersion": 1,
+    "writeCohortDigest": "598c2cebcbe9536936170d80d9de86a0901c1e42ffa02b938eef610880de5c2a",
+    "writePolicyDigest": "6fa2437b97e655f46be40b7078f00b45f52977fc58f32e21981047b6c07ee5ff"
   },
   "capabilityBindings": [
     {
       "key": "create_entry",
-      "targetContractDigest": "78ea168c7d4db0042cb3f79db28dcd3a3753231985a09e7fa0ff28d866ed9980",
+      "targetContractDigest": "e0d412f8c3bcc5023dd9219f629c61992ce396d9037a7d08526786c2ff3fbef5",
       "type": "tool"
     },
     {
       "key": "get_entry_detail",
-      "targetContractDigest": "830847261d280dece865b84226b5f35f8624ef2c98a4b6e9c1d461c9ba719793",
+      "targetContractDigest": "f097272079da8907fe27c21462b120e8af890174671829fea2e75d66242b5505",
       "type": "tool"
     },
     {
       "key": "search_entries",
-      "targetContractDigest": "0f5c04d84f3954e58927c26b694dd9c8d135df472352b782c6f17123b1d58559",
+      "targetContractDigest": "51c4f1ff67d124dd45f2a5a6f87ab065e06c7ec7f9c7987bed5e4d5be2b3d497",
       "type": "tool"
     }
   ],
-  "manifestDigest": "3ba69223e9c1a3ab1783c8a549a1b7cf56410f36f60a7fb67ba1f4fc84275237",
+  "manifestDigest": "41de023671e6fd44ca711d02e3a7c961787e5f28e237b8c2d1df8acb72dc65f4",
   "modelBindingSlots": [
     "assistant"
   ],
@@ -32,7 +36,7 @@
     "sha256": "0d755a8ab001de152508b4a3a8474fc8c037fe80bed2b46a7ac0dadf364aed11"
   },
   "schemaVersion": 1,
-  "seedContractDigest": "1b91fef44c4b1b0d68bcd5ebaf702c02985c41124f73a58a2e4a92f93f7ea040",
+  "seedContractDigest": "a43229f3dc8b186690b0a899c26431537b030cea2fce625b92b6dc387cf7b3d7",
   "skillArtifacts": [
     {
       "byteSize": 655,

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 from uuid import UUID
 
 from sqlalchemy import func, select, update
@@ -98,6 +98,7 @@ ALLOWED_TRANSITIONS: dict[tuple[str, str], str] = {
     (STATUS_RECOVERING, STATUS_FAILED): "fail",
     (STATUS_RUNNING, STATUS_NEEDS_RECONCILIATION): "reconcile",
     (STATUS_RECOVERING, STATUS_NEEDS_RECONCILIATION): "reconcile",
+    (STATUS_CANCELLING, STATUS_NEEDS_RECONCILIATION): "call_settlement_unproven",
     (STATUS_NEEDS_RECONCILIATION, STATUS_CANCELLED): "abandon",
     (STATUS_NEEDS_RECONCILIATION, STATUS_QUEUED): "reconciliation_resolved",
     (STATUS_NEEDS_RECONCILIATION, STATUS_COMPLETED): "reconciliation_completed",
@@ -248,6 +249,11 @@ class _TransitionPlan:
     set_memory_committed_at: bool = False
     enter_ready_for_memory: bool = False
     reject_if_ready_for_memory: bool = False
+    # Optional same-transaction mutation hook used only by tightly coupled
+    # stop boundaries (for example, closing a call-owned approval before the
+    # Run is cancelled). The hook runs after Run-first CAS validation and
+    # before any Run fields/events are committed.
+    before_commit: Callable[[AssistantChatRun], None] | None = None
     # When True, status may stay running for semantic child/event writes.
     allow_same_status: bool = False
     bump_recovery_count: bool = False
@@ -493,6 +499,7 @@ class DurableRunRepository:
         run_id: UUID,
         expected_revision: int,
         events: Sequence[EventSpec] = (),
+        before_commit: Callable[[AssistantChatRun], None] | None = None,
     ) -> DurableCommitResult:
         """API stop: CAS by revision/status only (no lease required).
 
@@ -521,6 +528,7 @@ class DurableRunRepository:
                 rule_name="stop_request",
                 events=tuple(events),
                 set_cancel_requested=True,
+                before_commit=before_commit,
             )
         )
         # Kill point 12: after stop request commits before cancellation seal.
@@ -664,6 +672,7 @@ class DurableRunRepository:
         events: Sequence[EventSpec] = (),
         children: DurableChildBundle | None = None,
         set_deadline_at: datetime | None = None,
+        commit: bool = True,
     ) -> DurableCommitResult:
         """HTTP resolve path: waiting_approval|waiting_input -> queued.
 
@@ -682,7 +691,8 @@ class DurableRunRepository:
                 children=children,
                 set_deadline_at=set_deadline_at,
                 clear_lease=True,
-            )
+            ),
+            commit=commit,
         )
 
     def commit_reconciliation_resolution(
@@ -694,9 +704,15 @@ class DurableRunRepository:
         events: Sequence[EventSpec] = (),
         children: DurableChildBundle | None = None,
         failure_code: str | None = None,
+        commit: bool = True,
     ) -> DurableCommitResult:
         """Resolve a quiescent reconciliation Run through one aggregate CAS."""
-        if target_status not in {STATUS_QUEUED, STATUS_COMPLETED, STATUS_FAILED}:
+        if target_status not in {
+            STATUS_QUEUED,
+            STATUS_COMPLETED,
+            STATUS_FAILED,
+            STATUS_NEEDS_RECONCILIATION,
+        }:
             raise DurableRunConflict(
                 CODE_PROTOCOL_ERROR,
                 f"invalid reconciliation target_status={target_status!r}",
@@ -711,14 +727,17 @@ class DurableRunRepository:
                     STATUS_QUEUED: "reconciliation_resolved",
                     STATUS_COMPLETED: "reconciliation_completed",
                     STATUS_FAILED: "reconciliation_failed",
+                    STATUS_NEEDS_RECONCILIATION: "reconciliation_pending",
                 }[target_status],
                 events=tuple(events),
                 children=children,
                 clear_lease=True,
                 set_started_at_if_missing=target_status in TERMINAL_STATUSES,
                 set_ended_at=target_status in TERMINAL_STATUSES,
+                allow_same_status=target_status == STATUS_NEEDS_RECONCILIATION,
                 failure_code=failure_code,
-            )
+            ),
+            commit=commit,
         )
 
     def commit_cancellation_settlement(
@@ -750,6 +769,42 @@ class DurableRunRepository:
                 events=tuple(events),
                 children=children,
                 allow_same_status=target_status == STATUS_CANCELLING,
+            )
+        )
+
+    def commit_local_commit_outcome_unknown(
+        self,
+        *,
+        run_id: UUID,
+        expected_revision: int,
+        target_status: str = STATUS_NEEDS_RECONCILIATION,
+        events: Sequence[EventSpec] = (),
+        children: DurableChildBundle | None = None,
+    ) -> DurableCommitResult:
+        """Quiesce a local write whose database commit outcome is unknown.
+
+        This is deliberately separate from cancellation settlement: a local
+        commit can become ambiguous while the Run is still ``running``.  The
+        same Run-first CAS, child checkpoint, and global unresolved-write lock
+        are used, but no adapter or automatic retry is permitted.
+        """
+        if target_status != STATUS_NEEDS_RECONCILIATION:
+            raise DurableRunConflict(
+                CODE_PROTOCOL_ERROR,
+                "local commit ambiguity must target needs_reconciliation",
+            )
+        return self._commit(
+            _TransitionPlan(
+                run_id=run_id,
+                expected_revision=expected_revision,
+                target_status=STATUS_NEEDS_RECONCILIATION,
+                allowed_from=frozenset(
+                    {STATUS_RUNNING, STATUS_RECOVERING, STATUS_CANCELLING}
+                ),
+                rule_name="local_commit_outcome_unknown",
+                events=tuple(events),
+                children=children,
+                clear_lease=True,
             )
         )
 
@@ -978,7 +1033,12 @@ class DurableRunRepository:
     # Core transaction
     # ------------------------------------------------------------------
 
-    def _commit(self, plan: _TransitionPlan) -> DurableCommitResult:
+    def _commit(
+        self,
+        plan: _TransitionPlan,
+        *,
+        commit: bool = True,
+    ) -> DurableCommitResult:
         # Plan 09 Task 4: hard tripwire when Eval scope reaches durable Run commit.
         from app.assistant.evaluation.isolation import tripwire_production_writer
 
@@ -992,6 +1052,9 @@ class DurableRunRepository:
             self._require_main_agent(run)
             self._resolve_stop_request(run, plan)
             self._validate_cas(run, plan, now=now)
+
+            if plan.before_commit is not None:
+                plan.before_commit(run)
 
             # Plan 08: cancellation may be sealed only after every call whose
             # side effect started has a proven terminal outcome.  The Run row
@@ -1008,9 +1071,12 @@ class DurableRunRepository:
 
             # Idempotent stop while already cancelling: no revision bump.
             if plan.rule_name == "stop_idempotent":
-                # Release the FOR UPDATE lock without mutating state.
-                self.db.rollback()
-                # Re-load outside the aborted transaction for a clean view.
+                # Keep the transaction when a stop hook repaired a coupled
+                # call-owned Interrupt.  With no hook this is still a
+                # mutation-free commit that releases the FOR UPDATE lock and
+                # preserves the no-revision-bump contract.
+                self.db.commit()
+                # Re-load outside the transaction for a clean view.
                 run = self.get_run(plan.run_id) or run
                 return DurableCommitResult(
                     run=run,
@@ -1110,13 +1176,15 @@ class DurableRunRepository:
             run.updated_at = now
 
             self.db.add(run)
-            self.db.commit()
-            self.db.refresh(run)
-            for ev in event_rows:
-                try:
-                    self.db.refresh(ev)
-                except Exception:
-                    pass
+            self.db.flush()
+            if commit:
+                self.db.commit()
+                self.db.refresh(run)
+                for ev in event_rows:
+                    try:
+                        self.db.refresh(ev)
+                    except Exception:
+                        pass
 
             return DurableCommitResult(
                 run=run,

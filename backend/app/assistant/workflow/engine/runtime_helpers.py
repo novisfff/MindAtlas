@@ -345,7 +345,21 @@ def coerce_tool_args(tool: Any, args: dict[str, Any]) -> dict[str, Any]:
     if args_schema is None:
         return dict(args)
 
-    prepared_args = dict(args)
+    # ``InjectedToolArg`` values are supplied by trusted runtime code after the
+    # Provider payload has been schema-validated.  Keep them out of the public
+    # Pydantic model, then restore them for the decorated function call.
+    injected_args: dict[str, Any] = {}
+    marker = args.get("_gateway_invocation")
+    if getattr(tool, "name", None) == "create_entry":
+        from app.assistant.capability_calls.create_entry_declaration import (
+            CapabilityGatewayInvocation,
+        )
+
+        if isinstance(marker, CapabilityGatewayInvocation):
+            injected_args["_gateway_invocation"] = marker
+    prepared_args = {
+        key: value for key, value in args.items() if key not in injected_args
+    }
     schema_json = _tool_schema_json(args_schema)
     props = schema_json.get("properties") if isinstance(schema_json, dict) else None
     if isinstance(props, dict):
@@ -357,18 +371,21 @@ def coerce_tool_args(tool: Any, args: dict[str, Any]) -> dict[str, Any]:
     if hasattr(args_schema, "model_validate"):
         validated = args_schema.model_validate(prepared_args)
         if hasattr(validated, "model_dump"):
-            return validated.model_dump(mode="python", exclude_unset=True)
+            return {
+                **validated.model_dump(mode="python", exclude_unset=True),
+                **injected_args,
+            }
         if hasattr(validated, "dict"):
-            return validated.dict(exclude_unset=True)
-        return prepared_args
+            return {**validated.dict(exclude_unset=True), **injected_args}
+        return {**prepared_args, **injected_args}
 
     if hasattr(args_schema, "parse_obj"):
         validated = args_schema.parse_obj(prepared_args)
         if hasattr(validated, "dict"):
-            return validated.dict(exclude_unset=True)
-        return prepared_args
+            return {**validated.dict(exclude_unset=True), **injected_args}
+        return {**prepared_args, **injected_args}
 
-    return prepared_args
+    return {**prepared_args, **injected_args}
 
 
 def wrap_tool_with_db(tool: Any, db_bind: Any) -> Callable:

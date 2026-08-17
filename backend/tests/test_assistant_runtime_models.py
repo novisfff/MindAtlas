@@ -78,6 +78,12 @@ def _seed_model(db):
 
 
 def prepared_revision_fixture(db, **overrides):
+    from app.assistant.capability_calls.write_guard import (
+        CREATE_ENTRY_CONTRACT_DIGEST,
+        RECONCILIATION_CONTRACT_VERSION,
+        WRITE_COHORT_DIGEST,
+        WRITE_POLICY_DIGEST,
+    )
     from app.assistant.runtime.contracts import (
         AssistantRuntimeSubject,
         PreparedRolloutRevision,
@@ -102,6 +108,14 @@ def prepared_revision_fixture(db, **overrides):
         runtime_contract_version=overrides.get("runtime_contract_version", 1),
         checkpoint_codec_version=overrides.get("checkpoint_codec_version", 3),
         capability_feature_digest=overrides.get("capability_feature_digest", DIGEST_F),
+        create_entry_contract_digest=overrides.get(
+            "create_entry_contract_digest", CREATE_ENTRY_CONTRACT_DIGEST
+        ),
+        write_policy_digest=overrides.get("write_policy_digest", WRITE_POLICY_DIGEST),
+        write_cohort_digest=overrides.get("write_cohort_digest", WRITE_COHORT_DIGEST),
+        reconciliation_contract_version=overrides.get(
+            "reconciliation_contract_version", RECONCILIATION_CONTRACT_VERSION
+        ),
     )
     revision_id = overrides.get("revision_id", uuid.uuid4())
     return PreparedRolloutRevision.from_subject(
@@ -139,6 +153,12 @@ def test_require_sha256_rejects_non_lowercase_hex():
 
 
 def test_runtime_subject_and_closure_validate_digests():
+    from app.assistant.capability_calls.write_guard import (
+        CREATE_ENTRY_CONTRACT_DIGEST,
+        RECONCILIATION_CONTRACT_VERSION,
+        WRITE_COHORT_DIGEST,
+        WRITE_POLICY_DIGEST,
+    )
     from app.assistant.runtime.contracts import (
         AssistantReadinessSnapshot,
         AssistantRuntimeClosure,
@@ -159,6 +179,10 @@ def test_runtime_subject_and_closure_validate_digests():
         runtime_contract_version=1,
         checkpoint_codec_version=3,
         capability_feature_digest=DIGEST_6,
+        create_entry_contract_digest=CREATE_ENTRY_CONTRACT_DIGEST,
+        write_policy_digest=WRITE_POLICY_DIGEST,
+        write_cohort_digest=WRITE_COHORT_DIGEST,
+        reconciliation_contract_version=RECONCILIATION_CONTRACT_VERSION,
     )
     assert subject.runtime_contract_version == 1
 
@@ -176,6 +200,10 @@ def test_runtime_subject_and_closure_validate_digests():
             runtime_contract_version=1,
             checkpoint_codec_version=3,
             capability_feature_digest=DIGEST_6,
+            create_entry_contract_digest=CREATE_ENTRY_CONTRACT_DIGEST,
+            write_policy_digest=WRITE_POLICY_DIGEST,
+            write_cohort_digest=WRITE_COHORT_DIGEST,
+            reconciliation_contract_version=RECONCILIATION_CONTRACT_VERSION,
         )
 
     closure = AssistantRuntimeClosure(
@@ -192,6 +220,10 @@ def test_runtime_subject_and_closure_validate_digests():
         runtime_contract_version=subject.runtime_contract_version,
         checkpoint_codec_version=subject.checkpoint_codec_version,
         capability_feature_digest=subject.capability_feature_digest,
+        create_entry_contract_digest=subject.create_entry_contract_digest,
+        write_policy_digest=subject.write_policy_digest,
+        write_cohort_digest=subject.write_cohort_digest,
+        reconciliation_contract_version=subject.reconciliation_contract_version,
         closure_digest=DIGEST_8,
     )
     assert closure.schema_version == 1
@@ -243,6 +275,14 @@ def test_chat_run_requires_main_agent_closure_fields(db):
         runtime_contract_version=1,
         required_checkpoint_codec_version=3,
         required_capability_feature_digest=DIGEST_F,
+        required_create_entry_contract_digest=(
+            prepared.required_create_entry_contract_digest
+        ),
+        required_write_policy_digest=prepared.required_write_policy_digest,
+        required_write_cohort_digest=prepared.required_write_cohort_digest,
+        required_reconciliation_contract_version=(
+            prepared.required_reconciliation_contract_version
+        ),
         required_app_build_revision="build-test-1",
         capability_ledger_mode="enforced",
         memory_commit_status="pending",

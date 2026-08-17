@@ -12,15 +12,12 @@ from app.lightrag.schemas import LightRagQueryResponse
 OpenClawSystemCapabilityKey = Literal[
     "search_entries",
     "get_entry",
-    "create_relation",
     "query_knowledge_graph",
     "generate_periodic_review",
 ]
 OpenClawSystemDefaultKey = Literal[
-    "submit_context_capture",
     "search_entries",
     "get_entry",
-    "create_relation",
     "query_knowledge_graph",
     "generate_periodic_review",
 ]
@@ -164,91 +161,6 @@ class OpenClawGetEntryRequest(CamelModel):
         ),
         examples=["123e4567-e89b-12d3-a456-426614174000"],
     )
-
-
-class OpenClawCaptureEntryRequest(CamelModel):
-    title: str = Field(min_length=1, max_length=255)
-    summary: str | None = Field(default=None, max_length=4000)
-    content: str | None = Field(default=None, max_length=40000)
-    entry_type: str = Field(min_length=1, max_length=128, alias="entryType")
-    tag_names: list[str] = Field(default_factory=list, alias="tagNames")
-    time_at: datetime | None = Field(default=None, alias="timeAt")
-    time_from: datetime | None = Field(default=None, alias="timeFrom")
-    time_to: datetime | None = Field(default=None, alias="timeTo")
-
-    @field_validator("title", "summary", "content", "entry_type", mode="before")
-    @classmethod
-    def _normalize_required_text(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        normalized = str(value).strip()
-        return normalized or None
-
-    @field_validator("tag_names", mode="before")
-    @classmethod
-    def _normalize_capture_tag_names(cls, value: Any) -> list[str]:
-        if value is None:
-            return []
-        if not isinstance(value, list):
-            raise ValueError("tagNames must be a list")
-        normalized: list[str] = []
-        seen: set[str] = set()
-        for item in value:
-            text = str(item or "").strip()
-            lowered = text.lower()
-            if not text or lowered in seen:
-                continue
-            seen.add(lowered)
-            normalized.append(text)
-        return normalized
-
-
-class OpenClawCreateRelationRequest(CamelModel):
-    source_entry_id: UUID = Field(
-        alias="sourceEntryId",
-        description="Required source entry ID, usually taken from a previous search result.",
-        examples=["123e4567-e89b-12d3-a456-426614174000"],
-    )
-    target_entry_id: UUID = Field(
-        alias="targetEntryId",
-        description="Required target entry ID, usually taken from a previous search result.",
-        examples=["123e4567-e89b-12d3-a456-426614174001"],
-    )
-    relation_type: str = Field(
-        min_length=1,
-        max_length=128,
-        alias="relationType",
-        description=(
-            "Required relation type. Prefer one of the enabled relation type codes exposed below. "
-            "Localized relation type names may still be accepted for compatibility, but stable codes are the "
-            "canonical contract."
-        ),
-        examples=["RELATED_TO"],
-    )
-    description: str | None = Field(
-        default=None,
-        max_length=512,
-        description="Optional short explanation for why the two entries are related.",
-    )
-
-    @field_validator("relation_type", "description", mode="before")
-    @classmethod
-    def _normalize_relation_text(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        normalized = str(value).strip()
-        return normalized or None
-
-
-class OpenClawRelationRecordResponse(CamelModel):
-    id: UUID
-    source_entry_id: UUID = Field(alias="sourceEntryId")
-    source_entry_title: str = Field(alias="sourceEntryTitle")
-    target_entry_id: UUID = Field(alias="targetEntryId")
-    target_entry_title: str = Field(alias="targetEntryTitle")
-    relation_type_code: str = Field(alias="relationTypeCode")
-    relation_type_name: str = Field(alias="relationTypeName")
-    description: str | None = None
 
 
 class OpenClawQueryKnowledgeGraphRequest(CamelModel):
@@ -540,7 +452,6 @@ class OpenClawCapabilityExecuteResponse(CamelModel):
 OPENCLAW_SYSTEM_CAPABILITY_INPUT_MODELS: dict[OpenClawSystemCapabilityKey, type[CamelModel]] = {
     "search_entries": OpenClawSearchEntriesRequest,
     "get_entry": OpenClawGetEntryRequest,
-    "create_relation": OpenClawCreateRelationRequest,
     "query_knowledge_graph": OpenClawQueryKnowledgeGraphRequest,
     "generate_periodic_review": OpenClawGeneratePeriodicReviewRequest,
 }
@@ -548,7 +459,6 @@ OPENCLAW_SYSTEM_CAPABILITY_INPUT_MODELS: dict[OpenClawSystemCapabilityKey, type[
 OPENCLAW_SYSTEM_CAPABILITY_OUTPUT_MODELS: dict[OpenClawSystemCapabilityKey, type[Any]] = {
     "search_entries": OpenClawSearchEntriesResponse,
     "get_entry": OpenClawEntryRecordResponse,
-    "create_relation": OpenClawRelationRecordResponse,
     "query_knowledge_graph": LightRagQueryResponse,
     "generate_periodic_review": OpenClawPeriodicReviewResponse,
 }

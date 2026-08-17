@@ -96,32 +96,6 @@ _TOOL_PARITY_FIXTURES: tuple[dict[str, Any], ...] = (
         "needs_lightrag": False,
     },
     {
-        "capability_key": "create_relation",
-        "payload": {
-            "sourceEntryId": "00000000-0000-4000-8000-000000000001",
-            "targetEntryId": "00000000-0000-4000-8000-000000000002",
-            "relationType": "related_to",
-            "description": "parity",
-        },
-        "runner_result": {
-            "id": "00000000-0000-4000-8000-000000000099",
-            "source_entry_id": "00000000-0000-4000-8000-000000000001",
-            "source_entry_title": "Source",
-            "target_entry_id": "00000000-0000-4000-8000-000000000002",
-            "target_entry_title": "Target",
-            "relation_type_code": "related_to",
-            "relation_type_name": "Related",
-            "description": "parity",
-        },
-        "expected_result_keys": (
-            "id",
-            "sourceEntryId",
-            "targetEntryId",
-            "relationTypeCode",
-        ),
-        "needs_lightrag": False,
-    },
-    {
         "capability_key": "query_knowledge_graph",
         "payload": {"query": "parity graph", "mode": "hybrid", "topK": 5},
         "runner_result": {
@@ -863,7 +837,7 @@ class OpenClawSharedCapabilityRuntimeTests(unittest.TestCase):
         # Workflow system items are classified independently; they remain inventory-covered.
         self.assertEqual(
             workflow_system_keys,
-            {"submit_context_capture", "generate_periodic_review"},
+            {"generate_periodic_review"},
         )
         for key, ceiling in OPENCLAW_SYSTEM_ITEM_EFFECT_CEILINGS.items():
             self.assertEqual(ceiling.revision, "plan02-v1", key)
@@ -903,61 +877,22 @@ class OpenClawSharedCapabilityRuntimeTests(unittest.TestCase):
         # Lattice helper remains strict
         self.assertEqual(lattice_prefix_through("read")[-1], "read")
 
-    def test_code_executor_system_workflows_are_unavailable_in_shared(self) -> None:
-        """Plan 02 v1: code_executor closures classify unknown; shared preflight fails.
-
-        Only submit_context_capture carries code_executor nodes among system
-        OpenClaw workflows. generate_periodic_review classifies shared-ready
-        (read) and is covered by the integration suite with mocked engines.
-        """
+    def test_retired_write_system_items_are_not_seeded(self) -> None:
         self._initialize_system()
         self._rotate_and_enable()
-        service = OpenClawIntegrationService(self.db)
+        system_item_keys = {
+            row.capability_key
+            for row in self.db.query(OpenClawCapabilityItem)
+            .filter(OpenClawCapabilityItem.is_system_item.is_(True))
+            .all()
+        }
 
-        from app.assistant.capabilities.runtime import build_capability_runtime
-        from app.openclaw_integration.capability_adapter import freeze_openclaw_capability_call
-
-        item = (
-            self.db.query(OpenClawCapabilityItem)
-            .filter(OpenClawCapabilityItem.capability_key == "submit_context_capture")
-            .one()
+        self.assertEqual(
+            system_item_keys,
+            {"search_entries", "get_entry", "query_knowledge_graph", "generate_periodic_review"},
         )
-        frozen = freeze_openclaw_capability_call(
-            service,
-            item=item,
-            call_id="call-code-executor",
-        )
-        descriptor = build_capability_runtime(
-            db=self.db, evidence_verifiers={}, locale="zh"
-        ).describe(frozen.binding)
-        self.assertEqual(descriptor.behavior.side_effect, "unknown")
-
-        with self.assertRaises(ApiException) as shared_ctx:
-            service.execute_capability_in_worker(
-                capability_key="submit_context_capture",
-                raw_payload={"context": "remember this for parity"},
-                audit_context=self._audit(),
-                preferred_locale="zh",
-                auth_proof=OpenClawAuthenticationProof(principal_id="openclaw"),
-            )
-        self.assertEqual(shared_ctx.exception.status_code, 409)
-        self.assertEqual(shared_ctx.exception.code, 40961)
-
-        # Periodic review has no code_executor; classification is not unknown.
-        review_item = (
-            self.db.query(OpenClawCapabilityItem)
-            .filter(OpenClawCapabilityItem.capability_key == "generate_periodic_review")
-            .one()
-        )
-        review_frozen = freeze_openclaw_capability_call(
-            service,
-            item=review_item,
-            call_id="call-review",
-        )
-        review_desc = build_capability_runtime(
-            db=self.db, evidence_verifiers={}, locale="zh"
-        ).describe(review_frozen.binding)
-        self.assertNotEqual(review_desc.behavior.side_effect, "unknown")
+        self.assertNotIn("submit_context_capture", system_item_keys)
+        self.assertNotIn("create_relation", system_item_keys)
 
     def test_missing_system_ceiling_raises_invalid_source(self) -> None:
         self._initialize_system()

@@ -1,0 +1,240 @@
+name: ${RELEASE_COMPOSE_PROJECT:?RELEASE_COMPOSE_PROJECT must be a unique host-generated name}
+
+services:
+  postgres:
+    image: postgres@sha256:0dda651c259bfe50e2bcc28ca23d1fcca772fa90b0210803aa7b97379ccf4e85
+    environment:
+      POSTGRES_USER: ${RELEASE_POSTGRES_USER:?RELEASE_POSTGRES_USER is required}
+      POSTGRES_DB: ${RELEASE_POSTGRES_DB:?RELEASE_POSTGRES_DB is required}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
+    volumes:
+      - release_postgres:/var/lib/postgresql/data
+    networks:
+      - release-internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  minio:
+    image: minio/minio@sha256:a6f318a0b80d344553cee9acd979df480309f22b79390840e3b5c9f753c875d1
+    command: ["server", "/data", "--address", ":9000"]
+    environment:
+      MINIO_ROOT_USER: ${RELEASE_MINIO_ACCESS_KEY:?RELEASE_MINIO_ACCESS_KEY is required}
+      MINIO_ROOT_PASSWORD_FILE: /run/secrets/minio_password
+    secrets:
+      - minio_password
+    volumes:
+      - release_minio:/data
+      - release_evidence:/data/.release-evidence
+      - release_audit:/data/.release-audit
+    networks:
+      - release-internal
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  minio-init:
+    image: minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
+    entrypoint: ["/bin/sh", "-ceu"]
+    command:
+      - |
+        mc alias set release http://minio:9000 "$${MINIO_ROOT_USER}" "$$(cat /run/secrets/minio_password)"
+        mc mb --ignore-existing release/mindatlas-runtime-artifacts
+        mc mb --ignore-existing release/mindatlas-release-evidence
+        mc mb --ignore-existing release/mindatlas-audit
+    environment:
+      MINIO_ROOT_USER: ${RELEASE_MINIO_ACCESS_KEY:?RELEASE_MINIO_ACCESS_KEY is required}
+    secrets:
+      - minio_password
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - release-internal
+
+  schema-migrate:
+    image: ${RELEASE_BACKEND_IMAGE:?RELEASE_BACKEND_IMAGE must be an immutable backend image}
+    command: ["alembic", "upgrade", "head"]
+    env_file:
+      - ${RELEASE_RUNTIME_ENV_FILE:?RELEASE_RUNTIME_ENV_FILE is required}
+    environment:
+      APP_ENV: test
+      APP_BUILD_REVISION: ${RELEASE_BUILD_REVISION:?RELEASE_BUILD_REVISION is required}
+      MINDATLAS_DEPLOYMENT_CLASS: rehearsal
+      DATABASE_URL: ${RELEASE_DATABASE_URL:?RELEASE_DATABASE_URL is host-generated and required}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - release-internal
+
+  scripted-provider:
+    image: ${RELEASE_SCRIPTED_PROVIDER_IMAGE:?RELEASE_SCRIPTED_PROVIDER_IMAGE must be an immutable scripted-provider image}
+    command: ["python", "-m", "app.release.scripted_provider", "--script", "/run/release/scenario.json"]
+    env_file:
+      - ${RELEASE_RUNTIME_ENV_FILE:?RELEASE_RUNTIME_ENV_FILE is required}
+    environment:
+      APP_ENV: test
+      APP_BUILD_REVISION: ${RELEASE_BUILD_REVISION:?RELEASE_BUILD_REVISION is required}
+      MINDATLAS_DEPLOYMENT_CLASS: rehearsal
+      SCRIPTED_PROVIDER_BIND: 0.0.0.0:8081
+      SCRIPTED_PROVIDER_SCRIPT: /run/release/scenario.json
+    volumes:
+      - ${RELEASE_SCRIPTED_PROVIDER_SCRIPT:?RELEASE_SCRIPTED_PROVIDER_SCRIPT is required}:/run/release/scenario.json:ro
+    networks:
+      - release-internal
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:8081/health\", timeout=2)' "]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  api:
+    image: ${RELEASE_BACKEND_IMAGE:?RELEASE_BACKEND_IMAGE must be an immutable backend image}
+    env_file:
+      - ${RELEASE_RUNTIME_ENV_FILE:?RELEASE_RUNTIME_ENV_FILE is required}
+    environment:
+      APP_ENV: test
+      APP_BUILD_REVISION: ${RELEASE_BUILD_REVISION:?RELEASE_BUILD_REVISION is required}
+      MINDATLAS_DEPLOYMENT_CLASS: rehearsal
+      DATABASE_URL: ${RELEASE_DATABASE_URL:?RELEASE_DATABASE_URL is host-generated and required}
+      MINDATLAS_RELEASE_DEPLOYMENT_IDENTITY_PATH: /run/secrets/deployment_identity
+      MINDATLAS_RELEASE_TRUST_SET_PATH: /run/secrets/trust_set
+      MINDATLAS_RELEASE_PROFILE_AUTHORIZATION_PATH: /run/secrets/rehearsal_authorization
+      MINIO_ENDPOINT: minio:9000
+      AI_PROVIDER_BASE_URL: http://scripted-provider:8081
+      AI_MODEL_CAPABILITY_PROBE_ENABLED: "false"
+    secrets:
+      - deployment_identity
+      - trust_set
+      - rehearsal_authorization
+    depends_on:
+      schema-migrate:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+      scripted-provider:
+        condition: service_healthy
+    networks:
+      - release-internal
+    ports:
+      - "127.0.0.1:${RELEASE_API_PORT:?RELEASE_API_PORT is host-allocated}:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  assistant-worker-a:
+    image: ${RELEASE_BACKEND_IMAGE:?RELEASE_BACKEND_IMAGE must be an immutable backend image}
+    hostname: release-worker-a
+    command: ["python", "-m", "app.assistant.worker"]
+    env_file:
+      - ${RELEASE_RUNTIME_ENV_FILE:?RELEASE_RUNTIME_ENV_FILE is required}
+    environment:
+      APP_ENV: test
+      APP_BUILD_REVISION: ${RELEASE_BUILD_REVISION:?RELEASE_BUILD_REVISION is required}
+      MINDATLAS_DEPLOYMENT_CLASS: rehearsal
+      DATABASE_URL: ${RELEASE_DATABASE_URL:?RELEASE_DATABASE_URL is host-generated and required}
+      ASSISTANT_WORKER_STATE_PATH: /run/worker-state/worker-a.json
+      ASSISTANT_WORKER_INSTANCE_LABEL: release-worker-a
+      MINIO_ENDPOINT: minio:9000
+      AI_PROVIDER_BASE_URL: http://scripted-provider:8081
+    secrets:
+      - deployment_identity
+      - trust_set
+      - rehearsal_authorization
+    volumes:
+      - release_worker_a_state:/run/worker-state
+    depends_on:
+      schema-migrate:
+        condition: service_completed_successfully
+      api:
+        condition: service_healthy
+    networks:
+      - release-internal
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.assistant.worker", "--healthcheck", "--state-path", "/run/worker-state/worker-a.json"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  assistant-worker-b:
+    image: ${RELEASE_BACKEND_IMAGE:?RELEASE_BACKEND_IMAGE must be an immutable backend image}
+    hostname: release-worker-b
+    command: ["python", "-m", "app.assistant.worker"]
+    env_file:
+      - ${RELEASE_RUNTIME_ENV_FILE:?RELEASE_RUNTIME_ENV_FILE is required}
+    environment:
+      APP_ENV: test
+      APP_BUILD_REVISION: ${RELEASE_BUILD_REVISION:?RELEASE_BUILD_REVISION is required}
+      MINDATLAS_DEPLOYMENT_CLASS: rehearsal
+      DATABASE_URL: ${RELEASE_DATABASE_URL:?RELEASE_DATABASE_URL is host-generated and required}
+      ASSISTANT_WORKER_STATE_PATH: /run/worker-state/worker-b.json
+      ASSISTANT_WORKER_INSTANCE_LABEL: release-worker-b
+      MINIO_ENDPOINT: minio:9000
+      AI_PROVIDER_BASE_URL: http://scripted-provider:8081
+    secrets:
+      - deployment_identity
+      - trust_set
+      - rehearsal_authorization
+    volumes:
+      - release_worker_b_state:/run/worker-state
+    depends_on:
+      schema-migrate:
+        condition: service_completed_successfully
+      api:
+        condition: service_healthy
+    networks:
+      - release-internal
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.assistant.worker", "--healthcheck", "--state-path", "/run/worker-state/worker-b.json"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  web:
+    image: ${RELEASE_WEB_IMAGE:?RELEASE_WEB_IMAGE must be an immutable web image}
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - release-internal
+    ports:
+      - "127.0.0.1:${RELEASE_WEB_PORT:?RELEASE_WEB_PORT is host-allocated}:80"
+
+networks:
+  release-internal:
+    internal: true
+
+volumes:
+  release_postgres:
+    name: ${RELEASE_RUN_ID:?RELEASE_RUN_ID must be unique}_postgres
+  release_minio:
+    name: ${RELEASE_RUN_ID:?RELEASE_RUN_ID must be unique}_minio
+  release_evidence:
+    name: ${RELEASE_RUN_ID:?RELEASE_RUN_ID must be unique}_evidence
+  release_audit:
+    name: ${RELEASE_RUN_ID:?RELEASE_RUN_ID must be unique}_audit
+  release_worker_a_state:
+    name: ${RELEASE_RUN_ID:?RELEASE_RUN_ID must be unique}_worker_a
+  release_worker_b_state:
+    name: ${RELEASE_RUN_ID:?RELEASE_RUN_ID must be unique}_worker_b
+
+secrets:
+  postgres_password:
+    file: ${RELEASE_POSTGRES_PASSWORD_FILE:?RELEASE_POSTGRES_PASSWORD_FILE is required}
+  minio_password:
+    file: ${RELEASE_MINIO_PASSWORD_FILE:?RELEASE_MINIO_PASSWORD_FILE is required}
+  deployment_identity:
+    file: ${RELEASE_DEPLOYMENT_IDENTITY_FILE:?RELEASE_DEPLOYMENT_IDENTITY_FILE is required}
+  trust_set:
+    file: ${RELEASE_TRUST_SET_FILE:?RELEASE_TRUST_SET_FILE is required}
+  rehearsal_authorization:
+    file: ${RELEASE_REHEARSAL_AUTHORIZATION_FILE:?RELEASE_REHEARSAL_AUTHORIZATION_FILE is required}

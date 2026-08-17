@@ -886,6 +886,7 @@ def compose_main_agent_policy_runtime(
     admission_context_resolver: Any | None = None,
     capability_ledger_lease: Any | None = None,
     capability_ledger_idempotency_secret: str | bytes | None = None,
+    production_write_guard: Any | None = None,
 ) -> tuple[MainAgentPolicyRuntime, ProviderLoopPorts]:
     """Compose Plan 05 policy ledgers + ProviderLoopPorts for one admitted Run.
 
@@ -1169,6 +1170,11 @@ def compose_main_agent_policy_runtime(
             from app.assistant.capability_calls.aggregate import (
                 DurableCapabilityLedgerAggregate,
             )
+            from app.assistant.capability_calls.write_guard import ProductionWriteGuard
+            from app.assistant.runtime.closure import AssistantRuntimeClosureBuilder
+
+            closure_builder = AssistantRuntimeClosureBuilder(db)
+            effective_write_guard = production_write_guard or ProductionWriteGuard(db)
 
             capability_ledger = DurableCapabilityLedgerAggregate(
                 db=db,
@@ -1181,6 +1187,12 @@ def compose_main_agent_policy_runtime(
                     "budget": budget_ledger.snapshot(),
                     "obligation": obligation_ledger.snapshot(),
                 },
+                write_guard=effective_write_guard,
+                runtime_closure_provider=lambda run: closure_builder.build(
+                    rollout_revision_id=run.main_agent_rollout_revision_id,
+                    lock=True,
+                ),
+                dispatch_guard=dispatch_guard,
             )
         if capability_ledger is None:
             raise RuntimeError(

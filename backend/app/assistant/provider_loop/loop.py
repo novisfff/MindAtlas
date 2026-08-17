@@ -2163,6 +2163,27 @@ def _reserve_one_call(
         )
 
 
+def _reuse_reserved_call(
+    *,
+    ports: ProviderLoopPorts,
+    call: ProviderToolCall,
+    definition: ProviderToolDefinition,
+) -> CapabilityCallReservationDecision:
+    item = _build_reservation_item(
+        ports=ports,
+        call=call,
+        descriptor=definition.descriptor,
+    )
+    try:
+        return ports.call_reservation.reuse_reserved(item)
+    except Exception:
+        return CapabilityCallReservationDecision(
+            allowed=False,
+            reason_code="budget_reservation_error",
+            reserved_call_ids=(),
+        )
+
+
 def _reserve_batch_calls(
     *,
     ports: ProviderLoopPorts,
@@ -2542,6 +2563,7 @@ def _execute_sibling_calls(
     provider_rounds_used: int,
     prior_tool_call_count: int,
     accumulated_usage: ProviderUsage,
+    pre_reserved_call_ids: frozenset[str] = frozenset(),
 ) -> _SiblingOutcome:
     """Execute remaining sibling calls from start_index in Provider order groups."""
     remaining = tuple(call for call in calls if call.call_index >= start_index)
@@ -2669,6 +2691,7 @@ def _execute_sibling_calls(
                 prior_tool_call_count=prior_tool_call_count,
                 accumulated_usage=accumulated_usage,
                 preauthorized=preauthorized,
+                pre_reserved_call_ids=pre_reserved_call_ids,
             )
             messages = list(outcome.messages)
             tool_call_records = list(outcome.tool_call_records)
@@ -2728,6 +2751,7 @@ def _execute_sequential_group(
     prior_tool_call_count: int,
     accumulated_usage: ProviderUsage,
     preauthorized: dict[str, Any],
+    pre_reserved_call_ids: frozenset[str] = frozenset(),
 ) -> _SiblingOutcome:
     for call in group_calls:
         if ports.cancellation.is_cancelled():
@@ -2753,10 +2777,17 @@ def _execute_sequential_group(
 
         definition = lookup_tool_by_alias(surface, call.provider_alias)
 
-        # Plan 05: sequential reserve_one before evidence/dispatch.
-        reservation = _reserve_one_call(
-            ports=ports, call=call, definition=definition
-        )
+        # A completed call-owned approval resume reuses exactly its preserved
+        # scheduler reservation. All other calls must reserve before dispatch.
+        if call.call_id in pre_reserved_call_ids:
+            reservation = _reuse_reserved_call(
+                ports=ports, call=call, definition=definition
+            )
+        else:
+            # Plan 05: sequential reserve_one before evidence/dispatch.
+            reservation = _reserve_one_call(
+                ports=ports, call=call, definition=definition
+            )
         if not reservation.allowed:
             blocked_msg = _blocked_budget_message(
                 call,
@@ -2772,7 +2803,9 @@ def _execute_sequential_group(
                     safe_duration_ms=None,
                 )
             )
-            remaining = tuple(item for item in all_calls if item.call_index > call.call_index)
+            remaining = tuple(
+                item for item in all_calls if item.call_index > call.call_index
+            )
             _append_cancelled_before_start(
                 messages=messages,
                 tool_call_records=tool_call_records,
@@ -3698,6 +3731,11 @@ def resume_provider_agent_loop(
             call_owned_approval
             and request.resolved_waiting.capability_result.status == "completed"
         )
+        # The validated continuation identifies the one durable, unstarted
+        # scheduler reservation that approval is allowed to re-enter.
+        reused_reservation_ids = frozenset(
+            {waiting_call.call_id} if approval_satisfied else ()
+        )
         if approval_satisfied:
             # Approval satisfies an obligation; it is not the Tool's business
             # result. Re-enter dispatch for the exact original waiting call so
@@ -3764,6 +3802,7 @@ def resume_provider_agent_loop(
             provider_rounds_used=round_count,
             prior_tool_call_count=prior_tool_call_count,
             accumulated_usage=accumulated_usage,
+            pre_reserved_call_ids=reused_reservation_ids,
         )
         messages = list(sibling_outcome.messages)
         tool_call_records = list(sibling_outcome.tool_call_records)

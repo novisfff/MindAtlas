@@ -700,6 +700,7 @@ class CapabilityError(FrozenContract):
     error_type: Literal[
         "not_found",
         "unavailable",
+        "unsupported",
         "version_drift",
         "unauthorized",
         "invalid_input",

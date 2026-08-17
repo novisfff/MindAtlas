@@ -151,6 +151,16 @@ def compute_system_tool_contract_set_digest() -> str:
 
 
 def system_tool_schemas(tool_name: str) -> tuple[dict[str, JsonValue], dict[str, JsonValue]]:
+    if tool_name == "create_entry":
+        # create_entry is imported through the capability package.  Its frozen
+        # contract is therefore needed before ToolRegistry can enumerate the
+        # system tools during package initialization.
+        from app.assistant.domain.create_entry_contract import (
+            create_entry_binding_schemas,
+        )
+
+        return create_entry_binding_schemas()
+
     definitions = {
         item.name: item for item in ToolRegistry.list_system_tool_definitions()
     }

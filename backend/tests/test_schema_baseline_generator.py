@@ -363,9 +363,21 @@ def test_live_metadata_declares_all_captured_lowercase_sha256_checks() -> None:
             if isinstance(constraint, CheckConstraint)
         }
         assert constraint_name in by_name, f"{table_name}.{constraint_name}"
-        assert str(by_name[constraint_name].sqltext).count(
+        actual_regex_count = str(by_name[constraint_name].sqltext).count(
             "~ '^[0-9a-f]{64}$'"
-        ) == regex_count
+        )
+        if (
+            table_name == "assistant_chat_run"
+            and constraint_name == "ck_assistant_chat_run_runtime_digests"
+        ):
+            # pre_ga_v1_0002 replaces this root check while adding the
+            # create-entry/write-policy/write-cohort closure fields.  Keep
+            # the clean-root expectation above, then assert the exact
+            # additive post-migration shape rather than pretending the root
+            # expression still describes the live model.
+            assert actual_regex_count == 5
+        else:
+            assert actual_regex_count == regex_count
 
     portable_interrupt_checks = {
         "ck_assistant_run_interrupt_budget_suspension_digest",

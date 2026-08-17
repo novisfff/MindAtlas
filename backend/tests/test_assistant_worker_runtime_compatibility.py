@@ -293,6 +293,12 @@ def test_two_compatible_workers_are_sorted_and_safe(runtime_state):
 
 
 def test_worker_compatibility_from_closure_and_run():
+    from app.assistant.capability_calls.write_guard import (
+        CREATE_ENTRY_CONTRACT_DIGEST,
+        RECONCILIATION_CONTRACT_VERSION,
+        WRITE_COHORT_DIGEST,
+        WRITE_POLICY_DIGEST,
+    )
     from app.assistant.durable.worker_registry import WorkerCompatibility
     from app.assistant.runtime.contracts import AssistantRuntimeClosure
     from types import SimpleNamespace
@@ -311,6 +317,10 @@ def test_worker_compatibility_from_closure_and_run():
         runtime_contract_version=1,
         checkpoint_codec_version=3,
         capability_feature_digest="1" * 64,
+        create_entry_contract_digest=CREATE_ENTRY_CONTRACT_DIGEST,
+        write_policy_digest=WRITE_POLICY_DIGEST,
+        write_cohort_digest=WRITE_COHORT_DIGEST,
+        reconciliation_contract_version=RECONCILIATION_CONTRACT_VERSION,
         closure_digest="2" * 64,
     )
     from_closure = WorkerCompatibility.from_closure(closure)
@@ -324,6 +334,10 @@ def test_worker_compatibility_from_closure_and_run():
         runtime_contract_version=1,
         required_checkpoint_codec_version=3,
         required_capability_feature_digest="1" * 64,
+        required_create_entry_contract_digest=CREATE_ENTRY_CONTRACT_DIGEST,
+        required_write_policy_digest=WRITE_POLICY_DIGEST,
+        required_write_cohort_digest=WRITE_COHORT_DIGEST,
+        required_reconciliation_contract_version=RECONCILIATION_CONTRACT_VERSION,
     )
     from_run = WorkerCompatibility.from_run(run)
     assert from_run == from_closure

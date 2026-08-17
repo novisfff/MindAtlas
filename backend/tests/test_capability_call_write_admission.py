@@ -49,6 +49,43 @@ class V1PreservationTests(unittest.TestCase):
 
 
 class GoldenWriteReleaseTests(unittest.TestCase):
+    def test_release_admission_uses_code_owned_create_entry_mode_and_cohort(self) -> None:
+        from app.assistant.capability_calls.release_admission import (
+            gateway_allows_write,
+            is_create_entry_write_eligible,
+        )
+        from app.assistant.capability_calls.write_guard import WRITE_COHORT_DIGEST
+
+        settings = SimpleNamespace(assistant_main_agent_write_mode="create_entry")
+        self.assertTrue(
+            is_create_entry_write_eligible(
+                capability_ledger_mode="enforced",
+                cohort_digest=WRITE_COHORT_DIGEST,
+                settings=settings,
+            )
+        )
+        self.assertFalse(
+            is_create_entry_write_eligible(
+                capability_ledger_mode="enforced",
+                cohort_digest=DIGEST_A,
+                settings=settings,
+            )
+        )
+        self.assertTrue(
+            gateway_allows_write(
+                domain_key="create_entry",
+                write_mode="create_entry",
+                capability_ledger_mode="enforced",
+            )
+        )
+        self.assertFalse(
+            gateway_allows_write(
+                domain_key="update_entry",
+                write_mode="create_entry",
+                capability_ledger_mode="enforced",
+            )
+        )
+
     def test_lattice_prefix_and_digest_stable(self) -> None:
         from app.assistant.policy.contracts import (
             GOLDEN_WRITE_LATTICE_PREFIX,

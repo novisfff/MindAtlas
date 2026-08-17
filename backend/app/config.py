@@ -3,8 +3,6 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
-from uuid import UUID
-
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -30,7 +28,8 @@ ASSISTANT_INTERRUPT_MAX_TTL_SEC_HARD_MAX = 604800  # 7 days
 ASSISTANT_INTERRUPT_COMMENT_MAX_CHARS_HARD_MAX = 4000
 
 AssistantCapabilityLedgerMode = Literal["legacy_read_only", "enforced"]
-AssistantMainAgentWriteMode = Literal["off", "golden"]
+AssistantMainAgentWriteMode = Literal["off", "create_entry"]
+MindAtlasDeploymentClass = Literal["development", "rehearsal", "production"]
 
 
 def compute_artifact_orphan_grace_floor_sec(
@@ -76,6 +75,28 @@ class Settings(BaseSettings):
     app_default_locale: str = Field(default="zh", alias="APP_DEFAULT_LOCALE")
     # Immutable image/git revision in staging/production. Local/test may use "development".
     app_build_revision: str = Field(default="development", alias="APP_BUILD_REVISION")
+    mindatlas_deployment_class: MindAtlasDeploymentClass = Field(
+        default="development",
+        alias="MINDATLAS_DEPLOYMENT_CLASS",
+    )
+    # Release evidence trust is public configuration; private signing keys are
+    # supplied only through an already-open runner descriptor.
+    release_trust_set_path: str = Field(
+        default="",
+        alias="MINDATLAS_RELEASE_TRUST_SET_PATH",
+    )
+    release_profile_authorization_path: str = Field(
+        default="",
+        alias="MINDATLAS_RELEASE_PROFILE_AUTHORIZATION_PATH",
+    )
+    release_evidence_root: str = Field(
+        default="",
+        alias="MINDATLAS_RELEASE_EVIDENCE_ROOT",
+    )
+    release_deployment_identity_path: str = Field(
+        default="",
+        alias="MINDATLAS_RELEASE_DEPLOYMENT_IDENTITY_PATH",
+    )
 
     # Plan 03 live model capability probe (paid Provider call). Default-disabled.
     # confirmProviderCall=true is cost acknowledgement only, not authentication.
@@ -279,6 +300,7 @@ class Settings(BaseSettings):
     assistant_interrupt_token_pepper: str = Field(
         default="",
         alias="ASSISTANT_INTERRUPT_TOKEN_PEPPER",
+        repr=False,
     )
 
     # Plan 08: HMAC secret for server-generated capability call idempotency keys.
@@ -286,6 +308,7 @@ class Settings(BaseSettings):
     assistant_capability_call_idempotency_secret: str = Field(
         default="",
         alias="ASSISTANT_CAPABILITY_CALL_IDEMPOTENCY_SECRET",
+        repr=False,
     )
     # Plan 08 ledger admission default for new Main Agent Runs (frozen per Run).
     # Default legacy_read_only; enforced only for explicit test/admin cohorts.
@@ -293,45 +316,22 @@ class Settings(BaseSettings):
         default="legacy_read_only",
         alias="ASSISTANT_CAPABILITY_LEDGER_MODE",
     )
-    # Plan 08 golden write release gate. Default off; golden requires enforced ledger.
+    # Pre-GA create-entry process gate. Durable launch authorization remains DB-owned.
     assistant_main_agent_write_mode: AssistantMainAgentWriteMode = Field(
         default="off",
         alias="ASSISTANT_MAIN_AGENT_WRITE_MODE",
     )
-    # Optional cohort digest for golden write eligibility (empty = no cohort).
-    assistant_main_agent_write_cohort_digest: str = Field(
-        default="",
-        alias="ASSISTANT_MAIN_AGENT_WRITE_COHORT_DIGEST",
-    )
     # Reconciliation evidence issuance flag. Default-disabled. Mutations require
-    # an authenticated HTTP Operator session (Plan 4); the optional operator id
-    # field is retained only for env compatibility and is never authorization.
+    # an authenticated Operator from the current Session; no configured actor ID.
     assistant_capability_reconciliation_enabled: bool = Field(
         default=False,
         alias="ASSISTANT_CAPABILITY_RECONCILIATION_ENABLED",
     )
-    assistant_capability_reconciliation_operator_id: UUID | None = Field(
-        default=None,
-        alias="ASSISTANT_CAPABILITY_RECONCILIATION_OPERATOR_ID",
-    )
     assistant_capability_reconciliation_evidence_secret: str = Field(
         default="",
         alias="ASSISTANT_CAPABILITY_RECONCILIATION_EVIDENCE_SECRET",
+        repr=False,
     )
-
-    @field_validator(
-        "assistant_capability_reconciliation_operator_id",
-        mode="before",
-    )
-    @classmethod
-    def _empty_uuid_as_none(cls, value: object) -> object:
-        # Compose injects ASSISTANT_CAPABILITY_RECONCILIATION_OPERATOR_ID="" when
-        # unset; treat blank as absent so Settings stays constructible.
-        if value is None:
-            return None
-        if isinstance(value, str) and not value.strip():
-            return None
-        return value
     # Plan 09 evaluation: failed/unused gate evidence retention grace after expiry.
     assistant_skill_gate_evidence_grace_days: int = Field(
         default=30,
@@ -647,46 +647,66 @@ class Settings(BaseSettings):
                 "assistant_interrupt_token_pepper is required when "
                 "assistant_durable_interrupts_enabled is true"
             )
-        # Plan 08 ledger / golden write release gates.
+        # Capability ledger / create-entry write release gates.
         write_mode = str(self.assistant_main_agent_write_mode or "off")
         ledger_mode = str(self.assistant_capability_ledger_mode or "legacy_read_only")
-        if write_mode not in {"off", "golden"}:
+        if write_mode not in {"off", "create_entry"}:
             raise ValueError(
-                "assistant_main_agent_write_mode must be one of: off, golden"
+                "assistant_main_agent_write_mode must be one of: off, create_entry"
             )
         if ledger_mode not in {"legacy_read_only", "enforced"}:
             raise ValueError(
                 "assistant_capability_ledger_mode must be one of: "
                 "legacy_read_only, enforced"
             )
-        if write_mode == "golden" and ledger_mode != "enforced":
+        if write_mode == "create_entry" and ledger_mode != "enforced":
             raise ValueError(
-                "assistant_main_agent_write_mode=golden requires "
+                "assistant_main_agent_write_mode=create_entry requires "
                 "assistant_capability_ledger_mode=enforced"
             )
         if (
-            write_mode == "golden"
+            write_mode == "create_entry"
             and not self.assistant_capability_reconciliation_enabled
         ):
             raise ValueError(
-                "assistant_main_agent_write_mode=golden requires the approved "
-                "capability reconciliation operator path to be enabled"
+                "assistant_main_agent_write_mode=create_entry requires the "
+                "capability reconciliation path to be enabled"
             )
-        if ledger_mode == "enforced" or write_mode == "golden":
+        if write_mode == "create_entry" and not self.assistant_durable_interrupts_enabled:
+            raise ValueError(
+                "assistant_main_agent_write_mode=create_entry requires durable "
+                "interrupts"
+            )
+        if write_mode == "create_entry" and not (
+            self.assistant_interrupt_token_pepper or ""
+        ).strip():
+            raise ValueError(
+                "assistant_main_agent_write_mode=create_entry requires a stable "
+                "interrupt token pepper"
+            )
+        if ledger_mode == "enforced" or write_mode == "create_entry":
             secret = (self.assistant_capability_call_idempotency_secret or "").strip()
             if len(secret.encode("utf-8")) < 32:
                 raise ValueError(
                     "assistant_capability_call_idempotency_secret must be at least "
-                    "32 bytes when ledger mode is enforced or write mode is golden"
+                    "32 bytes when ledger mode is enforced or write mode is create_entry"
                 )
-        # operator_id is retained as a deprecated unused setting for env compat only;
-        # it is never an authorization source for CLI or HTTP mutations.
         if self.assistant_capability_reconciliation_enabled and len(
             self.assistant_capability_reconciliation_evidence_secret.encode("utf-8")
         ) < 32:
             raise ValueError(
                 "assistant_capability_reconciliation_evidence_secret must be at least "
                 "32 bytes when reconciliation is enabled"
+            )
+        if (
+            write_mode == "create_entry"
+            and self.mindatlas_deployment_class in {"rehearsal", "production"}
+            and (self.app_build_revision or "").strip()
+            in {"", "development", "unknown"}
+        ):
+            raise ValueError(
+                "create_entry write mode requires an immutable non-development "
+                "APP_BUILD_REVISION in rehearsal/production"
             )
         gate_mode = (self.assistant_skill_publish_gate_mode or "").strip().lower()
         if gate_mode not in {"observe", "enforce"}:

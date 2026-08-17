@@ -84,71 +84,39 @@ class EntryToolsValidationTests(unittest.TestCase):
 
         self.assertEqual(self._with_db(_StructuredToolLike(), value="ok"), "ok")
 
-    def test_create_entry_blank_type_code_uses_default_enabled_type(self) -> None:
+    def test_create_entry_direct_call_requires_gateway_before_database_access(self) -> None:
+        from app.assistant.capability_calls.create_entry_declaration import (  # noqa: E402
+            CapabilityGatewayRequired,
+        )
         from app.assistant.tools.entry_tools import create_entry  # noqa: E402
 
-        payload = json.loads(
+        with self.assertRaises(CapabilityGatewayRequired) as ctx:
             self._with_db(
                 create_entry,
                 content="记录一下 OpenClaw 工作流的收敛方案。",
                 type_code="",
             )
+        self.assertEqual(ctx.exception.safe_code, "capability_gateway_required")
+
+    def test_create_entry_direct_call_fails_closed_for_invalid_payload_too(self) -> None:
+        from app.assistant.capability_calls.create_entry_declaration import (  # noqa: E402
+            CapabilityGatewayRequired,
         )
-
-        self.assertEqual(payload["type_code"], "KNOWLEDGE")
-
-    def test_create_entry_rejects_invalid_explicit_type_code(self) -> None:
         from app.assistant.tools.entry_tools import create_entry  # noqa: E402
 
-        with self.assertRaises(ValueError) as ctx:
+        with self.assertRaises(CapabilityGatewayRequired) as ctx:
             self._with_db(
                 create_entry,
                 content="记录一下 OpenClaw 工作流的收敛方案。",
                 type_code="NOT_A_REAL_TYPE",
             )
+        self.assertEqual(ctx.exception.safe_code, "capability_gateway_required")
 
-        self.assertIn("无效的 type_code", str(ctx.exception))
-
-    def test_create_entry_blank_time_defaults_to_point_today(self) -> None:
-        from app.assistant.tools.entry_tools import create_entry  # noqa: E402
-
-        with patch("app.assistant.tools.entry_tools.date") as mocked_date:
-            mocked_date.today.return_value = real_date(2026, 4, 15)
-            payload = json.loads(
-                self._with_db(
-                    create_entry,
-                    content="记录一下今天的工作流优化进度。",
-                )
-            )
-
-        self.assertEqual(payload["time_mode"], "POINT")
-        self.assertEqual(payload["time_at"], "2026-04-15")
-        self.assertIsNone(payload["time_from"])
-        self.assertIsNone(payload["time_to"])
-
-    def test_create_entry_rejects_invalid_explicit_time_inputs(self) -> None:
-        from app.assistant.tools.entry_tools import create_entry  # noqa: E402
-
-        invalid_cases = [
-            {"time_mode": "POINT", "time_from": "2026-04-01", "time_to": "2026-04-02"},
-            {"time_mode": "RANGE", "time_at": "2026-04-01", "time_from": "2026-04-01", "time_to": "2026-04-02"},
-            {"time_mode": "RANGE", "time_from": "2026-04-01"},
-            {"time_mode": "POINT", "time_at": "2026/04/01"},
-        ]
-
-        for kwargs in invalid_cases:
-            with self.subTest(kwargs=kwargs):
-                with self.assertRaises(ValueError):
-                    self._with_db(
-                        create_entry,
-                        content="记录一下上下文入库的异常案例。",
-                        **kwargs,
-                    )
-
-    def test_update_entry_rejects_invalid_explicit_time_range(self) -> None:
+    def test_update_entry_is_an_unsupported_write_boundary(self) -> None:
+        from app.assistant.capabilities.supported_writes import CapabilityNotSupported  # noqa: E402
         from app.assistant.tools.entry_tools import update_entry  # noqa: E402
 
-        with self.assertRaises(ValueError) as ctx:
+        with self.assertRaises(CapabilityNotSupported) as ctx:
             self._with_db(
                 update_entry,
                 entry_id=str(self.existing_entry.id),
@@ -158,7 +126,7 @@ class EntryToolsValidationTests(unittest.TestCase):
                 time_to="2026-04-01",
             )
 
-        self.assertIn("time_from", str(ctx.exception))
+        self.assertEqual(ctx.exception.error.safe_code, "capability_not_supported")
 
     def test_search_similar_entries_groups_sources_by_entry_and_prioritizes_direct_entry_hits(self) -> None:
         from app.assistant.tools.entry_tools import build_search_similar_entries_payload  # noqa: E402

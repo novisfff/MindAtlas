@@ -540,7 +540,7 @@ def test_requirements_declare_jsonschema_range() -> None:
 
     # Resolve from this test file so the check works both from repo root and
     # from backend/ (GitHub Backend Tests job cwd).
-    requirements = Path(__file__).resolve().parents[1] / "requirements.txt"
+    requirements = Path(__file__).resolve().parents[1] / "requirements" / "api-worker.in"
     text = requirements.read_text(encoding="utf-8")
     assert re.search(r"(?m)^jsonschema>=4\.23,<5(\.0)?$", text)
 

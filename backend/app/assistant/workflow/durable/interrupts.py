@@ -63,6 +63,7 @@ CODE_INTERRUPT_PENDING_EXISTS = "interrupt_pending_exists"
 CODE_INTERRUPT_KEY_CONFLICT = "interrupt_key_conflict"
 CODE_INTERRUPT_IMMUTABLE = "interrupt_immutable"
 CODE_INTERRUPT_PEPPER_REQUIRED = "interrupt_pepper_required"
+CODE_CALL_OWNED_APPROVAL_REQUIRED = "capability_call_approval_required"
 
 INTERRUPT_STATUSES_TERMINAL = frozenset(
     {"approved", "rejected", "submitted", "cancelled", "expired"}
@@ -1346,6 +1347,12 @@ class DurableInterruptRepository:
                 "interrupt does not belong to run",
                 run=run,
             )
+        if str(row.interrupt_origin) == "capability_call":
+            raise InterruptConflict(
+                CODE_CALL_OWNED_APPROVAL_REQUIRED,
+                "call-owned approvals require the operator decision boundary",
+                run=run,
+            )
         if row.status != "pending":
             raise InterruptConflict(
                 CODE_INTERRUPT_NOT_PENDING,
@@ -1674,6 +1681,7 @@ class DurableInterruptRepository:
         interrupt_id: UUID,
         resolution_request_id: UUID | None = None,
         comment: str | None = None,
+        resolution_run_revision: int | None = None,
     ) -> InterruptResolveResult:
         """Terminal cancellation; no active child budget revision."""
         run = self._lock_run(run_id)
@@ -1712,7 +1720,11 @@ class DurableInterruptRepository:
         row.resolution_digest = res_digest
         row.resolution_checkpoint_id = None
         row.resolution_budget_revision_id = None
-        row.resolution_run_revision = int(run.state_revision)
+        row.resolution_run_revision = int(
+            run.state_revision
+            if resolution_run_revision is None
+            else resolution_run_revision
+        )
         row.resume_token_digest = None
         row.resolved_at = now
         row.updated_at = now
@@ -1799,6 +1811,7 @@ def assert_no_sensitive_token_leak(payload: Any, *, corpus: Sequence[str]) -> No
 
 __all__ = [
     "APPROVAL_OUTCOMES",
+    "CODE_CALL_OWNED_APPROVAL_REQUIRED",
     "CODE_INTERRUPT_ALREADY_RESOLVED",
     "CODE_INTERRUPT_COMMENT_TOO_LONG",
     "CODE_INTERRUPT_EXPIRED",

@@ -16,6 +16,36 @@ SECRET = "x" * 32
 
 
 class LogicalCallKeyTests(unittest.TestCase):
+    def test_capability_identity_binds_manifest_capability_provider_and_input(self) -> None:
+        from app.assistant.capability_calls.idempotency import (
+            derive_capability_call_identity,
+        )
+
+        run_id = uuid.uuid4()
+        kwargs = {
+            "secret": SECRET,
+            "run_id": run_id,
+            "manifest_revision_id": uuid.uuid4(),
+            "capability_key": "create_entry",
+            "provider_tool_call_id": "tool-1",
+            "frozen_target_digest": DIGEST_A,
+            "input_digest": DIGEST_B,
+        }
+        identity = derive_capability_call_identity(**kwargs)
+        self.assertEqual(len(identity), 64)
+        self.assertNotEqual(
+            identity,
+            derive_capability_call_identity(
+                **{**kwargs, "provider_tool_call_id": "tool-2"}
+            ),
+        )
+        self.assertNotEqual(
+            identity,
+            derive_capability_call_identity(
+                **{**kwargs, "manifest_revision_id": uuid.uuid4()}
+            ),
+        )
+
     def test_provider_key_stable_and_position_sensitive(self) -> None:
         from app.assistant.capability_calls.idempotency import (
             make_provider_logical_call_key,

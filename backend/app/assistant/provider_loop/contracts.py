@@ -1621,6 +1621,10 @@ class CapabilityCallReservationPort(Protocol):
         self, items: Sequence[CapabilityCallReservationItem]
     ) -> CapabilityCallReservationDecision: ...
 
+    def reuse_reserved(
+        self, item: CapabilityCallReservationItem
+    ) -> CapabilityCallReservationDecision: ...
+
 
 class NoOpCapabilityCallReservationPort:
     """Default no-op reservation port; always allows without tracking."""
@@ -1639,6 +1643,15 @@ class NoOpCapabilityCallReservationPort:
             allowed=True,
             reason_code="allowed",
             reserved_call_ids=tuple(item.call_id for item in items),
+        )
+
+    def reuse_reserved(
+        self, item: CapabilityCallReservationItem
+    ) -> CapabilityCallReservationDecision:
+        return CapabilityCallReservationDecision(
+            allowed=True,
+            reason_code="allowed",
+            reserved_call_ids=(item.call_id,),
         )
 
 

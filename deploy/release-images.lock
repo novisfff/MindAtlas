@@ -1,0 +1,22 @@
+{
+  "images": [
+    {
+      "reference": "postgres@sha256:0dda651c259bfe50e2bcc28ca23d1fcca772fa90b0210803aa7b97379ccf4e85",
+      "role": "postgres",
+      "source": "postgres:15"
+    },
+    {
+      "reference": "minio/minio@sha256:a6f318a0b80d344553cee9acd979df480309f22b79390840e3b5c9f753c875d1",
+      "role": "minio",
+      "source": "minio/minio:RELEASE.2023-08-16T20-17-30Z"
+    },
+    {
+      "reference": "minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727",
+      "role": "minio-client",
+      "source": "minio/mc:RELEASE.2025-08-13T08-35-41Z"
+    }
+  ],
+  "lockDigest": "e3fd6fc2c27ffa4e8848640b38585ad021d703aaf95d248985c27480b7869e19",
+  "platform": "linux/amd64",
+  "schemaVersion": 1
+}

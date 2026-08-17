@@ -58,6 +58,10 @@ class AssistantMainAgentRolloutRevision(Base):
     runtime_contract_version = Column(Integer, nullable=False)
     checkpoint_codec_version = Column(Integer, nullable=False)
     capability_feature_digest = Column(String(64), nullable=False)
+    required_create_entry_contract_digest = Column(String(64), nullable=False)
+    required_write_policy_digest = Column(String(64), nullable=False)
+    required_write_cohort_digest = Column(String(64), nullable=False)
+    required_reconciliation_contract_version = Column(Integer, nullable=False)
     revision_digest = Column(String(64), nullable=False)
     prepared_by_operator_id = Column(
         UUID(as_uuid=True),
@@ -82,7 +86,8 @@ class AssistantMainAgentRolloutRevision(Base):
             name="uq_ma_rollout_revision_label",
         ),
         CheckConstraint(
-            "runtime_contract_version > 0 AND checkpoint_codec_version > 0",
+            "runtime_contract_version > 0 AND checkpoint_codec_version > 0 "
+            "AND required_reconciliation_contract_version > 0",
             name="ck_ma_rollout_revision_positive_contract",
         ),
         CheckConstraint(
@@ -116,6 +121,18 @@ class AssistantMainAgentRolloutRevision(Base):
         _sha256_check(
             "capability_feature_digest",
             name="ck_ma_rollout_revision_capability_feature_digest",
+        ),
+        _sha256_check(
+            "required_create_entry_contract_digest",
+            name="ck_ma_rollout_revision_create_entry_contract_digest",
+        ),
+        _sha256_check(
+            "required_write_policy_digest",
+            name="ck_ma_rollout_revision_write_policy_digest",
+        ),
+        _sha256_check(
+            "required_write_cohort_digest",
+            name="ck_ma_rollout_revision_write_cohort_digest",
         ),
         _sha256_check(
             "revision_digest",

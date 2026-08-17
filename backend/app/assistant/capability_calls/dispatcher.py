@@ -197,10 +197,10 @@ class LedgerDispatcher:
         if outcome.kind == "dispatch_local":
             try:
                 result = self.aggregate.execute_local(outcome, request)
+                return self.aggregate.commit_result(outcome, result)
             except BaseException:
                 self.aggregate.record_failure(outcome, "local_transaction_failed")
                 raise
-            return self.aggregate.commit_result(outcome, result)
         if outcome.kind != "dispatch":
             raise TypeError(f"unsupported ledger prepare outcome {outcome.kind!r}")
 
@@ -281,24 +281,6 @@ class LedgerDispatcher:
             assistant_message_index=ledger.assistant_message_index,
             provider_tool_call_id=ledger.provider_tool_call_id,
         )
-        target_digest = ledger.frozen_target_digest or ledger.input_digest
-        if ledger.idempotency_secret:
-            idem_key = make_server_idempotency_key(
-                secret=ledger.idempotency_secret,
-                run_id=ledger.run_id,
-                logical_call_key=logical_key,
-                frozen_target_digest=target_digest,
-                canonical_input_digest=ledger.input_digest,
-            )
-        else:
-            # Tests may omit secret for read-only ledger paths; still store a
-            # deterministic non-HMAC key material hash of identity.
-            from app.assistant.domain.digests import sha256_bytes
-
-            idem_key = sha256_bytes(
-                f"{ledger.run_id}|{logical_key}|{target_digest}|{ledger.input_digest}".encode()
-            )
-
         manifest_revision_id = ledger.manifest_revision_id
         if manifest_revision_id is None:
             # Prefer current manifest revision id when present on request.
@@ -309,6 +291,26 @@ class LedgerDispatcher:
             if mid is None:
                 raise ValueError("ledger dispatch requires manifest_revision_id")
             manifest_revision_id = mid
+        target_digest = ledger.frozen_target_digest or ledger.input_digest
+        if ledger.idempotency_secret:
+            idem_key = make_server_idempotency_key(
+                secret=ledger.idempotency_secret,
+                run_id=ledger.run_id,
+                logical_call_key=logical_key,
+                frozen_target_digest=target_digest,
+                canonical_input_digest=ledger.input_digest,
+                manifest_revision_id=manifest_revision_id,
+                capability_key=str(domain_key),
+                provider_tool_call_id=str(ledger.provider_tool_call_id),
+            )
+        else:
+            # Tests may omit secret for read-only ledger paths; still store a
+            # deterministic non-HMAC key material hash of identity.
+            from app.assistant.domain.digests import sha256_bytes
+
+            idem_key = sha256_bytes(
+                f"{ledger.run_id}|{logical_key}|{target_digest}|{ledger.input_digest}".encode()
+            )
 
         call_id = uuid4()
         if call is not None and getattr(call, "call_id", None):

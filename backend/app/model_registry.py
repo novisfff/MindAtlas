@@ -18,6 +18,7 @@ def load_all_live_models() -> None:
     import app.lightrag.models
     import app.openclaw_integration.models
     import app.operator_auth.models
+    import app.pre_ga_launch.models
     import app.relation.models
     import app.report.models
     import app.system_settings.models
@@ -39,6 +40,7 @@ def load_all_live_models() -> None:
         app.lightrag.models,
         app.openclaw_integration.models,
         app.operator_auth.models,
+        app.pre_ga_launch.models,
         app.relation.models,
         app.report.models,
         app.system_settings.models,

@@ -130,6 +130,21 @@ class AssistantRuntimeRepository:
             capability_feature_digest=require_sha256(
                 data.capability_feature_digest, field_name="capability_feature_digest"
             ),
+            required_create_entry_contract_digest=require_sha256(
+                data.required_create_entry_contract_digest,
+                field_name="required_create_entry_contract_digest",
+            ),
+            required_write_policy_digest=require_sha256(
+                data.required_write_policy_digest,
+                field_name="required_write_policy_digest",
+            ),
+            required_write_cohort_digest=require_sha256(
+                data.required_write_cohort_digest,
+                field_name="required_write_cohort_digest",
+            ),
+            required_reconciliation_contract_version=int(
+                data.required_reconciliation_contract_version
+            ),
             revision_digest=require_sha256(
                 data.revision_digest, field_name="revision_digest"
             ),

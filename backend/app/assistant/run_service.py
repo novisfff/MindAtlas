@@ -79,6 +79,10 @@ class AssistantChatRunService:
         runtime_contract_version: int,
         required_checkpoint_codec_version: int,
         required_capability_feature_digest: str,
+        required_create_entry_contract_digest: str,
+        required_write_policy_digest: str,
+        required_write_cohort_digest: str,
+        required_reconciliation_contract_version: int,
         required_app_build_revision: str,
         capability_ledger_mode: str,
         deadline_at: datetime | None = None,
@@ -104,6 +108,8 @@ class AssistantChatRunService:
             raise ValueError("runtime_contract_version must be > 0")
         if int(required_checkpoint_codec_version) <= 0:
             raise ValueError("required_checkpoint_codec_version must be > 0")
+        if int(required_reconciliation_contract_version) <= 0:
+            raise ValueError("required_reconciliation_contract_version must be > 0")
         build = str(required_app_build_revision or "").strip()
         if not build:
             raise ValueError("required_app_build_revision is required")
@@ -130,6 +136,21 @@ class AssistantChatRunService:
             required_capability_feature_digest=require_sha256(
                 required_capability_feature_digest,
                 field_name="required_capability_feature_digest",
+            ),
+            required_create_entry_contract_digest=require_sha256(
+                required_create_entry_contract_digest,
+                field_name="required_create_entry_contract_digest",
+            ),
+            required_write_policy_digest=require_sha256(
+                required_write_policy_digest,
+                field_name="required_write_policy_digest",
+            ),
+            required_write_cohort_digest=require_sha256(
+                required_write_cohort_digest,
+                field_name="required_write_cohort_digest",
+            ),
+            required_reconciliation_contract_version=int(
+                required_reconciliation_contract_version
             ),
             required_app_build_revision=build,
             capability_ledger_mode=ledger,

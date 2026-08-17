@@ -17,6 +17,12 @@ from typing import Any, Final, Literal
 from pydantic import Field, ValidationInfo, field_validator, model_validator
 
 from app.assistant.domain.contracts import FrozenContract
+from app.assistant.capability_calls.write_guard import (
+    CREATE_ENTRY_CONTRACT_DIGEST,
+    RECONCILIATION_CONTRACT_VERSION,
+    WRITE_COHORT_DIGEST,
+    WRITE_POLICY_DIGEST,
+)
 from app.assistant.domain.digests import sha256_bytes, sha256_canonical_json
 from app.assistant.domain.json_schema import binding_schema_digest
 from app.assistant.durable.codec import CURRENT_CHECKPOINT_CODEC_VERSION
@@ -119,11 +125,20 @@ class SeedBuildCompatibility(FrozenContract):
     runtime_contract_version: int = Field(gt=0)
     checkpoint_codec_version: int = Field(gt=0)
     capability_feature_digest: str
+    create_entry_contract_digest: str
+    write_policy_digest: str
+    write_cohort_digest: str
+    reconciliation_contract_version: int = Field(gt=0)
 
-    @field_validator("capability_feature_digest")
+    @field_validator(
+        "capability_feature_digest",
+        "create_entry_contract_digest",
+        "write_policy_digest",
+        "write_cohort_digest",
+    )
     @classmethod
-    def _validate_digest(cls, value: str) -> str:
-        return require_sha256(value, field_name="capability_feature_digest")
+    def _validate_digest(cls, value: str, info: ValidationInfo) -> str:
+        return require_sha256(value, field_name=info.field_name)
 
 
 class AssistantSystemSeedManifest(FrozenContract):
@@ -343,6 +358,10 @@ def compute_seed_contract_digest(
     runtime_contract_version: int = RUNTIME_CONTRACT_VERSION,
     checkpoint_codec_version: int = CURRENT_CHECKPOINT_CODEC_VERSION,
     capability_feature_digest: str | None = None,
+    create_entry_contract_digest: str = CREATE_ENTRY_CONTRACT_DIGEST,
+    write_policy_digest: str = WRITE_POLICY_DIGEST,
+    write_cohort_digest: str = WRITE_COHORT_DIGEST,
+    reconciliation_contract_version: int = RECONCILIATION_CONTRACT_VERSION,
 ) -> str:
     feature_digest = (
         capability_feature_digest
@@ -359,6 +378,10 @@ def compute_seed_contract_digest(
         "runtimeContractVersion": runtime_contract_version,
         "checkpointCodecVersion": checkpoint_codec_version,
         "capabilityFeatureDigest": feature_digest,
+        "createEntryContractDigest": create_entry_contract_digest,
+        "writePolicyDigest": write_policy_digest,
+        "writeCohortDigest": write_cohort_digest,
+        "reconciliationContractVersion": reconciliation_contract_version,
     }
     return sha256_canonical_json(contract_payload)
 
@@ -405,6 +428,10 @@ def build_seed_payload(
             "runtimeContractVersion": RUNTIME_CONTRACT_VERSION,
             "checkpointCodecVersion": CURRENT_CHECKPOINT_CODEC_VERSION,
             "capabilityFeatureDigest": feature_digest,
+            "createEntryContractDigest": CREATE_ENTRY_CONTRACT_DIGEST,
+            "writePolicyDigest": WRITE_POLICY_DIGEST,
+            "writeCohortDigest": WRITE_COHORT_DIGEST,
+            "reconciliationContractVersion": RECONCILIATION_CONTRACT_VERSION,
         },
         "seedContractDigest": seed_contract_digest,
     }
@@ -535,6 +562,17 @@ def load_verified_assistant_system_seed() -> VerifiedAssistantSystemSeed:
         raise SystemSeedInvalid("checkpoint_codec_version_mismatch")
     if build.capability_feature_digest != default_capability_feature_digest():
         raise SystemSeedInvalid("capability_feature_digest_mismatch")
+    if build.create_entry_contract_digest != CREATE_ENTRY_CONTRACT_DIGEST:
+        raise SystemSeedInvalid("create_entry_contract_digest_mismatch")
+    if build.write_policy_digest != WRITE_POLICY_DIGEST:
+        raise SystemSeedInvalid("write_policy_digest_mismatch")
+    if build.write_cohort_digest != WRITE_COHORT_DIGEST:
+        raise SystemSeedInvalid("write_cohort_digest_mismatch")
+    if (
+        build.reconciliation_contract_version
+        != RECONCILIATION_CONTRACT_VERSION
+    ):
+        raise SystemSeedInvalid("reconciliation_contract_version_mismatch")
 
     computed_contract = compute_seed_contract_digest(
         profile=profile,
@@ -543,6 +581,10 @@ def load_verified_assistant_system_seed() -> VerifiedAssistantSystemSeed:
         runtime_contract_version=build.runtime_contract_version,
         checkpoint_codec_version=build.checkpoint_codec_version,
         capability_feature_digest=build.capability_feature_digest,
+        create_entry_contract_digest=build.create_entry_contract_digest,
+        write_policy_digest=build.write_policy_digest,
+        write_cohort_digest=build.write_cohort_digest,
+        reconciliation_contract_version=build.reconciliation_contract_version,
     )
     if computed_contract != manifest.seed_contract_digest:
         raise SystemSeedInvalid("seed_contract_digest_mismatch")

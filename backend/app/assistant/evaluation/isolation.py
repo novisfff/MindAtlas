@@ -928,7 +928,8 @@ def production_write_mode_ignored() -> bool:
     """ASSISTANT_MAIN_AGENT_WRITE_MODE is ignored for evaluation.
 
     Eval write simulation works when the production flag is ``off``, and enabling
-    ``golden`` must not change Eval behavior. Always returns True under eval scope.
+    ``create_entry`` must not change Eval behavior. Always returns True under eval
+    scope.
     """
     return is_eval_scope_active()
 

@@ -44,9 +44,13 @@ from app.ai_provider.router import router as ai_provider_router
 from app.ai_registry.router import credential_router, model_router, binding_router
 from app.ai.router import router as ai_router
 from app.assistant.router import router as assistant_router
+from app.assistant.capability_calls.reconciliation_router import (
+    router as capability_reconciliation_router,
+)
 from app.assistant.evaluation.router import skill_eval_router
 from app.assistant.skills.admin_router import skill_admin_parent_router
 from app.assistant.runtime.router import router as assistant_runtime_router
+from app.pre_ga_launch.router import router as pre_ga_launch_router
 from app.assistant.skills.router import (
     main_agent_profile_router,
     skill_package_router,
@@ -245,11 +249,13 @@ _protected_browser.include_router(model_router)
 _protected_browser.include_router(binding_router)
 _protected_browser.include_router(ai_router)
 _protected_browser.include_router(assistant_router)
+_protected_browser.include_router(capability_reconciliation_router)
 _protected_browser.include_router(assistant_config_router)
 _protected_browser.include_router(skill_package_router)
 _protected_browser.include_router(main_agent_profile_router)
 # Plan 2 Task 6: prepared rollout / activation / durable kill-switch CAS.
 _protected_browser.include_router(assistant_runtime_router)
+_protected_browser.include_router(pre_ga_launch_router)
 # Plan 09 admin/eval: always mounted; protected_browser enforces real session.
 _protected_browser.include_router(skill_admin_parent_router)
 _protected_browser.include_router(skill_eval_router)

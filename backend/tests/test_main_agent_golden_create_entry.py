@@ -19,6 +19,26 @@ DIGEST_B = "b" * 64
 STRONG_SECRET = "s" * 32
 
 
+def _create_entry_settings(**overrides):  # noqa: ANN003, ANN201
+    from app.config import Settings
+
+    values = {
+        "_env_file": None,
+        "APP_ENV": "test",
+        "APP_BUILD_REVISION": "immutable-test-build",
+        "MINDATLAS_DEPLOYMENT_CLASS": "rehearsal",
+        "ASSISTANT_CAPABILITY_LEDGER_MODE": "enforced",
+        "ASSISTANT_MAIN_AGENT_WRITE_MODE": "create_entry",
+        "ASSISTANT_CAPABILITY_CALL_IDEMPOTENCY_SECRET": STRONG_SECRET,
+        "ASSISTANT_DURABLE_INTERRUPTS_ENABLED": True,
+        "ASSISTANT_INTERRUPT_TOKEN_PEPPER": "stable-pepper",
+        "ASSISTANT_CAPABILITY_RECONCILIATION_ENABLED": True,
+        "ASSISTANT_CAPABILITY_RECONCILIATION_EVIDENCE_SECRET": "e" * 32,
+    }
+    values.update(overrides)
+    return Settings(**values)
+
+
 class ConfigGateTests(unittest.TestCase):
     def test_defaults_are_off(self) -> None:
         from app.config import Settings
@@ -32,15 +52,11 @@ class ConfigGateTests(unittest.TestCase):
         self.assertEqual(s.assistant_main_agent_write_mode, "off")
 
     def test_golden_requires_enforced_ledger(self) -> None:
-        from app.config import Settings
         from pydantic import ValidationError
 
         with self.assertRaises((ValidationError, ValueError)):
-            Settings(
-                _env_file=None,  # type: ignore[call-arg]
+            _create_entry_settings(
                 ASSISTANT_CAPABILITY_LEDGER_MODE="legacy_read_only",
-                ASSISTANT_MAIN_AGENT_WRITE_MODE="golden",
-                ASSISTANT_CAPABILITY_CALL_IDEMPOTENCY_SECRET=STRONG_SECRET,
             )
 
     def test_enforced_requires_strong_secret(self) -> None:
@@ -56,18 +72,8 @@ class ConfigGateTests(unittest.TestCase):
             )
 
     def test_golden_enforced_with_secret_ok(self) -> None:
-        from app.config import Settings
-
-        s = Settings(
-            _env_file=None,  # type: ignore[call-arg]
-            ASSISTANT_CAPABILITY_LEDGER_MODE="enforced",
-            ASSISTANT_MAIN_AGENT_WRITE_MODE="golden",
-            ASSISTANT_CAPABILITY_CALL_IDEMPOTENCY_SECRET=STRONG_SECRET,
-            ASSISTANT_CAPABILITY_RECONCILIATION_ENABLED=True,
-            ASSISTANT_CAPABILITY_RECONCILIATION_OPERATOR_ID=str(uuid.uuid4()),
-            ASSISTANT_CAPABILITY_RECONCILIATION_EVIDENCE_SECRET="e" * 32,
-        )
-        self.assertEqual(s.assistant_main_agent_write_mode, "golden")
+        s = _create_entry_settings()
+        self.assertEqual(s.assistant_main_agent_write_mode, "create_entry")
         self.assertEqual(s.assistant_capability_ledger_mode, "enforced")
 
 
@@ -89,28 +95,22 @@ class LedgerAdmissionTests(unittest.TestCase):
             "enforced",
         )
         with self.assertRaises(ValueError):
-            freeze_capability_ledger_mode_for_run(runtime_kind="legacy", settings=s)
+            freeze_capability_ledger_mode_for_run(
+                runtime_kind="not-main-agent",
+                settings=s,
+            )
 
     def test_golden_eligibility_cohort(self) -> None:
         from app.assistant.capability_calls.release_admission import (
             is_golden_write_eligible,
         )
-        from app.config import Settings
+        from app.assistant.capability_calls.write_guard import WRITE_COHORT_DIGEST
 
-        s = Settings(
-            _env_file=None,  # type: ignore[call-arg]
-            ASSISTANT_CAPABILITY_LEDGER_MODE="enforced",
-            ASSISTANT_MAIN_AGENT_WRITE_MODE="golden",
-            ASSISTANT_CAPABILITY_CALL_IDEMPOTENCY_SECRET=STRONG_SECRET,
-            ASSISTANT_MAIN_AGENT_WRITE_COHORT_DIGEST=DIGEST_A,
-            ASSISTANT_CAPABILITY_RECONCILIATION_ENABLED=True,
-            ASSISTANT_CAPABILITY_RECONCILIATION_OPERATOR_ID=str(uuid.uuid4()),
-            ASSISTANT_CAPABILITY_RECONCILIATION_EVIDENCE_SECRET="e" * 32,
-        )
+        s = _create_entry_settings()
         self.assertTrue(
             is_golden_write_eligible(
                 capability_ledger_mode="enforced",
-                cohort_digest=DIGEST_A,
+                cohort_digest=WRITE_COHORT_DIGEST,
                 settings=s,
             )
         )
@@ -156,21 +156,13 @@ class GoldenGraphAuditTests(unittest.TestCase):
         self.assertNotIn("workflow_call", audit.node_types)
         self.assertNotIn("code_executor", audit.node_types)
 
-    def test_full_smart_capture_fails_golden_audit(self) -> None:
-        from app.assistant.capability_calls.release_admission import (
-            audit_golden_workflow_graph,
-        )
-
+    def test_legacy_full_smart_capture_asset_is_removed(self) -> None:
         path = (
             Path(__file__).resolve().parents[1]
             / "app/assistant/workflow/system_assets/workflows"
             / "smart_capture.json"
         )
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        audit = audit_golden_workflow_graph(payload, asset_key="smart_capture")
-        self.assertFalse(audit.ok)
-        self.assertTrue(audit.has_human_node)
-        self.assertIn("update_entry", audit.tool_names)
+        self.assertFalse(path.exists())
 
     def test_registry_has_hidden_golden_asset(self) -> None:
         from app.assistant.workflow.system_assets.registry import (
@@ -190,14 +182,14 @@ class GoldenGraphAuditTests(unittest.TestCase):
         self.assertTrue(
             gateway_allows_write(
                 domain_key="create_entry",
-                write_mode="golden",
+                write_mode="create_entry",
                 capability_ledger_mode="enforced",
             )
         )
         self.assertFalse(
             gateway_allows_write(
                 domain_key="update_entry",
-                write_mode="golden",
+                write_mode="create_entry",
                 capability_ledger_mode="enforced",
             )
         )

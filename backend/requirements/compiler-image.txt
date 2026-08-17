@@ -1,0 +1,2 @@
+# Registry-resolved linux/amd64 manifest (Docker Official Image).
+python:3.11-slim-bookworm@sha256:77923445c077d8eb971b14b2b114a1d9cd4a87edb4c75654820ca4832ee8cb15

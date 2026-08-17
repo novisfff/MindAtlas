@@ -73,6 +73,7 @@ ADMISSION_HTTP_REASON: dict[str, str] = {
     "system_seed_invalid": "assistant_system_seed_invalid",
     "profile_unpublished": "assistant_profile_unpublished",
     "model_unbound": "assistant_model_unbound",
+    "pre_ga_launch_unapproved": "assistant_pre_ga_launch_unapproved",
 }
 
 
@@ -120,6 +121,12 @@ class AssistantChatAdmissionService:
         compatible Worker snapshot (read) → conversation.
         """
         try:
+            # Launch-relevant target reads and rollout mutations share this
+            # transaction-level serialization point.  SQLite test sessions
+            # intentionally treat the advisory primitive as a no-op.
+            from app.pre_ga_launch.repository import LaunchRepository
+
+            LaunchRepository(self.db).lock_launch()
             control = self.runtime_repo.get_control_for_update()
             if control is None:
                 raise AssistantAdmissionError("rollout_inactive")
@@ -190,6 +197,14 @@ class AssistantChatAdmissionService:
                     runtime_contract_version=closure.runtime_contract_version,
                     required_checkpoint_codec_version=closure.checkpoint_codec_version,
                     required_capability_feature_digest=closure.capability_feature_digest,
+                    required_create_entry_contract_digest=(
+                        closure.create_entry_contract_digest
+                    ),
+                    required_write_policy_digest=closure.write_policy_digest,
+                    required_write_cohort_digest=closure.write_cohort_digest,
+                    required_reconciliation_contract_version=(
+                        closure.reconciliation_contract_version
+                    ),
                     required_app_build_revision=closure.build_revision,
                     capability_ledger_mode=self._frozen_ledger_mode(),
                     deadline_at=admission.deadline_at,

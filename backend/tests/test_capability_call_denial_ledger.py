@@ -218,10 +218,13 @@ def _harness(
             model_dump=lambda **_kwargs: {},
         ),
     }
+    from tests._db import allowing_test_write_guard
+
     aggregate = DurableCapabilityLedgerAggregate(
         db=db,
         authorization_factory=factory,
         idempotency_secret="s" * 32,
+        write_guard=allowing_test_write_guard(db),
         lease=LeaseToken(
             run_id=run.id,
             worker_id="worker-denial-ledger",
@@ -351,7 +354,7 @@ def test_denied_prepare_requires_reservation_and_rejects_input_drift() -> None:
 
         aggregate.reserve_siblings(requests, messages)
         requests[0].call.arguments = {"q": "drifted"}
-        with pytest.raises(CapabilityCallConflict, match="does not match"):
+        with pytest.raises(CapabilityCallConflict, match="canonical input"):
             aggregate.prepare(requests[0])
         assert db.query(AssistantCapabilityCall).count() == 1
         assert db.query(AssistantCapabilityCall).one().status == "denied"
@@ -547,10 +550,13 @@ def test_real_v2_policy_deny_is_reserved_but_never_dispatched() -> None:
         run.current_budget_revision_id = budget.id
         run.current_obligation_revision_id = obligation.id
         db.commit()
+        from tests._db import allowing_test_write_guard
+
         aggregate = DurableCapabilityLedgerAggregate(
             db=db,
             authorization_factory=factory,
             idempotency_secret="s" * 32,
+            write_guard=allowing_test_write_guard(db),
             lease=LeaseToken(
                 run_id=run.id,
                 worker_id="worker-real-deny",

@@ -66,11 +66,9 @@ from app.lightrag.schemas import LightRagQueryResponse
 from app.openclaw_integration.models import OpenClawCapabilityItem
 from app.openclaw_integration.schemas import (
     OpenClawCapabilityExecuteResponse,
-    OpenClawCreateRelationRequest,
     OpenClawEntryRecordResponse,
     OpenClawGetEntryRequest,
     OpenClawQueryKnowledgeGraphRequest,
-    OpenClawRelationRecordResponse,
     OpenClawSearchEntriesRequest,
     OpenClawSearchEntriesResponse,
 )
@@ -136,20 +134,6 @@ def prepare_get_entry_request(
     return normalized_payload, {"entry_id": str(request.entry_id)}
 
 
-def prepare_create_relation_request(
-    _service: OpenClawIntegrationService,
-    raw_payload: dict[str, Any],
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    request = _svc()._validate_openclaw_request_model(OpenClawCreateRelationRequest, raw_payload or {})
-    normalized_payload = request.model_dump(mode="json", by_alias=True)
-    return normalized_payload, {
-        "source_entry_id": str(request.source_entry_id),
-        "target_entry_id": str(request.target_entry_id),
-        "relation_type": request.relation_type,
-        "description": request.description,
-    }
-
-
 def prepare_query_knowledge_graph_request(
     _service: OpenClawIntegrationService,
     raw_payload: dict[str, Any],
@@ -204,17 +188,6 @@ def build_get_entry_response(value: Any) -> dict[str, Any]:
     return _svc()._build_openclaw_entry_record(payload)
 
 
-def build_create_relation_response(value: Any) -> dict[str, Any]:
-    payload = _svc()._load_tool_json_value(value)
-    if not isinstance(payload, dict):
-        raise ApiException(
-            status_code=422,
-            code=_svc().OPENCLAW_INVALID_SCHEMA_ERROR_CODE,
-            message="create_relation returned invalid JSON",
-        )
-    return _svc()._build_openclaw_relation_record(payload)
-
-
 def build_query_knowledge_graph_response(value: Any) -> dict[str, Any]:
     payload = _svc()._load_tool_json_value(value)
     if not isinstance(payload, dict):
@@ -236,11 +209,6 @@ OPENCLAW_TOOL_CONTRACT_ADAPTERS: dict[str, OpenClawToolContractAdapter] = {
         runtime_tool_name="get_entry_detail",
         prepare_request=prepare_get_entry_request,
         build_response=build_get_entry_response,
-    ),
-    "create_relation": OpenClawToolContractAdapter(
-        runtime_tool_name="create_relation",
-        prepare_request=prepare_create_relation_request,
-        build_response=build_create_relation_response,
     ),
     "query_knowledge_graph": OpenClawToolContractAdapter(
         runtime_tool_name="query_knowledge_graph",
@@ -1141,13 +1109,11 @@ __all__ = [
     "OpenClawAuthorizationEvidenceVerifier",
     "OpenClawFrozenCapabilityCall",
     "OpenClawToolContractAdapter",
-    "build_create_relation_response",
     "build_get_entry_response",
     "build_query_knowledge_graph_response",
     "build_search_entries_response",
     "execute_shared_capability",
     "freeze_openclaw_capability_call",
-    "prepare_create_relation_request",
     "prepare_get_entry_request",
     "prepare_internal_input",
     "prepare_query_knowledge_graph_request",

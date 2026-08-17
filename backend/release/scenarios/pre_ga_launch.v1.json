@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "contractVersion": 1,
+  "scenarios": [
+    {
+      "schemaVersion": 1,
+      "scenarioId": "pre-ga-launch-control-matrix",
+      "releaseCritical": true,
+      "requiredServices": ["postgres", "minio", "api", "frontend", "scripted-provider"],
+      "workerCount": 2,
+      "timeoutSeconds": 1800,
+      "steps": [
+        {"schemaVersion": 1, "stepId": "setup", "kind": "setup", "faultPoint": "none", "expectedAssertionIds": ["qualification-target"], "timeoutSeconds": 120},
+        {"schemaVersion": 1, "stepId": "login-csrf", "kind": "login_csrf", "faultPoint": "none", "expectedAssertionIds": ["operator-auth"], "dependsOn": ["setup"], "timeoutSeconds": 180},
+        {"schemaVersion": 1, "stepId": "schema-bootstrap", "kind": "rollout_activation", "faultPoint": "none", "expectedAssertionIds": ["schema-identity", "bootstrap-readiness"], "dependsOn": ["login-csrf"], "timeoutSeconds": 240},
+        {"schemaVersion": 1, "stepId": "readiness", "kind": "readiness", "faultPoint": "none", "expectedAssertionIds": ["readiness", "two-workers-ready"], "dependsOn": ["schema-bootstrap"], "timeoutSeconds": 180},
+        {"schemaVersion": 1, "stepId": "interrupt-stream", "kind": "interrupt_sse", "faultPoint": "stream_disconnect", "expectedAssertionIds": ["interrupt-idempotency", "streaming"], "dependsOn": ["readiness"], "timeoutSeconds": 300},
+        {"schemaVersion": 1, "stepId": "artifacts-memory", "kind": "artifact_gc", "faultPoint": "none", "expectedAssertionIds": ["artifact-gc", "l2-memory"], "dependsOn": ["interrupt-stream"], "timeoutSeconds": 240},
+        {"schemaVersion": 1, "stepId": "launch-controls", "kind": "launch_control", "faultPoint": "none", "expectedAssertionIds": ["launch-control"], "dependsOn": ["artifacts-memory"], "timeoutSeconds": 240},
+        {"schemaVersion": 1, "stepId": "isolation", "kind": "teardown", "faultPoint": "none", "expectedAssertionIds": ["secret-scan", "isolation", "teardown"], "dependsOn": ["launch-controls"], "timeoutSeconds": 180}
+      ]
+    },
+    {
+      "schemaVersion": 1,
+      "scenarioId": "create-entry-boundary-faults",
+      "releaseCritical": true,
+      "requiredServices": ["postgres", "minio", "api", "frontend", "scripted-provider"],
+      "workerCount": 2,
+      "timeoutSeconds": 1800,
+      "steps": [
+        {"schemaVersion": 1, "stepId": "before-call-insert", "kind": "local_create", "faultPoint": "before_call_insert", "expectedAssertionIds": ["create-entry", "recovery-reconciliation"], "timeoutSeconds": 240},
+        {"schemaVersion": 1, "stepId": "after-call-insert", "kind": "local_create", "faultPoint": "after_call_insert", "expectedAssertionIds": ["create-entry", "recovery-reconciliation"], "dependsOn": ["before-call-insert"], "timeoutSeconds": 240},
+        {"schemaVersion": 1, "stepId": "before-entry-insert", "kind": "local_create", "faultPoint": "before_entry_insert", "expectedAssertionIds": ["create-entry", "recovery-reconciliation"], "dependsOn": ["after-call-insert"], "timeoutSeconds": 240},
+        {"schemaVersion": 1, "stepId": "after-entry-commit", "kind": "recovery", "faultPoint": "after_entry_commit_before_ack", "expectedAssertionIds": ["create-entry", "recovery-reconciliation"], "dependsOn": ["before-entry-insert"], "timeoutSeconds": 300},
+        {"schemaVersion": 1, "stepId": "commit-ambiguity", "kind": "reconciliation", "faultPoint": "connection_drop_during_commit", "expectedAssertionIds": ["recovery-reconciliation"], "dependsOn": ["after-entry-commit"], "timeoutSeconds": 300},
+        {"schemaVersion": 1, "stepId": "cleanup", "kind": "teardown", "faultPoint": "none", "expectedAssertionIds": ["teardown"], "dependsOn": ["commit-ambiguity"], "timeoutSeconds": 120}
+      ]
+    },
+    {
+      "schemaVersion": 1,
+      "scenarioId": "worker-takeover-and-duplicate-delivery",
+      "releaseCritical": true,
+      "requiredServices": ["postgres", "minio", "api", "frontend", "scripted-provider"],
+      "workerCount": 2,
+      "timeoutSeconds": 1800,
+      "steps": [
+        {"schemaVersion": 1, "stepId": "worker-claim", "kind": "worker_claim_lease", "faultPoint": "none", "expectedAssertionIds": ["worker-fault-matrix", "two-workers-ready"], "timeoutSeconds": 300},
+        {"schemaVersion": 1, "stepId": "worker-kill", "kind": "worker_claim_lease", "faultPoint": "after_call_insert", "expectedAssertionIds": ["worker-fault-matrix", "create-entry"], "dependsOn": ["worker-claim"], "timeoutSeconds": 360},
+        {"schemaVersion": 1, "stepId": "duplicate-delivery", "kind": "interrupt_sse", "faultPoint": "stream_disconnect", "expectedAssertionIds": ["interrupt-idempotency", "streaming", "create-entry"], "dependsOn": ["worker-kill"], "timeoutSeconds": 300},
+        {"schemaVersion": 1, "stepId": "controls-recheck", "kind": "launch_control", "faultPoint": "none", "expectedAssertionIds": ["launch-control", "readiness"], "dependsOn": ["duplicate-delivery"], "timeoutSeconds": 240},
+        {"schemaVersion": 1, "stepId": "final-teardown", "kind": "teardown", "faultPoint": "none", "expectedAssertionIds": ["secret-scan", "isolation", "teardown"], "dependsOn": ["controls-recheck"], "timeoutSeconds": 180}
+      ]
+    }
+  ]
+}

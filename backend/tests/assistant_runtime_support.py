@@ -21,6 +21,12 @@ from app.assistant.durable.worker_registry import (
     RUNTIME_CONTRACT_VERSION,
     default_capability_feature_digest,
 )
+from app.assistant.capability_calls.write_guard import (
+    CREATE_ENTRY_CONTRACT_DIGEST,
+    RECONCILIATION_CONTRACT_VERSION,
+    WRITE_COHORT_DIGEST,
+    WRITE_POLICY_DIGEST,
+)
 
 DIGEST_A = "a" * 64
 DIGEST_B = "b" * 64
@@ -39,6 +45,10 @@ class FrozenRuntimeFields:
     runtime_contract_version: int
     required_checkpoint_codec_version: int
     required_capability_feature_digest: str
+    required_create_entry_contract_digest: str
+    required_write_policy_digest: str
+    required_write_cohort_digest: str
+    required_reconciliation_contract_version: int
     required_app_build_revision: str
 
 
@@ -57,6 +67,10 @@ def frozen_runtime_fields(
             "modelId": str(model_id),
             "buildRevision": build_revision,
             "featureDigest": feature,
+            "createEntryContractDigest": CREATE_ENTRY_CONTRACT_DIGEST,
+            "writePolicyDigest": WRITE_POLICY_DIGEST,
+            "writeCohortDigest": WRITE_COHORT_DIGEST,
+            "reconciliationContractVersion": RECONCILIATION_CONTRACT_VERSION,
         }
     )
     return FrozenRuntimeFields(
@@ -67,6 +81,10 @@ def frozen_runtime_fields(
         runtime_contract_version=RUNTIME_CONTRACT_VERSION,
         required_checkpoint_codec_version=int(CURRENT_CHECKPOINT_CODEC_VERSION),
         required_capability_feature_digest=feature,
+        required_create_entry_contract_digest=CREATE_ENTRY_CONTRACT_DIGEST,
+        required_write_policy_digest=WRITE_POLICY_DIGEST,
+        required_write_cohort_digest=WRITE_COHORT_DIGEST,
+        required_reconciliation_contract_version=RECONCILIATION_CONTRACT_VERSION,
         required_app_build_revision=build_revision,
     )
 
@@ -184,6 +202,10 @@ def seed_main_agent_runtime(
         runtime_contract_version=RUNTIME_CONTRACT_VERSION,
         checkpoint_codec_version=int(CURRENT_CHECKPOINT_CODEC_VERSION),
         capability_feature_digest=DIGEST_F,
+        create_entry_contract_digest=CREATE_ENTRY_CONTRACT_DIGEST,
+        write_policy_digest=WRITE_POLICY_DIGEST,
+        write_cohort_digest=WRITE_COHORT_DIGEST,
+        reconciliation_contract_version=RECONCILIATION_CONTRACT_VERSION,
     )
     repo = AssistantRuntimeRepository(db)
     prepared = repo.create_prepared_revision(
@@ -211,6 +233,10 @@ def seed_main_agent_runtime(
         runtime_contract_version=RUNTIME_CONTRACT_VERSION,
         required_checkpoint_codec_version=int(CURRENT_CHECKPOINT_CODEC_VERSION),
         required_capability_feature_digest=fields.required_capability_feature_digest,
+        required_create_entry_contract_digest=CREATE_ENTRY_CONTRACT_DIGEST,
+        required_write_policy_digest=WRITE_POLICY_DIGEST,
+        required_write_cohort_digest=WRITE_COHORT_DIGEST,
+        required_reconciliation_contract_version=RECONCILIATION_CONTRACT_VERSION,
         required_app_build_revision=build_revision,
     )
     return SeededMainAgentRuntime(

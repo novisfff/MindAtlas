@@ -179,70 +179,27 @@ def authorize_call_after_approval(
     approval_binding: CapabilityCallApprovalBindingV1,
     expected_authorization_digest: str,
 ) -> Any:
-    """Transition awaiting_approval -> authorized with immutable binding.
+    """Reject the legacy call-only mutation surface.
 
-    Rejects if authorization_digest drifted or binding digest mismatches stored
-    call identity digests.
+    Approval is now an aggregate mutation of the exact persisted
+    ``capability_call`` Interrupt plus its linked Call.  Keeping this symbol as
+    a fail-closed shim makes stale imports safe while preventing a caller from
+    authorizing a Call without resolving that Interrupt in the same operation.
     """
-    call = repo.get_call(call_id, for_update=True)
-    if call is None:
-        from app.assistant.capability_calls.repository import (
-            CODE_CALL_NOT_FOUND,
-            CapabilityCallConflict,
-        )
+    del (
+        repo,
+        call_id,
+        expected_call_revision,
+        expected_run_revision,
+        lease,
+        approval_binding,
+        expected_authorization_digest,
+    )
+    from app.assistant.capability_calls.repository import CapabilityCallConflict
 
-        raise CapabilityCallConflict(CODE_CALL_NOT_FOUND, f"call {call_id} not found")
-    if str(call.authorization_digest) != expected_authorization_digest:
-        from app.assistant.capability_calls.repository import (
-            CODE_IDENTITY_MISMATCH,
-            CapabilityCallConflict,
-        )
-
-        raise CapabilityCallConflict(
-            CODE_IDENTITY_MISMATCH,
-            "authorization_digest changed; approval is not rebound",
-            call=call,
-        )
-    if str(call.logical_call_key) != approval_binding.logical_call_key:
-        from app.assistant.capability_calls.repository import (
-            CODE_IDENTITY_MISMATCH,
-            CapabilityCallConflict,
-        )
-
-        raise CapabilityCallConflict(
-            CODE_IDENTITY_MISMATCH,
-            "logical_call_key drift invalidates approval",
-            call=call,
-        )
-    if str(call.input_digest) != approval_binding.input_digest:
-        from app.assistant.capability_calls.repository import (
-            CODE_IDENTITY_MISMATCH,
-            CapabilityCallConflict,
-        )
-
-        raise CapabilityCallConflict(
-            CODE_IDENTITY_MISMATCH,
-            "input_digest drift invalidates approval",
-            call=call,
-        )
-    if str(call.descriptor_digest) != approval_binding.descriptor_digest:
-        from app.assistant.capability_calls.repository import (
-            CODE_IDENTITY_MISMATCH,
-            CapabilityCallConflict,
-        )
-
-        raise CapabilityCallConflict(
-            CODE_IDENTITY_MISMATCH,
-            "descriptor_digest drift invalidates approval",
-            call=call,
-        )
-    return repo.transition_call(
-        call_id=call_id,
-        expected_call_revision=expected_call_revision,
-        expected_run_revision=expected_run_revision,
-        to_status="authorized",
-        lease=lease,
-        approval_binding_digest=approval_binding.approval_binding_digest,
+    raise CapabilityCallConflict(
+        "approval_boundary_required",
+        "use decide_call_owned to resolve the exact persisted approval Interrupt",
     )
 
 
@@ -255,23 +212,25 @@ def close_non_approved_call(
     lease: Any,
     outcome: str,
 ) -> Any:
-    """rejected | expired | cancelled without claiming an Attempt."""
-    if outcome not in {"rejected", "expired", "cancelled"}:
-        raise ValueError(f"unsupported non-approval outcome {outcome!r}")
-    return repo.transition_call(
-        call_id=call_id,
-        expected_call_revision=expected_call_revision,
-        expected_run_revision=expected_run_revision,
-        to_status=outcome,
-        lease=lease,
-        failure_code=f"approval_{outcome}",
+    """Reject the legacy Call-only close surface (fail closed)."""
+    del (
+        repo,
+        call_id,
+        expected_call_revision,
+        expected_run_revision,
+        lease,
+        outcome,
+    )
+    from app.assistant.capability_calls.repository import CapabilityCallConflict
+
+    raise CapabilityCallConflict(
+        "approval_boundary_required",
+        "use decide_call_owned to resolve the exact persisted approval Interrupt",
     )
 
 
 __all__ = [
-    "authorize_call_after_approval",
     "build_approval_binding",
-    "close_non_approved_call",
     "compute_approval_binding_digest",
     "redact_mapping",
     "render_safe_approval_card",

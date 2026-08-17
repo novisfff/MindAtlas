@@ -3,6 +3,7 @@ import { ChevronDown, ChevronRight, Loader2, CheckCircle, XCircle, Wrench } from
 import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 import { ToolCall } from '../types'
+import { UnsupportedCapabilityNotice } from './UnsupportedCapabilityNotice'
 
 interface ToolCallDisplayProps {
   toolCalls: ToolCall[]
@@ -73,6 +74,7 @@ function ToolCallItem({ toolCall, label, isExpanded, onToggle, variant }: ToolCa
   const isCompact = variant === 'compact'
   const isError = toolCall.status === 'error'
   const isRunning = toolCall.status === 'running'
+  const unsupportedAction = unsupportedActionFromToolCall(toolCall)
 
   // Dynamic colors based on status (Green/Blue vs Red)
   const themeColor = isError ? "red" : "blue"
@@ -152,41 +154,47 @@ function ToolCallItem({ toolCall, label, isExpanded, onToggle, variant }: ToolCa
           isCompact ? "px-2 py-1.5 mx-2 mb-1.5 mt-0" : "px-3 py-2 mx-3 mb-2 mt-0"
         )}>
           <div className="w-full min-w-0 grid grid-cols-1 gap-2">
-            <div className="grid grid-cols-1">
-              <span className={cn("font-medium mb-1", isError ? "text-red-700/70 dark:text-red-300/70" : "text-blue-700/70 dark:text-blue-300/70", isCompact ? "text-[10px]" : "text-xs")}>
-                {t('pages.assistant.params')}:
-              </span>
-              <div className="w-full overflow-hidden">
-                <pre
-                  className={cn(
-                    "overflow-x-auto rounded-md bg-black/5 dark:bg-black/20 p-2 text-foreground/90 font-mono custom-scrollbar border",
-                    isError ? "border-red-500/10" : "border-blue-500/10",
-                    isCompact ? "text-[10px]" : "text-xs"
-                  )}
-                  style={{ maxWidth: 'calc(100vw - 120px)' }}
-                >
-                  {JSON.stringify(toolCall.args, null, 2)}
-                </pre>
-              </div>
-            </div>
-            {toolCall.result && (
-              <div className="grid grid-cols-1">
-                <span className={cn("font-medium mb-1", isError ? "text-red-700/70 dark:text-red-300/70" : "text-blue-700/70 dark:text-blue-300/70", isCompact ? "text-[10px]" : "text-xs")}>
-                  {t('pages.assistant.result')}:
-                </span>
-                <div className="w-full overflow-hidden">
-                  <pre
-                    className={cn(
-                      "max-h-60 overflow-x-auto rounded-md bg-black/5 dark:bg-black/20 p-2 text-foreground/90 font-mono custom-scrollbar border",
-                      isError ? "border-red-500/10" : "border-blue-500/10",
-                      isCompact ? "text-[10px]" : "text-xs"
-                    )}
-                    style={{ maxWidth: 'calc(100vw - 120px)' }}
-                  >
-                    {toolCall.result}
-                  </pre>
+            {unsupportedAction ? (
+              <UnsupportedCapabilityNotice action={unsupportedAction} />
+            ) : (
+              <>
+                <div className="grid grid-cols-1">
+                  <span className={cn("font-medium mb-1", isError ? "text-red-700/70 dark:text-red-300/70" : "text-blue-700/70 dark:text-blue-300/70", isCompact ? "text-[10px]" : "text-xs")}>
+                    {t('pages.assistant.params')}:
+                  </span>
+                  <div className="w-full overflow-hidden">
+                    <pre
+                      className={cn(
+                        "overflow-x-auto rounded-md bg-black/5 dark:bg-black/20 p-2 text-foreground/90 font-mono custom-scrollbar border",
+                        isError ? "border-red-500/10" : "border-blue-500/10",
+                        isCompact ? "text-[10px]" : "text-xs"
+                      )}
+                      style={{ maxWidth: 'calc(100vw - 120px)' }}
+                    >
+                      {JSON.stringify(toolCall.args, null, 2)}
+                    </pre>
+                  </div>
                 </div>
-              </div>
+                {toolCall.result && (
+                  <div className="grid grid-cols-1">
+                    <span className={cn("font-medium mb-1", isError ? "text-red-700/70 dark:text-red-300/70" : "text-blue-700/70 dark:text-blue-300/70", isCompact ? "text-[10px]" : "text-xs")}>
+                      {t('pages.assistant.result')}:
+                    </span>
+                    <div className="w-full overflow-hidden">
+                      <pre
+                        className={cn(
+                          "max-h-60 overflow-x-auto rounded-md bg-black/5 dark:bg-black/20 p-2 text-foreground/90 font-mono custom-scrollbar border",
+                          isError ? "border-red-500/10" : "border-blue-500/10",
+                          isCompact ? "text-[10px]" : "text-xs"
+                        )}
+                        style={{ maxWidth: 'calc(100vw - 120px)' }}
+                      >
+                        {toolCall.result}
+                      </pre>
+                    </div>
+                  </div>
+                )}
+              </>
             )}
           </div>
         </div>
@@ -199,6 +207,14 @@ function ToolCallItem({ toolCall, label, isExpanded, onToggle, variant }: ToolCa
       )} />
     </div>
   )
+}
+
+function unsupportedActionFromToolCall(toolCall: ToolCall): string | null {
+  if (toolCall.status !== 'error' || !toolCall.result) return null
+  const safeCode = toolCall.result.includes('capability_not_supported')
+  if (!safeCode) return null
+  const known = ['update_entry', 'merge_entry', 'create_relation', 'relation_followup']
+  return known.includes(toolCall.name) ? toolCall.name : 'unknown'
 }
 
 function StatusIcon({ status, variant, isError }: { status: ToolCall['status'], variant: 'default' | 'compact', isError: boolean }) {

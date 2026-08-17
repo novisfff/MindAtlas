@@ -28,6 +28,14 @@ const AssistantRuntimeSettingsPage = lazyNamed(
   () => import('@/features/settings/pages/AssistantRuntimeSettings'),
   'AssistantRuntimeSettingsPage',
 )
+const PreGaLaunchPage = lazyNamed(
+  () => import('@/features/pre-ga-launch/pages/PreGaLaunchPage'),
+  'PreGaLaunchPage',
+)
+const ReconciliationPage = lazyNamed(
+  () => import('@/features/reconciliation/pages/ReconciliationPage'),
+  'ReconciliationPage',
+)
 const EntryTypeSettings = lazyNamed(() => import('@/features/settings/pages/EntryTypeSettings'), 'EntryTypeSettings')
 const TagSettings = lazyNamed(() => import('@/features/settings/pages/TagSettings'), 'TagSettings')
 const AiProviderSettings = lazyNamed(() => import('@/features/ai-providers/pages/AiProviderSettings'), 'AiProviderSettings')
@@ -131,6 +139,8 @@ export default function App() {
                 path="/settings/assistant-runtime"
                 element={withPageFallback(<AssistantRuntimeSettingsPage />)}
               />
+              <Route path="/settings/pre-ga-launch" element={withPageFallback(<PreGaLaunchPage />)} />
+              <Route path="/settings/reconciliation" element={withPageFallback(<ReconciliationPage />)} />
               <Route path="/settings/entry-types" element={withPageFallback(<EntryTypeSettings />)} />
               <Route path="/settings/tags" element={withPageFallback(<TagSettings />)} />
               <Route path="/settings/ai-providers" element={withPageFallback(<AiProviderSettings />)} />

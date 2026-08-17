@@ -1,7 +1,7 @@
 """Plan 09 Task 4 — EvaluationRunner interactive_scripted paths.
 
 Mandatory isolation + identity, fixture resolution, nested isolation-wrapped
-Gateway, off|golden write-mode parity, cancel/crash, and safe evidence.
+Gateway, off|create_entry write-mode parity, cancel/crash, and safe evidence.
 """
 
 from __future__ import annotations
@@ -250,13 +250,20 @@ class EvaluationRunnerDispatchTests(unittest.TestCase):
         )
         self.assertTrue(outcome.gate_eligible)
 
-    def test_write_modes_off_and_golden_identical(self) -> None:
+    def test_write_modes_off_and_create_entry_identical(self) -> None:
+        from typing import get_args, get_type_hints
+
         from app.assistant.evaluation.runner import (
             EvaluationRunner,
             EvaluationRunnerConfig,
             InteractiveScript,
             InteractiveScriptStep,
             make_interactive_identity,
+        )
+
+        self.assertEqual(
+            get_args(get_type_hints(EvaluationRunnerConfig)["production_write_mode"]),
+            ("off", "create_entry"),
         )
 
         steps = InteractiveScript(
@@ -276,21 +283,21 @@ class EvaluationRunnerDispatchTests(unittest.TestCase):
         ).run_interactive_scripted(
             isolation=isolation_a, identity=identity_a, script=steps
         )
-        out_golden = EvaluationRunner(
-            config=EvaluationRunnerConfig(production_write_mode="golden")
+        out_create_entry = EvaluationRunner(
+            config=EvaluationRunnerConfig(production_write_mode="create_entry")
         ).run_interactive_scripted(
             isolation=isolation_b, identity=identity_b, script=steps
         )
         self.assertEqual(
             [r.outcome for r in out_off.call_records],
-            [r.outcome for r in out_golden.call_records],
+            [r.outcome for r in out_create_entry.call_records],
         )
         self.assertEqual(
             [r.side_effect for r in out_off.call_records],
-            [r.side_effect for r in out_golden.call_records],
+            [r.side_effect for r in out_create_entry.call_records],
         )
-        self.assertEqual(out_off.terminal, out_golden.terminal)
-        self.assertEqual(out_off.gate_eligible, out_golden.gate_eligible)
+        self.assertEqual(out_off.terminal, out_create_entry.terminal)
+        self.assertEqual(out_off.gate_eligible, out_create_entry.gate_eligible)
 
     def test_events_are_monotonic_and_safe(self) -> None:
         from app.assistant.evaluation.runner import (

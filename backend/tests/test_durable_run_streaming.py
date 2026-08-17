@@ -14,10 +14,8 @@ Covers:
 from __future__ import annotations
 
 import json
-import sys
 import threading
 import time
-import types
 import unittest
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -35,51 +33,6 @@ DIGEST_A = "a" * 64
 DIGEST_B = "b" * 64
 DIGEST_C = "c" * 64
 
-
-def _install_fastapi_stubs() -> None:
-    if "fastapi" in sys.modules:
-        return
-
-    fastapi = types.ModuleType("fastapi")
-    fastapi_exceptions = types.ModuleType("fastapi.exceptions")
-    fastapi_responses = types.ModuleType("fastapi.responses")
-
-    class FastAPI:  # pragma: no cover - test stub
-        pass
-
-    class RequestValidationError(Exception):  # pragma: no cover - test stub
-        pass
-
-    class JSONResponse:  # pragma: no cover - test stub
-        def __init__(self, *args, **kwargs) -> None:
-            pass
-
-    fastapi.FastAPI = FastAPI
-    fastapi_exceptions.RequestValidationError = RequestValidationError
-    fastapi_responses.JSONResponse = JSONResponse
-    sys.modules["fastapi"] = fastapi
-    sys.modules["fastapi.exceptions"] = fastapi_exceptions
-    sys.modules["fastapi.responses"] = fastapi_responses
-
-    starlette_requests = types.ModuleType("starlette.requests")
-    starlette_exceptions = types.ModuleType("starlette.exceptions")
-    starlette_status = types.ModuleType("starlette.status")
-
-    class Request:  # pragma: no cover - test stub
-        pass
-
-    class HTTPException(Exception):  # pragma: no cover - test stub
-        def __init__(self, status_code: int = 500, detail: str | None = None) -> None:
-            super().__init__(detail or "")
-            self.status_code = status_code
-            self.detail = detail
-
-    starlette_requests.Request = Request
-    starlette_exceptions.HTTPException = HTTPException
-    starlette_status.HTTP_500_INTERNAL_SERVER_ERROR = 500
-    sys.modules["starlette.requests"] = starlette_requests
-    sys.modules["starlette.exceptions"] = starlette_exceptions
-    sys.modules["starlette.status"] = starlette_status
 
 
 def _decode_sse(raw: bytes) -> tuple[str, dict]:
@@ -140,7 +93,6 @@ class DurableRunStreamingTests(unittest.TestCase):
         from tests._db import make_session
 
         self.db = make_session()
-        _install_fastapi_stubs()
 
     def tearDown(self) -> None:
         from app.assistant.service import AssistantService

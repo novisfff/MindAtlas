@@ -31,6 +31,12 @@ class AssistantChatRunServiceTests(unittest.TestCase):
             PreparedRolloutRevision,
         )
         from app.assistant.runtime.repository import AssistantRuntimeRepository
+        from app.assistant.capability_calls.write_guard import (
+            CREATE_ENTRY_CONTRACT_DIGEST,
+            RECONCILIATION_CONTRACT_VERSION,
+            WRITE_COHORT_DIGEST,
+            WRITE_POLICY_DIGEST,
+        )
         from app.assistant.skills.models import (
             AssistantMainAgentProfile,
             AssistantMainAgentProfileVersion,
@@ -83,6 +89,10 @@ class AssistantChatRunServiceTests(unittest.TestCase):
             runtime_contract_version=1,
             checkpoint_codec_version=3,
             capability_feature_digest=DIGEST_F,
+            create_entry_contract_digest=CREATE_ENTRY_CONTRACT_DIGEST,
+            write_policy_digest=WRITE_POLICY_DIGEST,
+            write_cohort_digest=WRITE_COHORT_DIGEST,
+            reconciliation_contract_version=RECONCILIATION_CONTRACT_VERSION,
         )
         repo = AssistantRuntimeRepository(self.db)
         prepared = repo.create_prepared_revision(
@@ -102,6 +112,12 @@ class AssistantChatRunServiceTests(unittest.TestCase):
             "runtime_contract_version": 1,
             "required_checkpoint_codec_version": 3,
             "required_capability_feature_digest": DIGEST_F,
+            "required_create_entry_contract_digest": CREATE_ENTRY_CONTRACT_DIGEST,
+            "required_write_policy_digest": WRITE_POLICY_DIGEST,
+            "required_write_cohort_digest": WRITE_COHORT_DIGEST,
+            "required_reconciliation_contract_version": (
+                RECONCILIATION_CONTRACT_VERSION
+            ),
             "required_app_build_revision": "build-test-1",
             "capability_ledger_mode": "enforced",
             "commit": True,

@@ -1,7 +1,7 @@
-"""Plan 08 Task 8: golden write release gate and ledger admission helpers.
+"""Create-entry release gate and ledger admission helpers.
 
-Configuration rejects golden write without enforced ledger / strong HMAC.
-The golden workflow fixture is create-only; full smart_capture remains denied.
+Configuration rejects create-entry write without enforced ledger / strong HMAC.
+The checked-in workflow fixture is create-only; full smart_capture remains denied.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from app.assistant.policy.contracts import (
     build_golden_write_release,
 )
 from app.assistant.policy.write_admission import GOLDEN_CREATE_ENTRY_DOMAIN_KEY
+from app.assistant.capability_calls.write_guard import WRITE_COHORT_DIGEST
 from app.assistant.workflow.system_assets.registry import (
     SMART_CAPTURE_GOLDEN_CREATE_ASSET_KEY,
     get_system_asset,
@@ -82,15 +83,15 @@ def validate_write_release_settings(settings: Settings | None = None) -> None:
     # Touch properties so callers get ValueError if misconfigured after reload.
     _ = s.assistant_main_agent_write_mode
     _ = s.assistant_capability_ledger_mode
-    if str(s.assistant_main_agent_write_mode) == "golden":
+    if str(s.assistant_main_agent_write_mode) == "create_entry":
         if str(s.assistant_capability_ledger_mode) != "enforced":
-            raise ValueError("golden write requires enforced capability ledger mode")
+            raise ValueError("create_entry write requires enforced capability ledger mode")
         secret = (s.assistant_capability_call_idempotency_secret or "").strip()
         if len(secret.encode("utf-8")) < 32:
-            raise ValueError("golden write requires strong idempotency secret")
+            raise ValueError("create_entry write requires strong idempotency secret")
 
 
-def is_golden_write_eligible(
+def is_create_entry_write_eligible(
     *,
     capability_ledger_mode: str | None,
     write_mode: str | None = None,
@@ -100,15 +101,27 @@ def is_golden_write_eligible(
     """Whether this Run/cohort may use the golden create path."""
     s = settings or get_settings()
     mode = write_mode if write_mode is not None else str(s.assistant_main_agent_write_mode)
-    if mode != "golden":
+    if mode != "create_entry":
         return False
     if str(capability_ledger_mode or "") != "enforced":
         return False
-    configured = (s.assistant_main_agent_write_cohort_digest or "").strip()
-    if configured:
-        if not cohort_digest or cohort_digest != configured:
-            return False
-    return True
+    return str(cohort_digest or "") == WRITE_COHORT_DIGEST
+
+
+def is_golden_write_eligible(
+    *,
+    capability_ledger_mode: str | None,
+    write_mode: str | None = None,
+    cohort_digest: str | None = None,
+    settings: Settings | None = None,
+) -> bool:
+    """Compatibility alias; eligibility itself is no longer environment-owned."""
+    return is_create_entry_write_eligible(
+        capability_ledger_mode=capability_ledger_mode,
+        write_mode=write_mode,
+        cohort_digest=cohort_digest,
+        settings=settings,
+    )
 
 
 def build_checked_in_golden_release(
@@ -227,7 +240,7 @@ def gateway_allows_write(
     golden_domain_key: str = GOLDEN_CREATE_ENTRY_DOMAIN_KEY,
 ) -> bool:
     """Independent Gateway allowlist: only exact golden create_entry when enabled."""
-    if write_mode != "golden" or capability_ledger_mode != "enforced":
+    if write_mode != "create_entry" or capability_ledger_mode != "enforced":
         return False
     return domain_key == golden_domain_key
 
@@ -241,6 +254,7 @@ __all__ = [
     "build_checked_in_golden_release",
     "freeze_capability_ledger_mode_for_run",
     "gateway_allows_write",
+    "is_create_entry_write_eligible",
     "is_golden_write_eligible",
     "load_and_audit_golden_workflow",
     "validate_write_release_settings",

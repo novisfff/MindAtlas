@@ -203,11 +203,12 @@ class ApprovalAuthorizeTests(unittest.TestCase):
         self.db.commit()
         return run, lease, repo, call
 
-    def test_authorize_after_approval_preserves_authorization_digest(self) -> None:
+    def test_legacy_call_only_authorize_fails_closed(self) -> None:
         from app.assistant.capability_calls.approval import (
             authorize_call_after_approval,
             build_approval_binding,
         )
+        from app.assistant.capability_calls.repository import CapabilityCallConflict
 
         run, lease, repo, call = self._seed_awaiting()
         binding = build_approval_binding(
@@ -221,23 +222,19 @@ class ApprovalAuthorizeTests(unittest.TestCase):
             authorization_digest=call.authorization_digest,
             principal_digest=DIGEST_A,
         )
-        authorized = authorize_call_after_approval(
-            repo=repo,
-            call_id=call.id,
-            expected_call_revision=int(call.state_revision),
-            expected_run_revision=1,
-            lease=lease,
-            approval_binding=binding,
-            expected_authorization_digest=DIGEST_A,
-        )
-        self.db.commit()
-        self.assertEqual(authorized.status, "authorized")
-        self.assertEqual(authorized.authorization_digest, DIGEST_A)
-        self.assertEqual(
-            authorized.approval_binding_digest, binding.approval_binding_digest
-        )
-        # No attempt claimed
-        self.assertEqual(authorized.attempt_count, 0)
+        with self.assertRaises(CapabilityCallConflict) as raised:
+            authorize_call_after_approval(
+                repo=repo,
+                call_id=call.id,
+                expected_call_revision=int(call.state_revision),
+                expected_run_revision=1,
+                lease=lease,
+                approval_binding=binding,
+                expected_authorization_digest=DIGEST_A,
+            )
+        self.assertEqual(raised.exception.code, "approval_boundary_required")
+        self.db.refresh(call)
+        self.assertEqual(call.status, "awaiting_approval")
 
     def test_input_drift_rejects_approval(self) -> None:
         from app.assistant.capability_calls.approval import (
@@ -269,21 +266,23 @@ class ApprovalAuthorizeTests(unittest.TestCase):
                 expected_authorization_digest=DIGEST_A,
             )
 
-    def test_reject_closes_without_attempt(self) -> None:
+    def test_legacy_call_only_close_fails_closed(self) -> None:
         from app.assistant.capability_calls.approval import close_non_approved_call
+        from app.assistant.capability_calls.repository import CapabilityCallConflict
 
         run, lease, repo, call = self._seed_awaiting()
-        closed = close_non_approved_call(
-            repo=repo,
-            call_id=call.id,
-            expected_call_revision=int(call.state_revision),
-            expected_run_revision=1,
-            lease=lease,
-            outcome="rejected",
-        )
-        self.db.commit()
-        self.assertEqual(closed.status, "rejected")
-        self.assertEqual(closed.attempt_count, 0)
+        with self.assertRaises(CapabilityCallConflict) as raised:
+            close_non_approved_call(
+                repo=repo,
+                call_id=call.id,
+                expected_call_revision=int(call.state_revision),
+                expected_run_revision=1,
+                lease=lease,
+                outcome="rejected",
+            )
+        self.assertEqual(raised.exception.code, "approval_boundary_required")
+        self.db.refresh(call)
+        self.assertEqual(call.status, "awaiting_approval")
 
 
 if __name__ == "__main__":

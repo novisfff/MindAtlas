@@ -47,7 +47,7 @@ python -m venv .venv
 source .venv/bin/activate
 
 # 安装依赖
-pip install -r requirements.txt
+pip install --require-hashes -r requirements/api-worker.lock
 ```
 
 ### 2. 配置环境变量
@@ -83,9 +83,8 @@ python -m app.lightrag.worker
 附件解析 Worker 使用 Docling 库解析上传的文档（PDF、Office、图片），提取文本后索引到知识图谱。
 
 ```bash
-# Linux CPU-only 环境建议先安装 CPU 版 PyTorch，再安装 Docling 依赖
-pip install "torch==2.7.0" --index-url https://download.pytorch.org/whl/cpu
-pip install -r requirements-docling.txt
+# Parse Worker 的 Docling/OCR/Torch 依赖已经在独立的哈希锁中
+pip install --require-hashes -r requirements/parse-worker.lock
 
 # 在 .env 中配置（参考 .env.example）
 DOCLING_WORKER_ENABLED=true

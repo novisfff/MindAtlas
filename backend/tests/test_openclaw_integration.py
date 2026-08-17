@@ -3,8 +3,6 @@ from __future__ import annotations
 import json
 import os
 import unittest
-from datetime import datetime, timezone
-from uuid import uuid4
 from unittest.mock import AsyncMock, patch
 
 from tests._bootstrap import bootstrap_backend_imports, reset_caches
@@ -163,11 +161,6 @@ class OpenClawIntegrationTests(unittest.TestCase):
         workflow = next(item for item in workflows if item.name == "system_weekly_report__workflow")
         return str(workflow.id), workflow.name
 
-    def _get_openclaw_capture_workflow(self) -> tuple[str, str]:
-        workflows = AssistantConfigService(self.db).list_workflows(include_disabled=True)
-        workflow = next(item for item in workflows if item.name == "system_context_capture__workflow")
-        return str(workflow.id), workflow.name
-
     def _get_periodic_review_core_workflow(self) -> tuple[str, str]:
         workflows = AssistantConfigService(self.db).list_workflows(include_disabled=True)
         workflow = next(item for item in workflows if item.name == "system_periodic_review_core__workflow")
@@ -180,39 +173,26 @@ class OpenClawIntegrationTests(unittest.TestCase):
 
         self.assertFalse(data["enabled"])
         self.assertFalse(data["secretConfigured"])
-        self.assertEqual(len(data["catalogItems"]), 6)
+        self.assertEqual(len(data["catalogItems"]), 4)
         by_key = {item["capabilityKey"]: item for item in data["catalogItems"]}
         self.assertEqual(
             set(by_key),
             {
-                "submit_context_capture",
                 "search_entries",
                 "get_entry",
-                "create_relation",
                 "query_knowledge_graph",
                 "generate_periodic_review",
             },
         )
         self.assertTrue(all(item["isSystemItem"] for item in data["catalogItems"]))
-        self.assertEqual(by_key["submit_context_capture"]["sourceType"], "workflow")
-        self.assertIsNotNone(by_key["submit_context_capture"]["workflowId"])
-        self.assertTrue(by_key["submit_context_capture"]["enabled"])
         self.assertEqual(by_key["search_entries"]["sourceToolName"], "search_entries")
         self.assertEqual(by_key["get_entry"]["sourceToolName"], "get_entry_detail")
-        self.assertEqual(by_key["create_relation"]["sourceToolName"], "create_relation")
         self.assertEqual(by_key["query_knowledge_graph"]["sourceToolName"], "query_knowledge_graph")
         self.assertEqual(by_key["generate_periodic_review"]["sourceType"], "workflow")
         self.assertIsNotNone(by_key["generate_periodic_review"]["workflowId"])
         self.assertIsNone(by_key["generate_periodic_review"]["sourceToolName"])
-        capture_schema = by_key["submit_context_capture"]["inputSchema"]
-        self.assertEqual(set(capture_schema["properties"]), {"context"})
-        self.assertEqual(capture_schema["required"], ["context"])
-        self.assertFalse(capture_schema["additionalProperties"])
-        self.assertIn("context", by_key["submit_context_capture"]["inputSummary"])
-        self.assertEqual(by_key["submit_context_capture"]["sourceName"], "智能上下文入库工作流")
-        workflow_id, workflow_name = self._get_openclaw_capture_workflow()
-        self.assertEqual(workflow_name, "system_context_capture__workflow")
-        self.assertEqual(by_key["submit_context_capture"]["workflowId"], workflow_id)
+        self.assertNotIn("submit_context_capture", by_key)
+        self.assertNotIn("create_relation", by_key)
 
         review_schema = by_key["generate_periodic_review"]["inputSchema"]
         self.assertEqual(set(review_schema["properties"]), {"focus", "period", "startDate", "endDate"})
@@ -227,12 +207,12 @@ class OpenClawIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200, response.text)
         items = response.json()["data"]["items"]
-        capture_item = next(item for item in items if item["sourceName"] == "智能上下文入库工作流")
-        self.assertEqual(capture_item["title"], "智能上下文入库工作流")
-        self.assertNotEqual(capture_item["sourceName"], "system_context_capture__workflow")
-        self.assertTrue(capture_item["isSystem"])
+        review_item = next(item for item in items if item["sourceName"] == "周期回顾核心工作流")
+        self.assertEqual(review_item["title"], "周期回顾核心工作流")
+        self.assertNotEqual(review_item["sourceName"], "system_periodic_review_core__workflow")
+        self.assertTrue(review_item["isSystem"])
 
-    def test_submit_context_capture_is_marked_unavailable_without_entry_types(self) -> None:
+    def test_read_entry_capabilities_are_marked_unavailable_without_entry_types(self) -> None:
         secret = self._rotate_secret()
         self._enable_integration(secret)
 
@@ -242,10 +222,11 @@ class OpenClawIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200, response.text)
         by_key = {item["capabilityKey"]: item for item in response.json()["data"]["capabilities"]}
-        self.assertFalse(by_key["submit_context_capture"]["available"])
         self.assertFalse(by_key["search_entries"]["available"])
         self.assertFalse(by_key["get_entry"]["available"])
-        self.assertIn("记录类型", by_key["submit_context_capture"]["availabilityReason"])
+        self.assertNotIn("submit_context_capture", by_key)
+        self.assertNotIn("create_relation", by_key)
+        self.assertIn("记录类型", by_key["search_entries"]["availabilityReason"])
 
     def test_legacy_fixed_capability_flags_migrate_into_system_items(self) -> None:
         self.db.add(
@@ -267,7 +248,8 @@ class OpenClawIntegrationTests(unittest.TestCase):
         items = response.json()["data"]["catalogItems"]
         by_key = {item["capabilityKey"]: item for item in items}
         self.assertFalse(by_key["search_entries"]["enabled"])
-        self.assertTrue(by_key["submit_context_capture"]["enabled"])
+        self.assertNotIn("submit_context_capture", by_key)
+        self.assertNotIn("create_relation", by_key)
         self.assertNotIn("capture_entry", by_key)
 
     def test_obsolete_system_capture_item_is_removed_during_seed(self) -> None:
@@ -295,7 +277,8 @@ class OpenClawIntegrationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         items = response.json()["data"]["catalogItems"]
         by_key = {item["capabilityKey"]: item for item in items}
-        self.assertIn("submit_context_capture", by_key)
+        self.assertNotIn("submit_context_capture", by_key)
+        self.assertNotIn("create_relation", by_key)
         self.assertNotIn("capture_entry", by_key)
         self.assertIsNone(
             self.db.query(OpenClawCapabilityItem)
@@ -339,7 +322,7 @@ class OpenClawIntegrationTests(unittest.TestCase):
         self.assertEqual(item["sourceToolName"], "search_entries")
         self.assertTrue(item["schemaEditable"])
 
-    def test_catalog_sources_include_update_entry_system_tool(self) -> None:
+    def test_catalog_sources_exclude_unsupported_system_write_tools(self) -> None:
         self._initialize_system()
         response = self.client.get(
             "/api/system-settings/openclaw-integration/catalog-sources",
@@ -352,8 +335,25 @@ class OpenClawIntegrationTests(unittest.TestCase):
             for item in items
             if item.get("sourceToolName")
         }
-        self.assertIn("update_entry", by_source_tool_name)
-        self.assertTrue(by_source_tool_name["update_entry"]["bindable"])
+        self.assertIn("search_entries", by_source_tool_name)
+        self.assertNotIn("create_entry", by_source_tool_name)
+        self.assertNotIn("update_entry", by_source_tool_name)
+        self.assertNotIn("create_relation", by_source_tool_name)
+
+        create_response = self.client.post(
+            "/api/system-settings/openclaw-integration/catalog-items",
+            json={
+                "sourceType": "tool",
+                "sourceToolName": "create_entry",
+                "toolName": "mindatlas_create_entry",
+                "title": "Create Entry",
+                "description": "Must not become an OpenClaw capability.",
+                "enabled": True,
+            },
+        )
+        self.assertEqual(create_response.status_code, 422, create_response.text)
+        self.assertEqual(create_response.json()["code"], 42262)
+        self.assertIn("OpenClaw", create_response.json()["message"])
 
     def test_tool_sources_and_catalog_items_reuse_system_tool_display_metadata(self) -> None:
         response = self.client.get(
@@ -440,18 +440,22 @@ class OpenClawIntegrationTests(unittest.TestCase):
         self.assertEqual(authorized.status_code, 200)
         capabilities = authorized.json()["data"]["capabilities"]
         capability_keys = {item["capabilityKey"] for item in capabilities}
-        self.assertIn("submit_context_capture", capability_keys)
-        self.assertNotIn("capture_entry", capability_keys)
+        self.assertEqual(
+            capability_keys,
+            {"search_entries", "get_entry", "query_knowledge_graph", "generate_periodic_review"},
+        )
+        self.assertNotIn("submit_context_capture", capability_keys)
+        self.assertNotIn("create_relation", capability_keys)
 
-    def test_existing_custom_item_bound_to_retired_capture_source_is_hidden_from_runtime(self) -> None:
+    def test_existing_custom_item_bound_to_unsupported_system_write_is_hidden_from_runtime(self) -> None:
         self._initialize_system()
         legacy_item = OpenClawCapabilityItem(
-            capability_key="legacy_capture_entry",
-            tool_name="mindatlas_legacy_capture_entry",
-            title="Legacy Capture Entry",
-            description="Legacy field-level capture",
+            capability_key="unsupported_create_entry",
+            tool_name="mindatlas_unsupported_create_entry",
+            title="Unsupported Create Entry",
+            description="A pre-existing unsupported system write binding.",
             source_type="tool",
-            source_tool_name="openclaw_capture_entry",
+            source_tool_name="create_entry",
             enabled=True,
             is_system_item=False,
             input_schema_json={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
@@ -468,11 +472,11 @@ class OpenClawIntegrationTests(unittest.TestCase):
         catalog_item = next(
             item
             for item in settings.json()["data"]["catalogItems"]
-            if item["capabilityKey"] == "legacy_capture_entry"
+            if item["capabilityKey"] == "unsupported_create_entry"
         )
         self.assertTrue(catalog_item["retired"])
         self.assertFalse(catalog_item["available"])
-        self.assertIn("退役", catalog_item["retirementReason"])
+        self.assertIn("OpenClaw", catalog_item["retirementReason"])
 
         secret = self._rotate_secret()
         self._enable_integration(secret)
@@ -482,18 +486,18 @@ class OpenClawIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(metadata.status_code, 200, metadata.text)
         self.assertNotIn(
-            "legacy_capture_entry",
+            "unsupported_create_entry",
             {item["capabilityKey"] for item in metadata.json()["data"]["capabilities"]},
         )
 
         execute = self.client.post(
-            "/api/integrations/openclaw/capabilities/legacy_capture_entry/execute",
+            "/api/integrations/openclaw/capabilities/unsupported_create_entry/execute",
             headers=self._auth_headers(secret),
             json={"title": "hello"},
         )
         self.assertEqual(execute.status_code, 403, execute.text)
         self.assertEqual(execute.json()["code"], 40362)
-        self.assertIn("退役", execute.json()["message"])
+        self.assertIn("OpenClaw", execute.json()["message"])
 
     def test_disabled_catalog_item_is_hidden_from_runtime_metadata(self) -> None:
         self._initialize_system()
@@ -672,60 +676,35 @@ class OpenClawIntegrationTests(unittest.TestCase):
     def test_system_item_registry_uses_routing_oriented_metadata(self) -> None:
         definitions = {item.key: item for item in list_openclaw_system_item_definitions(locale="en")}
 
-        self.assertEqual(definitions["submit_context_capture"].tool_name, "mindatlas_submit_context_capture")
-        self.assertEqual(definitions["submit_context_capture"].workflow_asset_key, "context_capture")
-        self.assertIn("candidate record or record-update context", definitions["submit_context_capture"].description)
-        self.assertIn("Provide only `context`", definitions["submit_context_capture"].input_summary or "")
+        self.assertEqual(
+            set(definitions),
+            {"search_entries", "get_entry", "query_knowledge_graph", "generate_periodic_review"},
+        )
         self.assertIn("recent and time-bounded lookups", definitions["search_entries"].description)
         self.assertIn("entry ID is known", definitions["get_entry"].description)
-        self.assertIn("connect these items", definitions["create_relation"].description)
         self.assertIn("patterns", definitions["query_knowledge_graph"].description)
         self.assertEqual(definitions["generate_periodic_review"].tool_name, "mindatlas_generate_periodic_review")
         self.assertEqual(definitions["generate_periodic_review"].workflow_asset_key, "periodic_review_core")
         self.assertIn("last week", definitions["generate_periodic_review"].description)
         self.assertIn("tag distribution", definitions["generate_periodic_review"].description)
 
-    def test_submit_context_capture_runtime_schema_is_thin_context_only(self) -> None:
-        self._initialize_system(locale="en")
-        secret = self._rotate_secret()
-        self._enable_integration(secret)
-
-        response = self.client.get(
-            "/api/integrations/openclaw/capabilities",
-            headers=self._auth_headers(secret),
-        )
-        self.assertEqual(response.status_code, 200, response.text)
-        capture_item = next(
-            item for item in response.json()["data"]["capabilities"] if item["capabilityKey"] == "submit_context_capture"
-        )
-
-        self.assertEqual(set(capture_item["inputSchema"]["properties"]), {"context"})
-        self.assertEqual(capture_item["inputSchema"]["required"], ["context"])
-        self.assertFalse(capture_item["inputSchema"]["additionalProperties"])
-        self.assertIn("Provide only `context`", capture_item["inputSummary"])
-
-    def test_submit_context_capture_rejects_legacy_field_level_payload(self) -> None:
+    def test_retired_write_capability_routes_are_not_exposed(self) -> None:
         self._initialize_system()
         secret = self._rotate_secret()
         self._enable_integration(secret)
 
-        response = self.client.post(
-            "/api/integrations/openclaw/capabilities/submit_context_capture/execute",
-            headers=self._auth_headers(secret),
-            json={
-                "context": "完成 OpenClaw 能力梳理并准备收敛到 workflow。",
-                "intent": "record",
-                "source": "openclaw",
-            },
-        )
-
-        self.assertEqual(response.status_code, 422, response.text)
-        self.assertEqual(response.json()["code"], 42261)
-        self.assertIn("unknown field: intent", response.json()["message"])
+        for capability_key in ("submit_context_capture", "create_relation", "update_entry"):
+            with self.subTest(capability_key=capability_key):
+                response = self.client.post(
+                    f"/api/integrations/openclaw/capabilities/{capability_key}/execute",
+                    headers=self._auth_headers(secret),
+                    json={},
+                )
+                self.assertEqual(response.status_code, 404, response.text)
+                self.assertEqual(response.json()["code"], 40461)
 
     def test_runtime_capability_schema_exposes_dynamic_enums_and_guidance_metadata(self) -> None:
         from app.entry_type.models import EntryType  # noqa: E402
-        from app.relation.models import RelationType  # noqa: E402
 
         self._initialize_system(locale="en")
         secret = self._rotate_secret()
@@ -738,10 +717,8 @@ class OpenClawIntegrationTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200, response.text)
         by_key = {item["capabilityKey"]: item for item in response.json()["data"]["capabilities"]}
-
-        capture_item = by_key["submit_context_capture"]
-        capture_properties = capture_item["inputSchema"]["properties"]
-        self.assertIn("candidate record context", capture_properties["context"]["description"])
+        self.assertNotIn("submit_context_capture", by_key)
+        self.assertNotIn("create_relation", by_key)
 
         enabled_entry_type_codes = [
             row.code
@@ -764,15 +741,6 @@ class OpenClawIntegrationTests(unittest.TestCase):
         get_entry_properties = get_entry_item["inputSchema"]["properties"]
         self.assertIn("canonical input", get_entry_properties["entryId"]["description"])
         self.assertEqual(get_entry_properties["entryId"]["examples"], ["123e4567-e89b-12d3-a456-426614174000"])
-
-        enabled_relation_type_codes = [
-            row.code
-            for row in self.db.query(RelationType).filter(RelationType.enabled.is_(True)).order_by(RelationType.code.asc()).all()
-        ]
-        relation_item = by_key["create_relation"]
-        relation_properties = relation_item["inputSchema"]["properties"]
-        self.assertEqual(relation_properties["relationType"]["enum"], enabled_relation_type_codes)
-        self.assertIn("canonical contract", relation_properties["relationType"]["description"])
 
         graph_item = by_key["query_knowledge_graph"]
         graph_properties = graph_item["inputSchema"]["properties"]
@@ -1035,105 +1003,6 @@ class OpenClawIntegrationTests(unittest.TestCase):
         self.assertEqual(result["summary"], "周报摘要")
         self.assertEqual(result["suggestions"], ["继续推进"])
 
-    def test_system_capture_workflow_preset_executes_thin_context(self) -> None:
-        self._initialize_system()
-        secret = self._rotate_secret()
-        self._enable_integration(secret)
-
-        metadata = self.client.get(
-            "/api/integrations/openclaw/capabilities",
-            headers=self._auth_headers(secret),
-        )
-        self.assertEqual(metadata.status_code, 200, metadata.text)
-        capture_item = next(
-            item for item in metadata.json()["data"]["capabilities"] if item["capabilityKey"] == "submit_context_capture"
-        )
-        self.assertEqual(capture_item["sourceType"], "workflow")
-        captured_runtime_context: dict[str, object] = {}
-
-        class Engine:
-            def execute(self, *args, **kwargs):  # noqa: ANN002, ANN003
-                runtime_context = kwargs["runtime_context"]
-                captured_runtime_context.update(runtime_context)
-                return iter(
-                    [
-                        json.dumps(
-                            {
-                                "status": "created",
-                                "entryId": "00000000-0000-0000-0000-000000000001",
-                                "entryTitle": "项目复盘",
-                                "entryTypeCode": "KNOWLEDGE",
-                                "entryTypeName": "知识",
-                                "summary": "记录已成功沉淀。",
-                                "tagNames": ["openclaw", "mindatlas"],
-                                "timeMode": "POINT",
-                                "timeAt": "2026-03-31",
-                                "timeFrom": None,
-                                "timeTo": None,
-                                "createdAt": "2026-03-31T09:00:00+00:00",
-                                "updatedAt": "2026-03-31T09:05:00+00:00",
-                            },
-                            ensure_ascii=False,
-                        )
-                    ]
-                )
-
-        with self._patch_engines(Engine()):
-            response = self.client.post(
-                "/api/integrations/openclaw/capabilities/submit_context_capture/execute",
-                headers=self._auth_headers(secret),
-                json={
-                    "context": "今天完成了 OpenClaw 接入方案梳理，并确认后续要收口成 workflow preset。",
-                },
-            )
-
-        # Shared-only: code_executor closures classify unknown and fail closed with 40961.
-        self.assertEqual(response.status_code, 409, response.text)
-        self.assertEqual(response.json()["code"], 40961)
-
-    def test_system_capture_workflow_accepts_merged_result_shape(self) -> None:
-        self._initialize_system()
-        secret = self._rotate_secret()
-        self._enable_integration(secret)
-
-        class Engine:
-            def execute(self, *args, **kwargs):  # noqa: ANN002, ANN003
-                return iter(
-                    [
-                        json.dumps(
-                            {
-                                "status": "merged",
-                                "entryId": "00000000-0000-0000-0000-000000000002",
-                                "entryTitle": "OpenClaw 接入记录",
-                                "entryTypeCode": "KNOWLEDGE",
-                                "entryTypeName": "知识",
-                                "summary": "已有记录已吸收新的 OpenClaw 上下文。",
-                                "tagNames": ["openclaw", "mindatlas"],
-                                "timeMode": "POINT",
-                                "timeAt": "2026-04-03",
-                                "timeFrom": None,
-                                "timeTo": None,
-                                "createdAt": "2026-04-02T09:00:00+00:00",
-                                "updatedAt": "2026-04-03T09:00:00+00:00",
-                            },
-                            ensure_ascii=False,
-                        )
-                    ]
-                )
-
-        with self._patch_engines(Engine()):
-            response = self.client.post(
-                "/api/integrations/openclaw/capabilities/submit_context_capture/execute",
-                headers=self._auth_headers(secret),
-                json={
-                    "context": "今天补齐了 OpenClaw stream-only 兼容，并确认相关能力已验证完成。",
-                },
-            )
-
-        # Shared-only: code_executor closures classify unknown and fail closed with 40961.
-        self.assertEqual(response.status_code, 409, response.text)
-        self.assertEqual(response.json()["code"], 40961)
-
     def test_agent_catalog_item_executes_published_agent(self) -> None:
         self._initialize_system()
         agent = AssistantConfigService(self.db).create_agent_profile(
@@ -1244,44 +1113,6 @@ class OpenClawIntegrationTests(unittest.TestCase):
         ).json()["data"]["capabilities"]
         query_item = next(item for item in catalog if item["capabilityKey"] == "query_knowledge_graph")
         self.assertEqual(query_item["sourceType"], "tool")
-
-    def test_create_relation_returns_404_when_target_entry_missing(self) -> None:
-        from app.entry.models import Entry, TimeMode  # noqa: E402
-        from app.entry_type.models import EntryType  # noqa: E402
-
-        self._initialize_system()
-
-        entry_type = self.db.query(EntryType).filter(EntryType.code == "KNOWLEDGE").first()
-        self.assertIsNotNone(entry_type)
-
-        source = Entry(
-            title="Source Entry",
-            content="content",
-            type_id=entry_type.id,
-            time_mode=TimeMode.POINT,
-            time_at=datetime.now(timezone.utc),
-        )
-        self.db.add(source)
-        self.db.commit()
-
-        secret = self._rotate_secret()
-        self._enable_integration(secret)
-
-        missing_target_id = uuid4()
-        response = self.client.post(
-            "/api/integrations/openclaw/capabilities/create_relation/execute",
-            headers=self._auth_headers(secret),
-            json={
-                "sourceEntryId": str(source.id),
-                "targetEntryId": str(missing_target_id),
-                "relationType": "RELATES_TO",
-            },
-        )
-
-        self.assertEqual(response.status_code, 404, response.text)
-        self.assertEqual(response.json()["code"], 40400)
-        self.assertEqual(response.json()["message"], f"Target entry not found: {missing_target_id}")
-
 
 if __name__ == "__main__":
     unittest.main()
